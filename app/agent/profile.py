@@ -7,6 +7,9 @@ class UnsupportedWeixinVersion(RuntimeError):
     """Raised when no verified automation profile exists for a Weixin build."""
 
 
+SUPPORTED_WEIXIN_VERSION = "4.1.13.65"
+
+
 @dataclass(frozen=True)
 class WeixinProfile:
     version: str
@@ -23,8 +26,8 @@ class WeixinProfile:
 
 
 _PROFILES = {
-    "4.1.13.65": WeixinProfile(
-        version="4.1.13.65",
+    SUPPORTED_WEIXIN_VERSION: WeixinProfile(
+        version=SUPPORTED_WEIXIN_VERSION,
         gate_rva=0x0AE2B0C8,
         main_root_class="mmui::MainWindow",
         search_edit_name="搜索",
@@ -46,4 +49,3 @@ def get_weixin_profile(version: str) -> WeixinProfile:
         raise UnsupportedWeixinVersion(
             f"unsupported Weixin version: {version}"
         ) from exc
-
