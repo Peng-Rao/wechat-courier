@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .actions import VerifiedActions
 from .gate import NativeGateBackend, WeixinAccessibilitySession
 from .profile import UnsupportedWeixinVersion, get_weixin_profile
+from .uia_events import subscribe_uia_events
 from .waiters import DeadlineWaiter
 from .workflows import RiskControlError, normalize_identity
 
@@ -124,9 +126,11 @@ class NativeWeixinDriver:
         *,
         gate_backend: Any | None = None,
         timeout: float = 5.0,
+        sleep=time.sleep,
     ):
         self._gate_backend = gate_backend or NativeGateBackend()
         self._timeout = timeout
+        self._sleep = sleep
         self._waiter = DeadlineWaiter(0.2)
         self._session: WeixinAccessibilitySession | None = None
         self._uia = None
@@ -140,12 +144,40 @@ class NativeWeixinDriver:
         self._friend_account = ""
         self._uia_initialized = False
         self._wake_event = threading.Event()
+        self._event_subscription = None
         self._actions = VerifiedActions(
             waiter=self._waiter,
             click_fallback=self._click_bounds,
             replace_text_fallback=self._replace_text,
             timeout=timeout,
         )
+
+    def restart_wechat(self, timeout: int, emit) -> dict[str, Any]:
+        inspection = self.inspect()
+        if not inspection.get("connected") or not inspection.get("pid"):
+            raise RuntimeError("无法定位要重启的微信进程")
+        pid = int(inspection["pid"])
+        executable = self._gate_backend.process_path(pid)
+        self.close()
+        self._gate_backend.terminate_process(pid)
+        self._gate_backend.start_process(executable)
+
+        deadline = time.monotonic() + max(30, int(timeout))
+        while time.monotonic() < deadline:
+            current = self.inspect()
+            if current.get("connected") and current.get("supported"):
+                return current
+            if current.get("connected") and current.get("version"):
+                raise RuntimeError(
+                    f"微信已启动，但版本 {current['version']} 未通过安全门禁"
+                )
+            remaining = max(0, int(deadline - time.monotonic()))
+            emit(
+                "agent.status",
+                {"status": "waiting_login", "remaining": remaining},
+            )
+            self._sleep(1.0)
+        raise TimeoutError("等待微信重新登录超时")
 
     def inspect(self) -> dict[str, Any]:
         try:
@@ -202,6 +234,12 @@ class NativeWeixinDriver:
                 raise RuntimeError("无法从微信句柄建立 UIA 根控件")
             if not self._waiter.wait(self._tree_materialized, self._timeout):
                 raise RuntimeError("微信 UIA 控件树未就绪，请重启微信后重试")
+            try:
+                self._event_subscription = subscribe_uia_events(
+                    self._uia, self._root, self._wake_event
+                )
+            except Exception:
+                self._event_subscription = None
         except Exception:
             self.close()
             raise
@@ -727,6 +765,10 @@ class NativeWeixinDriver:
         return None
 
     def close(self) -> None:
+        subscription = self._event_subscription
+        self._event_subscription = None
+        if subscription is not None:
+            subscription.close()
         session = self._session
         self._session = None
         if session is not None:

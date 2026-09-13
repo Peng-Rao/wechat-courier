@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import struct
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ PROCESS_VM_OPERATION = 0x0008
 PROCESS_VM_READ = 0x0010
 PROCESS_VM_WRITE = 0x0020
 PROCESS_QUERY_INFORMATION = 0x0400
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_TERMINATE = 0x0001
+SYNCHRONIZE = 0x00100000
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
 IMAGE_SCN_MEM_WRITE = 0x80000000
@@ -147,6 +151,45 @@ class NativeGateBackend:
         if not handle:
             raise RuntimeError(f"OpenProcess failed for Weixin PID {pid}")
         return handle
+
+    def process_path(self, pid: int) -> str:
+        self._require_windows()
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if not handle:
+            raise RuntimeError(f"cannot open Weixin PID {pid} to read its path")
+        try:
+            capacity = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(capacity.value)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(capacity)
+            )
+            if not ok or not buffer.value:
+                raise RuntimeError("cannot resolve the Weixin executable path")
+            return buffer.value
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    def terminate_process(self, pid: int) -> None:
+        self._require_windows()
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_TERMINATE | SYNCHRONIZE, False, pid
+        )
+        if not handle:
+            raise RuntimeError(f"cannot open Weixin PID {pid} for restart")
+        try:
+            if not ctypes.windll.kernel32.TerminateProcess(handle, 0):
+                raise RuntimeError("failed to terminate Weixin for recovery")
+            ctypes.windll.kernel32.WaitForSingleObject(handle, 5_000)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def start_process(path: str) -> None:
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Weixin executable no longer exists: {path}")
+        subprocess.Popen([path], close_fds=True)
 
     @staticmethod
     def close_process(handle) -> None:

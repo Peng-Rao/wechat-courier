@@ -7,6 +7,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from .contracts import TaskRequest
+from .journal import SafetyJournal
 from .profile import SUPPORTED_WEIXIN_VERSION
 
 
@@ -61,6 +62,8 @@ class _UnavailableEngine:
 class _AutomationRunner(QObject):
     notice = Signal(str, object)
     finished = Signal(str, object)
+    recoveryFinished = Signal(object)
+    inspectionFinished = Signal(object)
 
     def __init__(self, engine_factory: Callable[[], Any]):
         super().__init__()
@@ -79,7 +82,10 @@ class _AutomationRunner(QObject):
         except Exception as exc:
             envelope["error"] = exc
         finally:
-            envelope["event"].set()
+            event = envelope.get("event")
+            if event is not None:
+                event.set()
+            self.inspectionFinished.emit(envelope)
 
     @Slot(object)
     def run_task(self, envelope: dict[str, Any]) -> None:
@@ -98,12 +104,24 @@ class _AutomationRunner(QObject):
             }
         self.finished.emit(request.task_id, result)
 
+    @Slot(object)
+    def recover_wechat(self, envelope: dict[str, Any]) -> None:
+        try:
+            result = self._get_engine().recover_wechat(
+                envelope["timeout"], self.notice.emit
+            )
+            envelope["result"] = dict(result or {})
+        except Exception as exc:
+            envelope["error"] = str(exc)
+        self.recoveryFinished.emit(envelope)
+
 
 class AgentRuntime(QObject):
     """Owns the COM/UIA thread while keeping the pipe service responsive."""
 
     inspectRequested = Signal(object)
     taskRequested = Signal(object)
+    recoveryRequested = Signal(object)
     shutdownRequested = Signal()
 
     def __init__(
@@ -111,25 +129,38 @@ class AgentRuntime(QObject):
         *,
         engine_factory: Callable[[], Any] | None = None,
         inspect_timeout_ms: int = 5_000,
+        action_timeout_ms: int = 30_000,
+        journal: SafetyJournal | None = None,
+        fatal_exit: Callable[[int], Any] = os._exit,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
+        self._journal = journal or SafetyJournal.from_environment()
         if engine_factory is None:
             from .workflows import WeixinWorkflowEngine
 
-            engine_factory = WeixinWorkflowEngine
+            engine_factory = lambda: WeixinWorkflowEngine(journal=self._journal)
         self._notification_sink: Callable[[str, dict[str, Any]], Any] | None = None
         self._inspect_timeout = inspect_timeout_ms / 1000.0
         self._active_task_id = ""
+        self._inspection_pending = False
         self._control: TaskControl | None = None
+        self._fatal_exit = fatal_exit
+        self._action_watchdog = QTimer(self)
+        self._action_watchdog.setSingleShot(True)
+        self._action_watchdog.setInterval(max(1_000, int(action_timeout_ms)))
+        self._action_watchdog.timeout.connect(self._on_action_timeout)
         self._thread = QThread(self)
         self._thread.setObjectName("wechat-automation")
         self._runner = _AutomationRunner(engine_factory)
         self._runner.moveToThread(self._thread)
         self.inspectRequested.connect(self._runner.inspect)
         self.taskRequested.connect(self._runner.run_task)
+        self.recoveryRequested.connect(self._runner.recover_wechat)
         self._runner.notice.connect(self._forward_notice)
         self._runner.finished.connect(self._task_finished)
+        self._runner.recoveryFinished.connect(self._recovery_finished)
+        self._runner.inspectionFinished.connect(self._inspection_finished)
         self._thread.start()
 
     @property
@@ -147,6 +178,7 @@ class AgentRuntime(QObject):
             "protocolVersion": 1,
             "pid": os.getpid(),
             "supportedWeixinVersions": [SUPPORTED_WEIXIN_VERSION],
+            "recovery": self._journal.load(),
         }
 
     def inspect(self) -> dict[str, Any]:
@@ -158,14 +190,25 @@ class AgentRuntime(QObject):
             raise envelope["error"]
         return dict(envelope["result"])
 
+    def inspect_async(
+        self,
+        callback: Callable[[dict[str, Any] | None, Exception | None], Any],
+    ) -> None:
+        self._inspection_pending = True
+        self._action_watchdog.start()
+        self.inspectRequested.emit({"callback": callback})
+
     def start_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._active_task_id:
             raise ValueError(f"task {self._active_task_id} is already active")
+        if self._journal.load() is not None:
+            raise ValueError("recovery acknowledgement is required before task start")
         request = TaskRequest.from_payload(payload)
         if not request.items:
             raise ValueError("task must contain at least one item")
         self._active_task_id = request.task_id
         self._control = TaskControl()
+        self._action_watchdog.start()
         self.taskRequested.emit({"request": request, "control": self._control})
         self._forward_notice(
             "agent.status",
@@ -192,7 +235,15 @@ class AgentRuntime(QObject):
         return {"accepted": True, "pendingSafePoint": True}
 
     def approve_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"accepted": True, "decision": payload.get("decision", "")}
+        decision = str(payload.get("decision", ""))
+        if decision not in {"mark_unknown", "discard", "stop", "restart_wechat"}:
+            raise ValueError("invalid recovery decision")
+        if decision == "restart_wechat":
+            timeout = max(30, min(300, int(payload.get("loginTimeout", 90))))
+            self.recoveryRequested.emit({"timeout": timeout})
+        else:
+            self._journal.clear()
+        return {"accepted": True, "decision": decision}
 
     def shutdown(self) -> dict[str, Any]:
         if self._control is not None:
@@ -202,6 +253,8 @@ class AgentRuntime(QObject):
 
     @Slot(str, object)
     def _forward_notice(self, method: str, params: dict[str, Any]) -> None:
+        if self._active_task_id:
+            self._action_watchdog.start()
         if self._notification_sink is not None:
             self._notification_sink(method, params)
 
@@ -211,12 +264,50 @@ class AgentRuntime(QObject):
             return
         self._active_task_id = ""
         self._control = None
+        self._action_watchdog.stop()
         payload = dict(result)
         payload["taskId"] = task_id
         self._forward_notice("task.finished", payload)
         self._forward_notice("agent.status", {"status": "ready", "taskId": ""})
 
+    @Slot(object)
+    def _recovery_finished(self, envelope: dict[str, Any]) -> None:
+        if "error" in envelope:
+            self._forward_notice(
+                "agent.status",
+                {"status": "recovery_failed", "detail": envelope["error"]},
+            )
+            return
+        payload = dict(envelope.get("result") or {})
+        payload["status"] = "recovered"
+        self._forward_notice("agent.status", payload)
+
+    @Slot(object)
+    def _inspection_finished(self, envelope: dict[str, Any]) -> None:
+        callback = envelope.get("callback")
+        if callback is None:
+            return
+        self._inspection_pending = False
+        if not self._active_task_id:
+            self._action_watchdog.stop()
+        error = envelope.get("error")
+        result = None if error is not None else dict(envelope.get("result") or {})
+        callback(result, error)
+
+    @Slot()
+    def _on_action_timeout(self) -> None:
+        self._forward_notice(
+            "agent.status",
+            {
+                "status": "fatal_timeout",
+                "taskId": self._active_task_id,
+                "detail": "UIA action exceeded its deadline",
+            },
+        )
+        self._fatal_exit(70)
+
     def close(self, timeout_ms: int = 2_000) -> None:
+        self._action_watchdog.stop()
         if self._control is not None:
             self._control.request_stop()
         self._thread.quit()

@@ -85,6 +85,13 @@ class AgentServer(QObject):
         try:
             messages = self._decoder.feed(bytes(self._socket.readAll()))
             for message in messages:
+                if (
+                    self.authenticated
+                    and message.get("method") == "wechat.inspect"
+                    and hasattr(self.runtime, "inspect_async")
+                ):
+                    self._start_inspection(message.get("id"))
+                    continue
                 response = self._router.handle(message)
                 if response is not None:
                     self._write(response)
@@ -97,6 +104,24 @@ class AgentServer(QObject):
                     "error": {"code": -32700, "message": str(exc)},
                 }
             )
+
+    def _start_inspection(self, request_id) -> None:
+        def complete(result, error) -> None:
+            if error is not None:
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32000, "message": str(error)},
+                    }
+                )
+                return
+            if request_id is not None:
+                self._write(
+                    {"jsonrpc": "2.0", "id": request_id, "result": result or {}}
+                )
+
+        self.runtime.inspect_async(complete)
 
     def _write(self, message: dict[str, Any]) -> bool:
         if self._socket is None:

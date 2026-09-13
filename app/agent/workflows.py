@@ -37,6 +37,7 @@ class WeixinWorkflowEngine:
         *,
         driver_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        journal=None,
     ):
         if driver_factory is None:
             from .native_driver import NativeWeixinDriver
@@ -44,11 +45,21 @@ class WeixinWorkflowEngine:
             driver_factory = NativeWeixinDriver
         self._driver_factory = driver_factory
         self._sleep = sleep
+        self._journal = journal
 
     def inspect(self) -> dict[str, Any]:
         driver = self._driver_factory()
         try:
             return dict(driver.inspect())
+        finally:
+            close = getattr(driver, "close", None)
+            if close is not None:
+                close()
+
+    def recover_wechat(self, timeout: int, emit) -> dict[str, Any]:
+        driver = self._driver_factory()
+        try:
+            return dict(driver.restart_wechat(timeout, emit))
         finally:
             close = getattr(driver, "close", None)
             if close is not None:
@@ -132,7 +143,7 @@ class WeixinWorkflowEngine:
                     break
                 if index + 1 < len(request.items):
                     self._safe_point(control)
-                    self._sleep_interval(request)
+                    self._sleep_interval(request, control, emit)
         finally:
             close = getattr(driver, "close", None)
             if close is not None:
@@ -157,12 +168,66 @@ class WeixinWorkflowEngine:
         if not control.wait_if_paused():
             raise StopRequested()
 
-    def _sleep_interval(self, request: TaskRequest) -> None:
+    def _sleep_interval(self, request: TaskRequest, control, emit) -> None:
         minimum = request.options.interval_min
         maximum = request.options.interval_max
         if maximum <= 0:
             return
-        self._sleep(random.uniform(minimum, maximum))
+        remaining = random.uniform(minimum, maximum)
+        while remaining > 0:
+            self._safe_point(control)
+            emit(
+                "agent.status",
+                {
+                    "status": "waiting",
+                    "taskId": request.task_id,
+                    "remaining": round(remaining, 1),
+                },
+            )
+            duration = min(1.0, remaining)
+            self._sleep(duration)
+            remaining -= duration
+
+    def _mark_boundary(
+        self,
+        request: TaskRequest,
+        item: TaskItem,
+        boundary: str,
+        index: int,
+    ) -> None:
+        if self._journal is not None:
+            self._journal.mark(
+                task_id=request.task_id,
+                kind=request.kind,
+                item_id=item.item_id,
+                boundary=boundary,
+                item_index=index,
+            )
+
+    def _clear_boundary(self, request: TaskRequest, item: TaskItem) -> None:
+        if self._journal is not None:
+            self._journal.clear(task_id=request.task_id, item_id=item.item_id)
+
+    def _boundary_exception(
+        self,
+        emit,
+        request: TaskRequest,
+        item: TaskItem,
+        step: str,
+        detail: str,
+        index: int,
+    ) -> str:
+        self._event(
+            emit,
+            request,
+            item,
+            step,
+            "unknown",
+            detail,
+            index + 1,
+        )
+        self._clear_boundary(request, item)
+        return "unknown"
 
     @staticmethod
     def _event(
@@ -259,21 +324,32 @@ class WeixinWorkflowEngine:
         )
 
         self._safe_point(control)
-        if request.options.use_forward:
-            result = driver.forward_bundle(
-                item.target, item.message, request.options.file_paths
+        self._mark_boundary(request, item, "send_triggered", index)
+        try:
+            if request.options.use_forward:
+                result = driver.forward_bundle(
+                    item.target, item.message, request.options.file_paths
+                )
+                self._success_step(
+                    emit, request, item, "send_triggered", "已触发合并转发", index
+                )
+                verified = result.get("outcome") == "success"
+            else:
+                before = driver.message_snapshot()
+                driver.trigger_send()
+                self._success_step(
+                    emit, request, item, "send_triggered", "已触发发送", index
+                )
+                verified = driver.verify_sent(before, item.message, timeout=5.0)
+        except Exception as exc:
+            return self._boundary_exception(
+                emit,
+                request,
+                item,
+                "send_verified",
+                f"发送已触发，但自动化连接中断：{exc}；不会自动重发",
+                index,
             )
-            self._success_step(
-                emit, request, item, "send_triggered", "已触发合并转发", index
-            )
-            verified = result.get("outcome") == "success"
-        else:
-            before = driver.message_snapshot()
-            driver.trigger_send()
-            self._success_step(
-                emit, request, item, "send_triggered", "已触发发送", index
-            )
-            verified = driver.verify_sent(before, item.message, timeout=5.0)
 
         if verified is None:
             self._event(
@@ -285,13 +361,25 @@ class WeixinWorkflowEngine:
                 "已触发发送，但无法确认结果；不会自动重发",
                 index + 1,
             )
+            self._clear_boundary(request, item)
             return "unknown"
         if not verified:
+            self._clear_boundary(request, item)
             raise WorkflowError("send_verified", "发送结果校验失败")
 
         detail = "发送结果已确认"
         if request.options.file_paths and not request.options.use_forward:
-            file_results = driver.send_files(request.options.file_paths)
+            try:
+                file_results = driver.send_files(request.options.file_paths)
+            except Exception as exc:
+                return self._boundary_exception(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    f"文本已发送，但附件结果无法确认：{exc}；不会重放整项",
+                    index,
+                )
             failed = [
                 result
                 for result in file_results
@@ -308,6 +396,7 @@ class WeixinWorkflowEngine:
                     detail,
                     index + 1,
                 )
+                self._clear_boundary(request, item)
                 return "error"
             detail = f"文本及 {len(file_results)} 个附件已确认"
         self._event(
@@ -319,6 +408,7 @@ class WeixinWorkflowEngine:
             detail,
             index + 1,
         )
+        self._clear_boundary(request, item)
         return "success"
 
     def _run_friend_item(
@@ -386,8 +476,19 @@ class WeixinWorkflowEngine:
         )
 
         self._safe_point(control)
-        driver.submit_friend_request()
-        verified = driver.verify_friend_request(timeout=5.0)
+        self._mark_boundary(request, item, "submit_triggered", index)
+        try:
+            driver.submit_friend_request()
+            verified = driver.verify_friend_request(timeout=5.0)
+        except Exception as exc:
+            return self._boundary_exception(
+                emit,
+                request,
+                item,
+                "submit_verified",
+                f"已点击确定，但自动化连接中断：{exc}；不会再次提交",
+                index,
+            )
         if verified is None:
             self._event(
                 emit,
@@ -398,8 +499,10 @@ class WeixinWorkflowEngine:
                 "已点击确定，但无法确认结果；不会再次提交",
                 index + 1,
             )
+            self._clear_boundary(request, item)
             return "unknown"
         if not verified:
+            self._clear_boundary(request, item)
             raise WorkflowError("submit_verified", "好友申请提交校验失败")
         self._event(
             emit,
@@ -410,6 +513,7 @@ class WeixinWorkflowEngine:
             "提交结果已确认",
             index + 1,
         )
+        self._clear_boundary(request, item)
         return "success"
 
 

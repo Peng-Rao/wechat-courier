@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,11 +21,13 @@ class AgentClient(QObject):
     rpcError = Signal(int, int, str)
     notificationReceived = Signal(str, object)
     processError = Signal(str)
+    helloReceived = Signal(object)
 
     def __init__(
         self,
         *,
         heartbeat_timeout_ms: int = 3_500,
+        journal_path: str | None = None,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -35,8 +38,13 @@ class AgentClient(QObject):
         self._socket.errorOccurred.connect(self._on_socket_error)
         self._decoder = JsonLineDecoder()
         self._process: QProcess | None = None
+        self._executable: str | None = None
         self._pipe_name = ""
         self._token = ""
+        self._journal_path = journal_path or str(
+            Path(tempfile.gettempdir())
+            / f"wuge-wechat-agent-{os.getpid()}-{uuid.uuid4().hex}-safety.json"
+        )
         self._state = "stopped"
         self._connected = False
         self._next_id = 1
@@ -78,19 +86,22 @@ class AgentClient(QObject):
     def start(self, executable: str | None = None) -> None:
         if self._process is not None:
             return
+        if executable is not None:
+            self._executable = executable
         self._pipe_name = "wuge-wechat-agent-" + uuid.uuid4().hex
         self._token = secrets.token_hex(32)
         process = QProcess(self)
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("WECHAT_AGENT_PIPE", self._pipe_name)
         environment.insert("WECHAT_AGENT_TOKEN", self._token)
+        environment.insert("WECHAT_AGENT_JOURNAL", self._journal_path)
         process.setProcessEnvironment(environment)
         process.errorOccurred.connect(
             lambda error: self.processError.emit(process.errorString())
         )
         process.finished.connect(self._on_process_finished)
-        if executable:
-            process.setProgram(executable)
+        if self._executable:
+            process.setProgram(self._executable)
         elif getattr(sys, "frozen", False):
             process.setProgram(str(Path(sys.executable).with_name("wechat-agent.exe")))
         else:
@@ -195,6 +206,7 @@ class AgentClient(QObject):
                 self._set_connected(True)
                 self._set_state("connected")
                 self._watchdog.start()
+                self.helloReceived.emit(result or {})
             self.replyReceived.emit(request_id, result)
 
     @staticmethod
@@ -220,7 +232,7 @@ class AgentClient(QObject):
         self._set_connected(False)
         socket = self._socket
         if socket.state() != QLocalSocket.UnconnectedState:
-            socket.disconnectFromServer()
+            socket.abort()
         process = self._process
         self._process = None
         if process is not None:
@@ -228,6 +240,10 @@ class AgentClient(QObject):
             if not process.waitForFinished(1_500):
                 process.kill()
                 process.waitForFinished(500)
+
+    def restart(self) -> None:
+        self.close()
+        self.start(self._executable)
 
 
 __all__ = ["AgentClient"]

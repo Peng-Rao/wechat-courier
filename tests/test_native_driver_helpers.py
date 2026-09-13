@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from app.agent.native_driver import (
+    NativeWeixinDriver,
     RiskControlError,
     extract_contact_results,
     find_exact_control,
@@ -61,3 +62,50 @@ def test_risk_controls_stop_the_workflow():
     warning = FakeControl("操作频繁，请稍后再试", "TextControl")
     with pytest.raises(RiskControlError, match="操作频繁"):
         raise_for_risk_controls([(warning, 2)])
+
+
+def test_confirmed_wechat_restart_waits_for_supported_logged_in_window():
+    class RecoveryBackend:
+        def __init__(self):
+            self.terminated = []
+            self.started = []
+
+        def process_path(self, pid):
+            assert pid == 123
+            return r"C:\Program Files\Tencent\Weixin\Weixin.exe"
+
+        def terminate_process(self, pid):
+            self.terminated.append(pid)
+
+        def start_process(self, path):
+            self.started.append(path)
+
+    backend = RecoveryBackend()
+    driver = NativeWeixinDriver(
+        gate_backend=backend,
+        sleep=lambda _seconds: None,
+    )
+    inspections = iter(
+        [
+            {"connected": True, "supported": True, "pid": 123},
+            {"connected": False, "supported": False},
+            {
+                "connected": True,
+                "supported": True,
+                "pid": 456,
+                "version": "4.1.13.65",
+            },
+        ]
+    )
+    driver.inspect = lambda: next(inspections)
+    notices = []
+
+    result = driver.restart_wechat(
+        timeout=90,
+        emit=lambda method, params: notices.append((method, params)),
+    )
+
+    assert backend.terminated == [123]
+    assert backend.started == [r"C:\Program Files\Tencent\Weixin\Weixin.exe"]
+    assert result["version"] == "4.1.13.65"
+    assert any(params["status"] == "waiting_login" for _method, params in notices)

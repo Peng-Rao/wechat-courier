@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import csv
+import copy
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Property, QSettings, Signal, Slot
+from PySide6.QtCore import QObject, Property, QSettings, QTimer, Signal, Slot
 
 from .agent.client import AgentClient
 from .models import extract_greeting_name
@@ -437,6 +439,8 @@ class AgentController(QObject):
     inspectionChanged = Signal()
     notificationReceived = Signal(str, object)
     errorOccurred = Signal(str)
+    helloReceived = Signal(object)
+    connectionLost = Signal()
 
     def __init__(self, client: AgentClient | None = None, parent=None):
         super().__init__(parent)
@@ -454,6 +458,8 @@ class AgentController(QObject):
         self._client.rpcError.connect(self._on_rpc_error)
         self._client.notificationReceived.connect(self.notificationReceived)
         self._client.processError.connect(self.errorOccurred)
+        if hasattr(self._client, "helloReceived"):
+            self._client.helloReceived.connect(self.helloReceived)
 
     @Property(str, notify=stateChanged)
     def state(self):
@@ -487,6 +493,15 @@ class AgentController(QObject):
     def start(self) -> None:
         self._client.start()
 
+    @Slot()
+    def restart(self) -> None:
+        restart = getattr(self._client, "restart", None)
+        if restart is not None:
+            restart()
+            return
+        self._client.close()
+        self._client.start()
+
     @Slot(result=int)
     def inspect(self) -> int:
         if not self._connected:
@@ -512,6 +527,7 @@ class AgentController(QObject):
 
     @Slot(bool)
     def _on_connected(self, connected: bool) -> None:
+        was_connected = self._connected
         self._connected = connected
         self.stateChanged.emit()
         self.inspectionChanged.emit()
@@ -521,6 +537,8 @@ class AgentController(QObject):
             self._wechat_connected = False
             self._wechat_supported = False
             self._detail = "Agent 已断开"
+            if was_connected:
+                self.connectionLost.emit()
 
     @Slot(int, object)
     def _on_reply(self, request_id: int, result: Any) -> None:
@@ -541,6 +559,7 @@ class TaskController(QObject):
     progressChanged = Signal()
     currentStepChanged = Signal()
     errorChanged = Signal()
+    recoveryRequiredChanged = Signal()
 
     def __init__(
         self,
@@ -565,8 +584,27 @@ class TaskController(QObject):
         self._total = 0
         self._current_step = ""
         self._error = ""
+        self._original_payload: dict[str, Any] | None = None
+        self._completed_item_ids: set[str] = set()
+        self._recovery_offset = 0
+        self._restart_attempts = 0
+        self._pending_resume = False
+        self._recovery_required = False
+        self._recovery_detail = ""
+        self._wechat_restart_attempted = False
+        self._login_deadline = 0.0
+        self._inspection_grace = QTimer(self)
+        self._inspection_grace.setSingleShot(True)
+        self._inspection_grace.setInterval(6_000)
+        self._inspection_grace.timeout.connect(self._check_reconnect_inspection)
+        self._recovery_poll = QTimer(self)
+        self._recovery_poll.setInterval(2_000)
+        self._recovery_poll.timeout.connect(self._poll_wechat_recovery)
         self._agent.notificationReceived.connect(self._on_notification)
         self._agent.errorOccurred.connect(self._set_error)
+        self._agent.connectionLost.connect(self._on_connection_lost)
+        self._agent.helloReceived.connect(self._on_agent_hello)
+        self._agent.inspectionChanged.connect(self._resume_if_ready)
 
     @Property(QObject, constant=True)
     def items(self):
@@ -613,6 +651,23 @@ class TaskController(QObject):
     def error(self):
         return self._error
 
+    @Property(bool, notify=recoveryRequiredChanged)
+    def recoveryRequired(self):
+        return self._recovery_required
+
+    @Property(str, notify=recoveryRequiredChanged)
+    def recoveryDetail(self):
+        return self._recovery_detail
+
+    def _set_recovery_required(self, required: bool, detail: str = "") -> None:
+        changed = (
+            required != self._recovery_required or detail != self._recovery_detail
+        )
+        self._recovery_required = required
+        self._recovery_detail = detail
+        if changed:
+            self.recoveryRequiredChanged.emit()
+
     def _set_phase(self, phase: str) -> None:
         if phase != self._phase:
             self._phase = phase
@@ -658,6 +713,15 @@ class TaskController(QObject):
             "items": items,
             "options": options,
         }
+        self._original_payload = copy.deepcopy(payload)
+        self._completed_item_ids.clear()
+        self._recovery_offset = 0
+        self._restart_attempts = 0
+        self._pending_resume = False
+        self._set_recovery_required(False)
+        self._wechat_restart_attempted = False
+        self._inspection_grace.stop()
+        self._recovery_poll.stop()
         try:
             self._agent.call("task.start", payload)
         except Exception as exc:
@@ -669,6 +733,183 @@ class TaskController(QObject):
         self.progressChanged.emit()
         self.currentStepChanged.emit()
         return True
+
+    @Slot()
+    def _on_connection_lost(self) -> None:
+        if not self._active or self._phase == "stopping":
+            return
+        if self._restart_attempts >= self._settings.agentRestartLimit:
+            self._set_active(False)
+            self._set_phase("error")
+            self._set_error("Agent 已断开，自动重启次数已用尽；任务已停止")
+            return
+        self._restart_attempts += 1
+        self._pending_resume = False
+        self._set_phase("recovering")
+        self._set_error(
+            f"Agent 连接中断，正在进行第 {self._restart_attempts} 次安全恢复"
+        )
+        self._agent.restart()
+
+    @Slot(object)
+    def _on_agent_hello(self, hello: dict[str, Any]) -> None:
+        recovery = hello.get("recovery") if isinstance(hello, dict) else None
+        if not self._active:
+            if recovery:
+                self._agent.call("recovery.approve", {"decision": "discard"})
+            return
+        if self._phase != "recovering":
+            return
+        if recovery:
+            if recovery.get("taskId") != self._task_id:
+                self._set_active(False)
+                self._set_phase("error")
+                self._set_error("发现其他任务的未决安全记录，已停止自动恢复")
+                return
+            self._mark_boundary_item_unknown(recovery)
+            self._agent.call(
+                "recovery.approve", {"decision": "mark_unknown"}
+            )
+        self._pending_resume = True
+        self._inspection_grace.start()
+        self._resume_if_ready()
+
+    def _mark_boundary_item_unknown(self, recovery: dict[str, Any]) -> None:
+        item_id = str(recovery.get("itemId", ""))
+        if not item_id or item_id in self._completed_item_ids:
+            return
+        boundary = str(recovery.get("boundary", ""))
+        step = "submit_verified" if boundary.startswith("submit") else "send_verified"
+        detail = (
+            "Agent 在提交后中断，本条标记为结果未知且不会再次提交"
+            if self._kind == "friend_add"
+            else "Agent 在发送后中断，本条标记为结果未知且不会自动重发"
+        )
+        event = {
+            "taskId": self._task_id,
+            "itemId": item_id,
+            "step": step,
+            "outcome": "unknown",
+            "detail": detail,
+            "done": min(self._total, self._done + 1),
+            "total": self._total,
+            "timestamp": str(recovery.get("timestamp", "")),
+        }
+        self._items.apply_event(event)
+        self._logs.append_event(event)
+        if self._kind == "friend_add":
+            self._friends.model.apply_event(event)
+        self._completed_item_ids.add(item_id)
+        self._done = event["done"]
+        self._current_step = step
+        self.progressChanged.emit()
+        self.currentStepChanged.emit()
+
+    @Slot()
+    def _resume_if_ready(self) -> None:
+        if not self._pending_resume or not self._active:
+            return
+        if not self._agent.automationReady or self._original_payload is None:
+            return
+        self._inspection_grace.stop()
+        self._recovery_poll.stop()
+        self._set_recovery_required(False)
+        remaining = [
+            item
+            for item in self._original_payload["items"]
+            if item["itemId"] not in self._completed_item_ids
+        ]
+        if not remaining:
+            self._pending_resume = False
+            self._set_active(False)
+            self._set_phase("done")
+            self._set_error("")
+            return
+        payload = copy.deepcopy(self._original_payload)
+        payload["items"] = remaining
+        self._recovery_offset = self._done
+        try:
+            self._agent.call("task.start", payload)
+        except Exception as exc:
+            self._set_active(False)
+            self._set_phase("error")
+            self._set_error(f"恢复任务失败：{exc}")
+            return
+        self._pending_resume = False
+        self._set_phase("running")
+        self._set_error("")
+
+    @Slot()
+    def _check_reconnect_inspection(self) -> None:
+        if not self._pending_resume or not self._active or self._agent.automationReady:
+            return
+        mode = self._settings.wechatRecoveryMode
+        if mode == "manual":
+            self._fail_recovery("微信 UIA 仍不可用，请手动重启微信后重新开始任务")
+            return
+        if mode == "silent":
+            self._request_wechat_restart()
+            return
+        self._set_phase("awaiting_recovery")
+        self._set_recovery_required(
+            True,
+            "Agent 已恢复，但微信 UIA 仍不可用。是否重启微信并等待重新登录？",
+        )
+
+    @Slot()
+    def approveWechatRestart(self) -> None:
+        if not self._recovery_required:
+            return
+        self._request_wechat_restart()
+
+    def _request_wechat_restart(self) -> None:
+        if self._wechat_restart_attempted or not self._active:
+            return
+        self._wechat_restart_attempted = True
+        self._set_recovery_required(False)
+        self._set_phase("waiting_login")
+        self._set_error("正在重启微信并等待登录")
+        self._login_deadline = time.monotonic() + self._settings.loginTimeout
+        try:
+            self._agent.call(
+                "recovery.approve",
+                {
+                    "decision": "restart_wechat",
+                    "loginTimeout": self._settings.loginTimeout,
+                },
+            )
+        except Exception as exc:
+            self._fail_recovery(f"请求重启微信失败：{exc}")
+            return
+        self._recovery_poll.start()
+
+    @Slot()
+    def stopRecovery(self) -> None:
+        if not self._active:
+            return
+        self._agent.call("recovery.approve", {"decision": "stop"})
+        self._fail_recovery("用户取消微信恢复，任务已安全停止")
+
+    def _poll_wechat_recovery(self) -> None:
+        if not self._active or not self._pending_resume:
+            self._recovery_poll.stop()
+            return
+        if self._agent.automationReady:
+            self._resume_if_ready()
+            return
+        if time.monotonic() >= self._login_deadline:
+            self._fail_recovery("等待微信登录超时，任务已停止")
+            return
+        self._agent.inspect()
+
+    def _fail_recovery(self, detail: str) -> None:
+        self._inspection_grace.stop()
+        self._recovery_poll.stop()
+        self._pending_resume = False
+        self._set_recovery_required(False)
+        self._set_active(False)
+        self._set_phase("error")
+        self._set_error(detail)
 
     @Slot(result=bool)
     def startMessage(self) -> bool:
@@ -724,6 +965,14 @@ class TaskController(QObject):
     @Slot(str, object)
     def _on_notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "task.event" and params.get("taskId") == self._task_id:
+            params = dict(params)
+            if self._recovery_offset:
+                params["done"] = min(
+                    self._total,
+                    self._recovery_offset + int(params.get("done", 0)),
+                )
+                params["total"] = self._total
+            previous_done = self._done
             self._items.apply_event(params)
             self._logs.append_event(params)
             if self._kind == "friend_add":
@@ -731,14 +980,27 @@ class TaskController(QObject):
             self._done = int(params.get("done", self._done))
             self._total = int(params.get("total", self._total))
             self._current_step = str(params.get("step", ""))
+            if self._done > previous_done:
+                self._completed_item_ids.add(str(params.get("itemId", "")))
             self.progressChanged.emit()
             self.currentStepChanged.emit()
         elif method == "task.finished" and params.get("taskId") == self._task_id:
-            self._done = int(params.get("done", self._done))
-            self._total = int(params.get("total", self._total))
+            raw_done = int(params.get("done", 0))
+            self._done = min(
+                self._total,
+                self._recovery_offset + raw_done,
+            )
             self._set_active(False)
             self._set_phase("done")
             self.progressChanged.emit()
+        elif method == "agent.status":
+            status = str(params.get("status", ""))
+            if status == "recovered" and self._pending_resume:
+                self._agent.inspect()
+            elif status == "recovery_failed" and self._pending_resume:
+                self._fail_recovery(
+                    "微信恢复失败：" + str(params.get("detail", "未知错误"))
+                )
 
     @Slot(str, result=str)
     def stepLabel(self, code: str) -> str:

@@ -12,6 +12,7 @@ class FakeAgentClient(QObject):
     rpcError = Signal(int, int, str)
     notificationReceived = Signal(str, object)
     processError = Signal(str)
+    helloReceived = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -20,6 +21,7 @@ class FakeAgentClient(QObject):
         self.calls = []
         self.next_id = 1
         self.started = False
+        self.restart_count = 0
 
     def start(self):
         self.started = True
@@ -32,6 +34,9 @@ class FakeAgentClient(QObject):
 
     def close(self):
         pass
+
+    def restart(self):
+        self.restart_count += 1
 
 
 def settings(tmp_path):
@@ -156,3 +161,127 @@ def test_task_events_update_monitor_and_release_global_lock(tmp_path, qapp):
     )
     assert backend.task.active is False
     assert backend.task.phase == "done"
+
+
+def test_agent_recovery_marks_boundary_item_unknown_and_resumes_remaining(
+    tmp_path, qapp
+):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice\nBob\nCharlie"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+    original = client.calls[-1][2]
+    task_id = original["taskId"]
+    first, second, third = original["items"]
+
+    client.notificationReceived.emit(
+        "task.event",
+        {
+            "taskId": task_id,
+            "itemId": first["itemId"],
+            "step": "send_verified",
+            "outcome": "success",
+            "detail": "发送结果已确认",
+            "done": 1,
+            "total": 3,
+            "timestamp": "2026-09-13T00:00:00+00:00",
+        },
+    )
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    assert backend.task.phase == "recovering"
+    assert client.restart_count == 1
+
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.helloReceived.emit(
+        {
+            "recovery": {
+                "taskId": task_id,
+                "kind": "message_send",
+                "itemId": second["itemId"],
+                "boundary": "send_triggered",
+                "itemIndex": 1,
+                "timestamp": "2026-09-13T00:00:01+00:00",
+            }
+        }
+    )
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "detail": "ready",
+        }
+    )
+
+    recovery_calls = [(method, payload) for _id, method, payload in client.calls]
+    assert ("recovery.approve", {"decision": "mark_unknown"}) in recovery_calls
+    resumed = [payload for _id, method, payload in client.calls if method == "task.start"][-1]
+    assert [item["itemId"] for item in resumed["items"]] == [third["itemId"]]
+    assert backend.task.done == 2
+    assert backend.task.phase == "running"
+    assert backend.task.items._items[1].result == "unknown"
+
+    client.notificationReceived.emit(
+        "task.event",
+        {
+            "taskId": task_id,
+            "itemId": third["itemId"],
+            "step": "send_verified",
+            "outcome": "success",
+            "detail": "发送结果已确认",
+            "done": 1,
+            "total": 1,
+            "timestamp": "2026-09-13T00:00:02+00:00",
+        },
+    )
+    assert backend.task.done == 3
+    assert backend.task.total == 3
+
+
+def test_agent_restart_limit_stops_active_task_safely(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.settings.agentRestartLimit = 0
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert "重启次数" in backend.task.error
+
+
+def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.helloReceived.emit({"recovery": None})
+    backend.task._check_reconnect_inspection()
+
+    assert backend.task.recoveryRequired is True
+    assert backend.task.phase == "awaiting_recovery"
+
+    backend.task.approveWechatRestart()
+    backend.task.approveWechatRestart()
+
+    restart_wechat_calls = [
+        payload
+        for _id, method, payload in client.calls
+        if method == "recovery.approve" and payload.get("decision") == "restart_wechat"
+    ]
+    assert restart_wechat_calls == [
+        {"decision": "restart_wechat", "loginTimeout": 90}
+    ]
+    assert backend.task.recoveryRequired is False
+    assert backend.task.phase == "waiting_login"

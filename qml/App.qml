@@ -106,4 +106,8 @@ Rectangle {
         id: settingsDialog
         appBackend: root.appBackend
     }
+
+    RecoveryDialog {
+        taskBackend: root.appBackend ? root.appBackend.task : null
+    }
 }

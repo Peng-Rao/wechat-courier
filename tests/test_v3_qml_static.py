@@ -59,3 +59,14 @@ def test_titlebar_displays_agent_and_weixin_health():
     assert "微信" in source
     assert "wechatVersion" in source
     assert "openSettings" in source
+
+
+def test_recovery_confirmation_is_chinese_and_requires_explicit_action():
+    source = qml("RecoveryDialog.qml")
+    app = (ROOT / "qml" / "App.qml").read_text(encoding="utf-8")
+
+    assert "重启微信并继续" in source
+    assert "停止任务" in source
+    assert "approveWechatRestart" in source
+    assert "stopRecovery" in source
+    assert "RecoveryDialog" in app

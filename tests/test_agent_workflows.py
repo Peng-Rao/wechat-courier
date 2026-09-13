@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.agent.contracts import TaskItem, TaskOptions, TaskRequest
 from app.agent.runtime import TaskControl
 from app.agent.workflows import RiskControlError, WeixinWorkflowEngine
@@ -18,6 +20,7 @@ class FakeDriver:
         self.friend_verification = True
         self.raise_risk = False
         self.closed = False
+        self.raise_after_send = None
 
     def inspect(self):
         return {"connected": True, "version": "4.1.13.65", "supported": True}
@@ -52,6 +55,8 @@ class FakeDriver:
 
     def trigger_send(self):
         self.sent.append(self.composer)
+        if self.raise_after_send is not None:
+            raise self.raise_after_send
 
     def verify_sent(self, before, expected, timeout):
         return self.send_verification
@@ -115,6 +120,21 @@ def run_engine(driver, task):
     return result, [payload for method, payload in events if method == "task.event"]
 
 
+class MemoryJournal:
+    def __init__(self):
+        self.record = None
+        self.marks = []
+
+    def mark(self, **record):
+        self.record = dict(record)
+        self.marks.append(dict(record))
+        return self.record
+
+    def clear(self, **_match):
+        self.record = None
+        return True
+
+
 def test_message_requires_one_exact_normalized_search_result():
     driver = FakeDriver()
     driver.search_results["Alice"] = ["Alice Team"]
@@ -168,6 +188,57 @@ def test_unknown_send_is_never_retried_and_continues_by_default():
     assert result["unknown"] == 2
     unknown = [event for event in events if event["outcome"] == "unknown"]
     assert [event["itemId"] for event in unknown] == ["one", "two"]
+
+
+def test_send_boundary_is_journaled_and_known_exception_becomes_unknown():
+    driver = FakeDriver()
+    driver.search_results = {"Alice": ["Alice"]}
+    driver.raise_after_send = RuntimeError("UIA provider disconnected")
+    journal = MemoryJournal()
+    task = request(
+        "message_send", [TaskItem("one", target="Alice", message="hello")]
+    )
+    events = []
+
+    result = WeixinWorkflowEngine(
+        driver_factory=lambda: driver,
+        journal=journal,
+    ).run(
+        task,
+        TaskControl(),
+        lambda method, payload: events.append((method, payload)),
+    )
+
+    terminal = [payload for method, payload in events if method == "task.event"][-1]
+    assert driver.sent == ["hello"]
+    assert journal.marks[0]["boundary"] == "send_triggered"
+    assert result["unknown"] == 1
+    assert terminal["outcome"] == "unknown"
+    assert "不会自动重发" in terminal["detail"]
+    assert journal.record is None
+
+
+def test_abrupt_crash_after_send_boundary_keeps_recovery_record():
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    driver = FakeDriver()
+    driver.search_results = {"Alice": ["Alice"]}
+    driver.raise_after_send = SimulatedProcessCrash()
+    journal = MemoryJournal()
+    task = request(
+        "message_send", [TaskItem("one", target="Alice", message="hello")]
+    )
+
+    with pytest.raises(SimulatedProcessCrash):
+        WeixinWorkflowEngine(
+            driver_factory=lambda: driver,
+            journal=journal,
+        ).run(task, TaskControl(), lambda *_args: None)
+
+    assert journal.record["task_id"] == "task-1"
+    assert journal.record["item_id"] == "one"
+    assert journal.record["boundary"] == "send_triggered"
 
 
 def test_unknown_policy_can_stop_after_the_destructive_boundary():
