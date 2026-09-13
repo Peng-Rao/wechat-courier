@@ -114,13 +114,17 @@ class AgentRuntime(QObject):
         parent: QObject | None = None,
     ):
         super().__init__(parent)
+        if engine_factory is None:
+            from .workflows import WeixinWorkflowEngine
+
+            engine_factory = WeixinWorkflowEngine
         self._notification_sink: Callable[[str, dict[str, Any]], Any] | None = None
         self._inspect_timeout = inspect_timeout_ms / 1000.0
         self._active_task_id = ""
         self._control: TaskControl | None = None
         self._thread = QThread(self)
         self._thread.setObjectName("wechat-automation")
-        self._runner = _AutomationRunner(engine_factory or _UnavailableEngine)
+        self._runner = _AutomationRunner(engine_factory)
         self._runner.moveToThread(self._thread)
         self.inspectRequested.connect(self._runner.inspect)
         self.taskRequested.connect(self._runner.run_task)
