@@ -17,7 +17,7 @@ TestCase {
         property string fatalError: ""
         property real progressValue: 50.0
         property string progressStatus: "正在发送"
-        property string versionInfo: "五阿哥群发助手 v0.1.0"
+        property string versionInfo: "五阿哥微信助手 v0.3.0"
         property string previewFriend: "好友1"
         property string previewGreeting: "友1"
         property string previewMessage: "你好 友1"

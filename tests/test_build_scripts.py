@@ -133,6 +133,38 @@ def test_build_spec_uses_qt_artifact_pruning():
     assert "a.datas = filter_qt_artifacts(a.datas)" in spec_text
 
 
+def test_build_outputs_gui_and_isolated_agent_in_one_directory():
+    spec_text = (ROOT / "build" / "build.spec").read_text(encoding="utf-8")
+
+    assert 'os.path.join(ROOT, "agent_main.py")' in spec_text
+    assert 'name="五阿哥微信助手"' in spec_text
+    assert 'name="wechat-agent"' in spec_text
+    assert "agent_exe" in spec_text
+    assert "agent_analysis.binaries" in spec_text
+    assert '*collect_submodules("openpyxl")' in spec_text
+
+
+def test_product_versions_and_installer_upgrade_contract_are_v030():
+    app_version = (ROOT / "app" / "_version.py").read_text(encoding="utf-8")
+    library_version = (ROOT / "src" / "_version.py").read_text(encoding="utf-8")
+    backend = (ROOT / "app" / "backend.py").read_text(encoding="utf-8")
+    legacy_log = (ROOT / "qml" / "components" / "SendLogPanel.qml").read_text(
+        encoding="utf-8"
+    )
+    installer = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
+
+    assert '__version__ = "0.3.0"' in app_version
+    assert '__version__ = "0.3.0"' in library_version
+    assert '!define PRODUCT_NAME "五阿哥微信助手"' in installer
+    assert '!define PRODUCT_VERSION "0.3.0"' in installer
+    assert '!define OLD_PRODUCT_NAME "五阿哥群发助手"' in installer
+    assert "taskkill" in installer
+    assert "OLD_PRODUCT_NAME" in installer
+    assert "Software\\wx4py\\WeChatCourier" not in installer
+    assert "version: str = __version__" in backend
+    assert "五阿哥群发助手发送日志" not in legacy_log
+
+
 def test_qt_artifact_pruning_removes_unused_large_modules():
     filters = load_build_filters_module()
     toc = [
@@ -161,6 +193,24 @@ def test_qt_artifact_pruning_removes_unused_large_modules():
     assert "PySide6/qml/Qt5Compat/GraphicalEffects/DropShadow.qml" in kept_destinations
     assert "PySide6/Qt6Quick.dll" in kept_destinations
     assert "qml/theme/qmldir" in kept_destinations
+
+
+def test_qt_artifact_pruning_rejects_foreign_icu_runtime():
+    filters = load_build_filters_module()
+    toc = [
+        ("icuuc.dll", "C:/tools/poppler/bin/icuuc.dll", "BINARY"),
+        ("icudt78.dll", "C:/tools/poppler/bin/icudt78.dll", "BINARY"),
+        ("icudt.dll", "C:/tools/poppler/bin/icudt.dll", "BINARY"),
+        ("PySide6/Qt6Core.dll", "source", "BINARY"),
+    ]
+
+    kept = filters.filter_qt_artifacts(toc)
+    kept_destinations = {entry[0] for entry in kept}
+
+    assert "icuuc.dll" not in kept_destinations
+    assert "icudt78.dll" not in kept_destinations
+    assert "icudt.dll" not in kept_destinations
+    assert "PySide6/Qt6Core.dll" in kept_destinations
 
 
 def test_desktop_demo_imports_wechat_client_without_src_barrel():

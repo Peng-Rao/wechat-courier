@@ -7,11 +7,19 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QStringListModel, QSettings
 
+from ._version import __version__
 from .constants import PHASE_IDLE, PHASE_RUNNING, PHASE_PAUSED, PHASE_DONE
 from .demo import is_demo_mode
 from .models import extract_greeting_name
 from .sender_worker import SenderWorker
 from . import win32_helper
+from .controllers import (
+    AgentController,
+    FriendController,
+    MessageController,
+    SettingsController,
+    TaskController,
+)
 
 
 class BackendController(QObject):
@@ -54,10 +62,12 @@ class BackendController(QObject):
 
     def __init__(
         self,
-        version: str = "0.1.0",
+        version: str = __version__,
         parent=None,
         settings: QSettings | None = None,
         worker_factory=None,
+        agent_client=None,
+        auto_start_agent: bool = False,
     ):
         super().__init__(parent)
 
@@ -98,9 +108,24 @@ class BackendController(QObject):
         self._send_error_count = 0
         self._send_fatal_error_seen = False
 
+        # v0.3 聚合控制器。旧属性继续保留，供现有调用方平滑迁移。
+        self._message_controller = MessageController(self._settings, self)
+        self._friends_controller = FriendController(self._settings, self)
+        self._settings_controller = SettingsController(self, self._settings, self)
+        self._agent_controller = AgentController(agent_client, self)
+        self._task_controller = TaskController(
+            self._agent_controller,
+            self._message_controller,
+            self._friends_controller,
+            self._settings_controller,
+            self,
+        )
+        if auto_start_agent:
+            self._agent_controller.start()
+
         # 初始化只读属性
         self.demoModeChanged.emit(is_demo_mode())
-        self.versionInfoChanged.emit(f"五阿哥群发助手 v{self._version}")
+        self.versionInfoChanged.emit(f"五阿哥微信助手 v{self._version}")
 
     # ═══════════════════════════════════════
     #  Properties
@@ -244,7 +269,7 @@ class BackendController(QObject):
 
     # ── versionInfo ──
     def _get_version_info(self) -> str:
-        return f"五阿哥群发助手 v{self._version}"
+        return f"五阿哥微信助手 v{self._version}"
 
     versionInfo = Property(str, _get_version_info, notify=versionInfoChanged)
 
@@ -322,6 +347,13 @@ class BackendController(QObject):
             self.glassOpacityChanged.emit(normalized)
 
     glassOpacity = Property(int, _get_glass_opacity, _set_glass_opacity, notify=glassOpacityChanged)
+
+    # ── v0.3 domain facades ──
+    message = Property(QObject, lambda self: self._message_controller, constant=True)
+    friends = Property(QObject, lambda self: self._friends_controller, constant=True)
+    task = Property(QObject, lambda self: self._task_controller, constant=True)
+    settings = Property(QObject, lambda self: self._settings_controller, constant=True)
+    agent = Property(QObject, lambda self: self._agent_controller, constant=True)
 
     # ═══════════════════════════════════════
     #  工具方法
@@ -683,3 +715,11 @@ class BackendController(QObject):
             self._glass_enabled,
             self._glass_opacity,
         )
+
+    @Slot()
+    def shutdown(self):
+        """Stop the v0.3 Agent and any legacy worker during GUI shutdown."""
+        if self._worker and self._worker.isRunning():
+            self._worker.request_stop()
+            self._worker.wait(3000)
+        self._agent_controller.close()

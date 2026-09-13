@@ -1,16 +1,19 @@
 ﻿; ═══════════════════════════════════════════
-;  五阿哥群发助手 NSIS 安装脚本
+;  五阿哥微信助手 NSIS 安装脚本
 ; ═══════════════════════════════════════════
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 ; ── 基本信息 ──
-!define PRODUCT_NAME "五阿哥群发助手"
-!define PRODUCT_VERSION "0.1.0"
+!define PRODUCT_NAME "五阿哥微信助手"
+!define PRODUCT_VERSION "0.3.0"
+!define OLD_PRODUCT_NAME "五阿哥群发助手"
 !define PRODUCT_PUBLISHER "wx4py"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_NAME}.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
+!define OLD_PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${OLD_PRODUCT_NAME}.exe"
+!define OLD_PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${OLD_PRODUCT_NAME}"
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "..\dist\${PRODUCT_NAME}_Setup.exe"
@@ -39,8 +42,24 @@ ShowUnInstDetails show
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Function .onInit
+    ; Close both product generations before replacing binaries.
+    nsExec::ExecToLog 'taskkill /F /IM "${PRODUCT_NAME}.exe"'
+    nsExec::ExecToLog 'taskkill /F /IM "${OLD_PRODUCT_NAME}.exe"'
+    nsExec::ExecToLog 'taskkill /F /IM "wechat-agent.exe"'
+FunctionEnd
+
 ; ── 安装区段 ──
 Section "Install"
+    ; Remove the previous product shell without touching HKCU wx4py settings.
+    Delete "$DESKTOP\${OLD_PRODUCT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${OLD_PRODUCT_NAME}\${OLD_PRODUCT_NAME}.lnk"
+    Delete "$SMPROGRAMS\${OLD_PRODUCT_NAME}\卸载.lnk"
+    RMDir "$SMPROGRAMS\${OLD_PRODUCT_NAME}"
+    RMDir /r "$PROGRAMFILES\${OLD_PRODUCT_NAME}"
+    DeleteRegKey HKLM "${OLD_PRODUCT_UNINST_KEY}"
+    DeleteRegKey HKLM "${OLD_PRODUCT_DIR_REGKEY}"
+
     SetOutPath "$INSTDIR"
 
     ; 拷贝 PyInstaller 打包后的全部文件
@@ -60,8 +79,10 @@ Section "Install"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_NAME}.exe"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
+    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "InstallLocation" "$INSTDIR"
     WriteRegDWORD HKLM "${PRODUCT_UNINST_KEY}" "NoModify" 1
     WriteRegDWORD HKLM "${PRODUCT_UNINST_KEY}" "NoRepair" 1
+    WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\${PRODUCT_NAME}.exe"
 
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0

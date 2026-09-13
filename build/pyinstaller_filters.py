@@ -106,6 +106,15 @@ def _is_unneeded_qt_binary(dest: str) -> bool:
     return any(part in dest for part in _PATH_DROP_PARTS)
 
 
+def _is_conflicting_system_icu(dest: str) -> bool:
+    if "/" in dest:
+        return False
+    name = PurePosixPath(dest).name.lower()
+    return name == "icuuc.dll" or (
+        name.startswith("icudt") and name.endswith(".dll")
+    )
+
+
 def filter_qt_artifacts(toc):
     """Remove unused Qt/QML artifacts from a PyInstaller TOC-like list."""
     return [
@@ -114,5 +123,6 @@ def filter_qt_artifacts(toc):
         if not (
             _is_unneeded_qml_artifact(_normalize_dest(entry))
             or _is_unneeded_qt_binary(_normalize_dest(entry))
+            or _is_conflicting_system_icu(_normalize_dest(entry))
         )
     ]

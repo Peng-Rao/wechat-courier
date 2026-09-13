@@ -48,6 +48,18 @@ QtObject {
     readonly property color clDangerNewHover: isDark ? "#ff7373" : "#f13e3a"
     readonly property color clWarning: isDark ? "#ffd600" : "#ffc300"
     readonly property color clShadow: isDark ? "#000000" : "#000000"
+    readonly property color clInfo: isDark ? "#66aee8" : "#347fba"
+    readonly property color clInfoSoft: isDark ? "#1b3040" : "#eaf4fb"
+    readonly property color clInfoBorder: isDark ? "#315b78" : "#a9cee7"
+    readonly property color clSuccessSoft: isDark ? "#173528" : "#e8f7ef"
+    readonly property color clSuccessBorder: isDark ? "#2c6b4b" : "#9bd7b5"
+    readonly property color clSuccessText: isDark ? "#68d89a" : "#237a49"
+    readonly property color clWarningSoft: isDark ? "#3a2d18" : "#fff5df"
+    readonly property color clWarningBorder: isDark ? "#725825" : "#e8c778"
+    readonly property color clWarningText: isDark ? "#e7bd62" : "#9b6914"
+    readonly property color clDangerSoft: isDark ? "#3a2024" : "#fff0f1"
+    readonly property color clNeutralSoft: isDark ? "#293139" : "#edf1f4"
+    readonly property color clRowAlternate: isDark ? "#172027" : "#f7fafb"
 
     // ═══════════════════════════════
     //  Window glass shell tokens

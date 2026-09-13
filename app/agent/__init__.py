@@ -1,0 +1,2 @@
+"""Independent Weixin automation agent."""
+

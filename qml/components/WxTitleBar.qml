@@ -8,7 +8,9 @@ Rectangle {
 
     property var window: null
     property var titleBackend: null
+    property var openSettings: null
     property double _lastOpacityToast: 0
+    property bool layoutMenuOpen: false
 
     height: 40
     color: WxTheme.clTitleBarBg
@@ -60,7 +62,7 @@ Rectangle {
     // System Window Move Handler (native move keeps Windows snap previews stable)
     MouseArea {
         anchors.fill: parent
-        anchors.rightMargin: 322 // Leave space for visual controls and window controls
+        anchors.rightMargin: 590
 
         onPressed: {
             if (root.window && root.window.visibility !== Window.FullScreen) {
@@ -79,13 +81,54 @@ Rectangle {
 
         // Title Text
         Text {
-            text: root.window ? root.window.title : "五阿哥群发助手"
+            text: root.window ? root.window.title : "五阿哥微信助手"
             font.family: WxTheme.fontFamily
             font.pixelSize: WxTheme.fontSizeSmall
             font.bold: true
             color: WxTheme.clTextPrimary
             Layout.fillWidth: true
             elide: Text.ElideRight
+        }
+
+        RowLayout {
+            visible: root.width >= 980 && root.titleBackend && root.titleBackend.agent
+            spacing: 14
+
+            RowLayout {
+                spacing: 6
+                Rectangle {
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: root.titleBackend && root.titleBackend.agent.connected
+                        ? WxTheme.clInfo : WxTheme.clTextHint
+                }
+                Text {
+                    text: root.titleBackend && root.titleBackend.agent.connected
+                        ? "Agent 在线" : "Agent 离线"
+                    color: WxTheme.clTextSecondary
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeTiny
+                }
+            }
+
+            RowLayout {
+                spacing: 6
+                Rectangle {
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: root.titleBackend && root.titleBackend.agent.wechatSupported
+                        ? WxTheme.clPrimary : WxTheme.clWarningText
+                }
+                Text {
+                    text: root.titleBackend && root.titleBackend.agent.wechatConnected
+                        ? "微信 " + root.titleBackend.agent.wechatVersion : "微信未连接"
+                    color: WxTheme.clTextSecondary
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeTiny
+                }
+            }
         }
 
         // ── Window visual controls ──
@@ -215,6 +258,29 @@ Rectangle {
                     }
                 }
             }
+
+            Rectangle {
+                id: settingsButton
+                Layout.preferredWidth: 30
+                Layout.preferredHeight: 28
+                radius: WxTheme.radiusSmall
+                color: settingsArea.containsMouse ? WxTheme.clBgHover : "transparent"
+
+                WxIcon {
+                    anchors.centerIn: parent
+                    iconSource: "../icons/settings.svg"
+                    iconColor: WxTheme.clTextSecondary
+                    iconSize: 16
+                }
+
+                MouseArea {
+                    id: settingsArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.openSettings) root.openSettings()
+                }
+            }
         }
 
         // ── Window Controls ──
@@ -268,7 +334,15 @@ Rectangle {
                     id: maxMouseArea
                     anchors.fill: parent
                     hoverEnabled: true
-                    onClicked: root.toggleMaximized()
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: function(mouse) {
+                        if (mouse.button === Qt.RightButton) {
+                            root.layoutMenuOpen = !root.layoutMenuOpen
+                        } else {
+                            root.layoutMenuOpen = false
+                            root.toggleMaximized()
+                        }
+                    }
                 }
             }
 
@@ -352,11 +426,9 @@ Rectangle {
     Rectangle {
         id: layoutMenu
         z: 500
-        visible: maxMouseArea.containsMouse || menuMouseArea.containsMouse
-        x: {
-            var buttonPos = maxButton.mapToItem(root, 0, 0)
-            return Math.max(8, Math.min(root.width - width - 8, buttonPos.x + maxButton.width - width))
-        }
+        visible: root.layoutMenuOpen
+        anchors.right: parent.right
+        anchors.rightMargin: 46
         y: root.height - 1
         width: 204
         height: 42
@@ -374,6 +446,7 @@ Rectangle {
                 description: "全屏预览"
                 action: function() {
                     if (root.window) root.window.enterFullScreenPreview()
+                    root.layoutMenuOpen = false
                 }
             }
 
@@ -382,6 +455,7 @@ Rectangle {
                 description: "贴左侧"
                 action: function() {
                     if (root.window) root.window.applySnapMode("left")
+                    root.layoutMenuOpen = false
                 }
             }
 
@@ -390,6 +464,7 @@ Rectangle {
                 description: "贴右侧"
                 action: function() {
                     if (root.window) root.window.applySnapMode("right")
+                    root.layoutMenuOpen = false
                 }
             }
 
@@ -398,6 +473,7 @@ Rectangle {
                 description: "居中还原"
                 action: function() {
                     if (root.window) root.window.centerAndRestore()
+                    root.layoutMenuOpen = false
                 }
             }
         }
@@ -406,7 +482,7 @@ Rectangle {
             id: menuMouseArea
             anchors.fill: parent
             hoverEnabled: true
-            acceptedButtons: Qt.NoButton
+            acceptedButtons: Qt.LeftButton
         }
     }
 

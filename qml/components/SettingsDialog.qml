@@ -1,0 +1,501 @@
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import "../theme"
+
+Popup {
+    id: root
+    property var appBackend: null
+    property int sectionIndex: 0
+
+    parent: Overlay.overlay
+    modal: true
+    focus: true
+    closePolicy: Popup.CloseOnEscape
+    width: Math.min(820, parent ? parent.width - 48 : 820)
+    height: Math.min(620, parent ? parent.height - 48 : 620)
+    x: parent ? Math.round((parent.width - width) / 2) : 0
+    y: parent ? Math.round((parent.height - height) / 2) : 0
+    padding: 0
+
+    Overlay.modal: Rectangle { color: WxTheme.isDark ? "#99070a0d" : "#660e1820" }
+    background: Rectangle {
+        color: WxTheme.isDark ? "#20282e" : "#f9fbfc"
+        border.color: WxTheme.clSurfaceBorder
+        radius: WxTheme.radiusLarge
+    }
+
+    contentItem: ColumnLayout {
+        spacing: 0
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 48
+            color: WxTheme.clToolbarFill
+            border.color: WxTheme.clSurfaceBorder
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: "参数设置"
+                color: WxTheme.clTextPrimary
+                font.family: WxTheme.fontFamily
+                font.pixelSize: WxTheme.fontSizeNormal
+                font.bold: true
+            }
+            Text {
+                anchors.right: closeButton.left
+                anchors.rightMargin: 10
+                anchors.verticalCenter: parent.verticalCenter
+                text: "修改后自动保存在本机"
+                color: WxTheme.clTextHint
+                font.family: WxTheme.fontFamily
+                font.pixelSize: WxTheme.fontSizeTiny
+            }
+            Button {
+                id: closeButton
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                implicitWidth: 34
+                implicitHeight: 32
+                onClicked: root.close()
+                contentItem: Text {
+                    text: "×"
+                    color: WxTheme.clTextPrimary
+                    font.pixelSize: 18
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: parent.hovered ? WxTheme.clBgHover : "transparent"
+                    radius: WxTheme.radiusSmall
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            Rectangle {
+                Layout.preferredWidth: 184
+                Layout.fillHeight: true
+                color: WxTheme.clPanelFill
+                border.color: WxTheme.clSurfaceBorder
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 12
+                    spacing: 4
+                    Repeater {
+                        model: ["消息群发", "批量加好友", "自动化与恢复", "外观"]
+                        Button {
+                            required property int index
+                            required property string modelData
+                            Layout.fillWidth: true
+                            implicitHeight: 38
+                            onClicked: root.sectionIndex = index
+                            contentItem: Text {
+                                text: modelData
+                                color: root.sectionIndex === index ? WxTheme.clTextPrimary : WxTheme.clTextSecondary
+                                font.family: WxTheme.fontFamily
+                                font.pixelSize: WxTheme.fontSizeSmall
+                                font.bold: root.sectionIndex === index
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: 10
+                            }
+                            background: Rectangle {
+                                color: root.sectionIndex === index ? WxTheme.clBgSelected
+                                    : parent.hovered ? WxTheme.clBgHover : "transparent"
+                                radius: WxTheme.radiusSmall
+                                Rectangle {
+                                    width: 3
+                                    height: parent.height - 12
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: WxTheme.clPrimary
+                                    visible: root.sectionIndex === index
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 1
+                        Layout.topMargin: 12
+                        Layout.bottomMargin: 8
+                        color: WxTheme.clSurfaceBorder
+                    }
+                    Button {
+                        text: "恢复默认设置"
+                        enabled: false
+                        contentItem: Text {
+                            text: parent.text
+                            color: WxTheme.clTextHint
+                            font.family: WxTheme.fontFamily
+                            font.pixelSize: WxTheme.fontSizeSmall
+                        }
+                        background: Rectangle { color: "transparent" }
+                    }
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: root.sectionIndex
+
+                ScrollView {
+                    clip: true
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 0
+                        SettingsHeading {
+                            title: "消息群发"
+                            subtitle: "设置逐个发送的等待区间和附件行为"
+                        }
+                        SettingsRow {
+                            title: "发送间隔"
+                            description: "每位好友之间随机等待，降低连续操作风险"
+                            RowLayout {
+                                TextField {
+                                    Layout.preferredWidth: 72
+                                    text: root.appBackend ? root.appBackend.message.intervalMin : "2"
+                                    validator: DoubleValidator { bottom: 0; top: 300 }
+                                    onEditingFinished: root.appBackend.message.intervalMin = Number(text)
+                                }
+                                Text { text: "至"; color: WxTheme.clTextHint }
+                                TextField {
+                                    Layout.preferredWidth: 72
+                                    text: root.appBackend ? root.appBackend.message.intervalMax : "3"
+                                    validator: DoubleValidator { bottom: 0; top: 300 }
+                                    onEditingFinished: root.appBackend.message.intervalMax = Number(text)
+                                }
+                                Text { text: "秒"; color: WxTheme.clTextSecondary }
+                            }
+                        }
+                        SettingsRow {
+                            title: "合并转发附件"
+                            description: "启用后按当前发送策略处理附件和留言"
+                            Switch {
+                                checked: root.appBackend ? root.appBackend.message.useForward : false
+                                onToggled: root.appBackend.message.useForward = checked
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+
+                ScrollView {
+                    clip: true
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 0
+                        SettingsHeading {
+                            title: "批量加好友"
+                            subtitle: "行内为空时才使用这里的默认值"
+                        }
+                        SettingsRow {
+                            title: "默认打招呼语"
+                            description: "两处都为空时保留微信申请窗口原文"
+                            TextField {
+                                Layout.preferredWidth: 320
+                                text: root.appBackend ? root.appBackend.friends.defaultGreeting : ""
+                                onEditingFinished: root.appBackend.friends.defaultGreeting = text
+                            }
+                        }
+                        SettingsRow {
+                            title: "默认备注"
+                            description: "两处都为空时不填写备注"
+                            TextField {
+                                Layout.preferredWidth: 220
+                                text: root.appBackend ? root.appBackend.friends.defaultRemark : ""
+                                onEditingFinished: root.appBackend.friends.defaultRemark = text
+                            }
+                        }
+                        SettingsRow {
+                            title: "请求间隔"
+                            description: "可配置 5 至 300 秒"
+                            RowLayout {
+                                TextField {
+                                    Layout.preferredWidth: 72
+                                    text: root.appBackend ? root.appBackend.friends.intervalMin : "15"
+                                    validator: IntValidator { bottom: 5; top: 300 }
+                                    onEditingFinished: root.appBackend.friends.intervalMin = Number(text)
+                                }
+                                Text { text: "至"; color: WxTheme.clTextHint }
+                                TextField {
+                                    Layout.preferredWidth: 72
+                                    text: root.appBackend ? root.appBackend.friends.intervalMax : "30"
+                                    validator: IntValidator { bottom: 5; top: 300 }
+                                    onEditingFinished: root.appBackend.friends.intervalMax = Number(text)
+                                }
+                                Text { text: "秒"; color: WxTheme.clTextSecondary }
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+
+                ScrollView {
+                    clip: true
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 0
+                        SettingsHeading {
+                            title: "自动化与恢复"
+                            subtitle: "破坏性动作一旦触发不会自动重试"
+                        }
+                        SettingsRow {
+                            title: "结果无法确认"
+                            description: "发送或提交已触发，但没有可靠后置条件"
+                            ComboBox {
+                                Layout.preferredWidth: 180
+                                model: ["标记未知并继续", "标记未知并停止"]
+                                currentIndex: root.appBackend && root.appBackend.settings.unknownPolicy === "stop" ? 1 : 0
+                                onActivated: root.appBackend.settings.unknownPolicy = currentIndex === 1 ? "stop" : "continue"
+                            }
+                        }
+                        SettingsRow {
+                            title: "Agent 自动重启"
+                            description: "UIA 卡死或进程异常时的最大重启次数"
+                            SpinBox {
+                                from: 0
+                                to: 2
+                                value: root.appBackend ? root.appBackend.settings.agentRestartLimit : 2
+                                onValueModified: root.appBackend.settings.agentRestartLimit = value
+                            }
+                        }
+                        SettingsRow {
+                            title: "微信恢复方式"
+                            description: "UIA 仍不可用时如何处理微信客户端"
+                            ComboBox {
+                                Layout.preferredWidth: 180
+                                model: ["弹窗确认", "仅手动处理", "静默重启"]
+                                currentIndex: {
+                                    if (!root.appBackend) return 0
+                                    var mode = root.appBackend.settings.wechatRecoveryMode
+                                    return mode === "manual" ? 1 : mode === "silent" ? 2 : 0
+                                }
+                                onActivated: root.appBackend.settings.wechatRecoveryMode =
+                                    currentIndex === 1 ? "manual" : currentIndex === 2 ? "silent" : "confirm"
+                            }
+                        }
+                        SettingsRow {
+                            title: "登录等待"
+                            description: "微信重启后等待用户登录的最长时间"
+                            SpinBox {
+                                from: 30
+                                to: 300
+                                stepSize: 10
+                                value: root.appBackend ? root.appBackend.settings.loginTimeout : 90
+                                onValueModified: root.appBackend.settings.loginTimeout = value
+                                textFromValue: function(value) { return value + " 秒" }
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+
+                ScrollView {
+                    clip: true
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 0
+                        SettingsHeading {
+                            title: "外观"
+                            subtitle: "外观设置运行中也可修改，不影响 Agent 任务快照"
+                        }
+                        SettingsRow {
+                            title: "颜色模式"
+                            description: "影响窗口、控件和预览区域"
+                            RowLayout {
+                                Button {
+                                    text: "浅色"
+                                    onClicked: {
+                                        WxTheme.isDark = false
+                                        root.appBackend.settings.isDark = false
+                                    }
+                                    background: Rectangle {
+                                        color: !WxTheme.isDark ? WxTheme.clBgSelected : "transparent"
+                                        border.color: WxTheme.clSurfaceBorder
+                                        radius: WxTheme.radiusSmall
+                                    }
+                                }
+                                Button {
+                                    text: "深色"
+                                    onClicked: {
+                                        WxTheme.isDark = true
+                                        root.appBackend.settings.isDark = true
+                                    }
+                                    background: Rectangle {
+                                        color: WxTheme.isDark ? WxTheme.clBgSelected : "transparent"
+                                        border.color: WxTheme.clSurfaceBorder
+                                        radius: WxTheme.radiusSmall
+                                    }
+                                }
+                            }
+                        }
+                        SettingsRow {
+                            title: "毛玻璃背景"
+                            description: "关闭后回退为普通实色界面"
+                            Switch {
+                                checked: WxTheme.glassEnabled
+                                onToggled: {
+                                    WxTheme.glassEnabled = checked
+                                    root.appBackend.settings.glassEnabled = checked
+                                }
+                            }
+                        }
+                        SettingsRow {
+                            title: "毛玻璃透明度"
+                            description: "标题栏控制区也可悬停滚轮，每格 5%"
+                            RowLayout {
+                                Slider {
+                                    Layout.preferredWidth: 210
+                                    from: 45
+                                    to: 90
+                                    stepSize: 5
+                                    value: WxTheme.glassOpacity
+                                    enabled: WxTheme.glassEnabled
+                                    onMoved: {
+                                        WxTheme.glassOpacity = Math.round(value)
+                                        root.appBackend.settings.glassOpacity = Math.round(value)
+                                    }
+                                }
+                                Text {
+                                    text: WxTheme.glassOpacity + "%"
+                                    Layout.preferredWidth: 42
+                                    color: WxTheme.clTextPrimary
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    font.bold: true
+                                }
+                            }
+                        }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
+                            Layout.leftMargin: 28
+                            Layout.rightMargin: 28
+                            Layout.topMargin: 18
+                            color: WxTheme.clSuccessSoft
+                            border.color: WxTheme.clPrimary
+                            radius: WxTheme.radiusSmall
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: 12
+                                text: "业务输入框拥有独立可读性下限，不会跟随窗口透明度变得难以辨认。"
+                                color: WxTheme.clTextPrimary
+                                font.family: WxTheme.fontFamily
+                                font.pixelSize: WxTheme.fontSizeTiny
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 52
+            color: WxTheme.clToolbarFill
+            border.color: WxTheme.clSurfaceBorder
+            Button {
+                anchors.right: parent.right
+                anchors.rightMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: "完成"
+                onClicked: root.close()
+                contentItem: Text {
+                    text: parent.text
+                    color: "white"
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeSmall
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: parent.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary
+                    radius: WxTheme.radiusSmall
+                }
+            }
+        }
+    }
+
+    component SettingsHeading: Item {
+        property string title: ""
+        property string subtitle: ""
+        Layout.fillWidth: true
+        Layout.preferredHeight: 82
+        Column {
+            anchors.left: parent.left
+            anchors.leftMargin: 28
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 4
+            Text {
+                text: parent.parent.title
+                color: WxTheme.clTextPrimary
+                font.family: WxTheme.fontFamily
+                font.pixelSize: 20
+                font.bold: true
+            }
+            Text {
+                text: parent.parent.subtitle
+                color: WxTheme.clTextHint
+                font.family: WxTheme.fontFamily
+                font.pixelSize: WxTheme.fontSizeTiny
+            }
+        }
+    }
+
+    component SettingsRow: Item {
+        id: rowRoot
+        property string title: ""
+        property string description: ""
+        default property alias control: controlHost.data
+        Layout.fillWidth: true
+        Layout.preferredHeight: 66
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: 28
+            anchors.rightMargin: 28
+            height: 1
+            color: WxTheme.clSurfaceBorder
+        }
+        Column {
+            anchors.left: parent.left
+            anchors.leftMargin: 28
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 3
+            Text {
+                text: rowRoot.title
+                color: WxTheme.clTextPrimary
+                font.family: WxTheme.fontFamily
+                font.pixelSize: WxTheme.fontSizeSmall
+                font.bold: true
+            }
+            Text {
+                text: rowRoot.description
+                color: WxTheme.clTextHint
+                font.family: WxTheme.fontFamily
+                font.pixelSize: WxTheme.fontSizeTiny
+            }
+        }
+        Item {
+            id: controlHost
+            anchors.right: parent.right
+            anchors.rightMargin: 28
+            anchors.verticalCenter: parent.verticalCenter
+            width: childrenRect.width
+            height: Math.max(34, childrenRect.height)
+        }
+    }
+}
