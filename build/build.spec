@@ -12,10 +12,10 @@ ROOT = os.path.dirname(SPECPATH)  # WxAuto/
 # ═══════════════════════════════════════
 #  comtypes 预生成目录
 # ═══════════════════════════════════════
-datas = []
+comtypes_datas = []
 comtypes_gen_dir = os.path.join(ROOT, "comtypes_gen")
 if os.path.isdir(comtypes_gen_dir):
-    datas.append((comtypes_gen_dir, "comtypes/gen"))
+    comtypes_datas.append((comtypes_gen_dir, "comtypes/gen"))
 
 # ═══════════════════════════════════════
 #  src 包 — 通过 collect_submodules 自动收集为可导入模块
@@ -25,6 +25,7 @@ if os.path.isdir(comtypes_gen_dir):
 # ═══════════════════════════════════════
 #  QML 文件与图标资源
 # ═══════════════════════════════════════
+datas = list(comtypes_datas)
 qml_dir = os.path.join(ROOT, "qml")
 for dirpath, dirnames, filenames in os.walk(qml_dir):
     for f in filenames:
@@ -70,28 +71,31 @@ if not binaries:
     except Exception:
         pass
 
+hiddenimports = [
+    # PySide6 shared by the GUI and local Named Pipe agent
+    "PySide6.QtCore", "PySide6.QtGui",
+    "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtQuickControls2",
+    "PySide6.QtNetwork",
+    # pywin32
+    "win32gui", "win32con", "win32api", "win32process", "win32clipboard",
+    "win32file", "win32event", "win32security", "winerror",
+    "pythoncom", "pywintypes", "win32com", "win32com.client",
+    # comtypes and generated interfaces
+    "comtypes", "comtypes.client", "comtypes.gen", "comtypes.server",
+    # Compatibility library and spreadsheet import stack
+    *collect_submodules("src"),
+    *collect_submodules("openpyxl"),
+    "et_xmlfile",
+    # Existing optional content helpers
+    "PIL", "PIL.Image", "PIL.ImageGrab", "markdown", "pyperclip",
+]
+
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
     pathex=[ROOT],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        # PySide6
-        "PySide6.QtCore", "PySide6.QtGui",
-        "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtQuickControls2",
-        "PySide6.QtNetwork",
-        # pywin32
-        "win32gui", "win32con", "win32api", "win32process", "win32clipboard",
-        "win32file", "win32event", "win32security", "winerror",
-        "pythoncom", "pywintypes", "win32com", "win32com.client",
-        # comtypes
-        "comtypes", "comtypes.client", "comtypes.gen",
-        "comtypes.server",
-        # src 子包 — 自动收集全部子模块，避免手动遗漏
-        *collect_submodules("src"),
-        # 第三方
-        "PIL", "PIL.Image", "PIL.ImageGrab", "markdown", "pyperclip",
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[os.path.join(ROOT, "build", "_comtypes_hook.py")],
@@ -105,14 +109,38 @@ a = Analysis(
 a.binaries = filter_qt_artifacts(a.binaries)
 a.datas = filter_qt_artifacts(a.datas)
 
+agent_analysis = Analysis(
+    [os.path.join(ROOT, "agent_main.py")],
+    pathex=[ROOT],
+    binaries=binaries,
+    datas=comtypes_datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[os.path.join(ROOT, "build", "_comtypes_hook.py")],
+    excludes=["tkinter", "streamlit"],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+agent_analysis.binaries = filter_qt_artifacts(agent_analysis.binaries)
+agent_analysis.datas = filter_qt_artifacts(agent_analysis.datas)
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+agent_pyz = PYZ(
+    agent_analysis.pure,
+    agent_analysis.zipped_data,
+    cipher=block_cipher,
+)
 
 exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name="五阿哥群发助手",
+    name="五阿哥微信助手",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -121,12 +149,29 @@ exe = EXE(
     icon=icon_path if os.path.exists(icon_path) else None,
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
+agent_exe = EXE(
+    agent_pyz,
+    agent_analysis.scripts,
+    [],
+    exclude_binaries=True,
+    name="wechat-agent",
+    debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    name="五阿哥群发助手",
+    console=False,
+)
+
+coll = COLLECT(
+    exe,
+    agent_exe,
+    a.binaries,
+    agent_analysis.binaries,
+    a.zipfiles,
+    agent_analysis.zipfiles,
+    a.datas,
+    agent_analysis.datas,
+    strip=False,
+    upx=True,
+    name="五阿哥微信助手",
 )

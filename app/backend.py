@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot, Property, QStringListModel, QSettings
 
+from ._version import __version__
 from .constants import PHASE_IDLE, PHASE_RUNNING, PHASE_PAUSED, PHASE_DONE
 from .demo import is_demo_mode
 from .models import extract_greeting_name
@@ -61,7 +62,7 @@ class BackendController(QObject):
 
     def __init__(
         self,
-        version: str = "0.1.0",
+        version: str = __version__,
         parent=None,
         settings: QSettings | None = None,
         worker_factory=None,
