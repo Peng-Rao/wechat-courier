@@ -81,6 +81,8 @@ Popup {
 
             Rectangle {
                 Layout.preferredWidth: 184
+                Layout.minimumWidth: 184
+                Layout.maximumWidth: 184
                 Layout.fillHeight: true
                 color: WxTheme.clPanelFill
                 border.color: WxTheme.clSurfaceBorder
@@ -145,10 +147,14 @@ Popup {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumWidth: 0
                 currentIndex: root.sectionIndex
+                clip: true
 
                 ScrollView {
                     clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -190,6 +196,8 @@ Popup {
 
                 ScrollView {
                     clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -201,7 +209,7 @@ Popup {
                             title: "默认打招呼语"
                             description: "两处都为空时保留微信申请窗口原文"
                             TextField {
-                                Layout.preferredWidth: 320
+                                width: 360
                                 text: root.appBackend ? root.appBackend.friends.defaultGreeting : ""
                                 onEditingFinished: root.appBackend.friends.defaultGreeting = text
                             }
@@ -210,7 +218,7 @@ Popup {
                             title: "默认备注"
                             description: "两处都为空时不填写备注"
                             TextField {
-                                Layout.preferredWidth: 220
+                                width: 220
                                 text: root.appBackend ? root.appBackend.friends.defaultRemark : ""
                                 onEditingFinished: root.appBackend.friends.defaultRemark = text
                             }
@@ -241,6 +249,8 @@ Popup {
 
                 ScrollView {
                     clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -252,7 +262,7 @@ Popup {
                             title: "结果无法确认"
                             description: "发送或提交已触发，但没有可靠后置条件"
                             ComboBox {
-                                Layout.preferredWidth: 180
+                                width: 180
                                 model: ["标记未知并继续", "标记未知并停止"]
                                 currentIndex: root.appBackend && root.appBackend.settings.unknownPolicy === "stop" ? 1 : 0
                                 onActivated: root.appBackend.settings.unknownPolicy = currentIndex === 1 ? "stop" : "continue"
@@ -272,7 +282,7 @@ Popup {
                             title: "微信恢复方式"
                             description: "UIA 仍不可用时如何处理微信客户端"
                             ComboBox {
-                                Layout.preferredWidth: 180
+                                width: 180
                                 model: ["弹窗确认", "仅手动处理", "静默重启"]
                                 currentIndex: {
                                     if (!root.appBackend) return 0
@@ -301,6 +311,8 @@ Popup {
 
                 ScrollView {
                     clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -351,13 +363,14 @@ Popup {
                         }
                         SettingsRow {
                             title: "毛玻璃透明度"
-                            description: "标题栏控制区也可悬停滚轮，每格 5%"
+                            description: "拖动滑块或悬停滚轮调整，每格 5%"
                             RowLayout {
                                 Slider {
                                     Layout.preferredWidth: 210
                                     from: 45
                                     to: 90
                                     stepSize: 5
+                                    wheelEnabled: true
                                     value: WxTheme.glassOpacity
                                     enabled: WxTheme.glassEnabled
                                     onMoved: {
@@ -473,17 +486,23 @@ Popup {
         Column {
             anchors.left: parent.left
             anchors.leftMargin: 28
+            anchors.right: controlHost.left
+            anchors.rightMargin: 16
             anchors.verticalCenter: parent.verticalCenter
             spacing: 3
             Text {
+                width: parent.width
                 text: rowRoot.title
+                elide: Text.ElideRight
                 color: WxTheme.clTextPrimary
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeSmall
                 font.bold: true
             }
             Text {
+                width: parent.width
                 text: rowRoot.description
+                elide: Text.ElideRight
                 color: WxTheme.clTextHint
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeTiny

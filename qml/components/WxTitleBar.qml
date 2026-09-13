@@ -9,37 +9,10 @@ Rectangle {
     property var window: null
     property var titleBackend: null
     property var openSettings: null
-    property double _lastOpacityToast: 0
     property bool layoutMenuOpen: false
 
     height: 40
     color: WxTheme.clTitleBarBg
-
-    function clampOpacity(value) {
-        return Math.max(45, Math.min(90, Math.round(value)))
-    }
-
-    function setGlassEnabled(enabled) {
-        WxTheme.glassEnabled = enabled
-        if (root.titleBackend) {
-            root.titleBackend.glassEnabled = enabled
-        }
-    }
-
-    function setGlassOpacity(value, showToast) {
-        var normalized = clampOpacity(value)
-        if (WxTheme.glassOpacity === normalized) return
-
-        WxTheme.glassOpacity = normalized
-        if (root.titleBackend) {
-            root.titleBackend.glassOpacity = normalized
-            var now = Date.now()
-            if (showToast && now - root._lastOpacityToast > 300) {
-                root.titleBackend.showToast("毛玻璃透明度 " + normalized + "%", "info")
-                root._lastOpacityToast = now
-            }
-        }
-    }
 
     function toggleMaximized() {
         if (!root.window) return
@@ -131,155 +104,26 @@ Rectangle {
             }
         }
 
-        // ── Window visual controls ──
-        RowLayout {
-            id: visualControls
-            spacing: 8
-            Layout.fillHeight: true
+        Rectangle {
+            id: settingsButton
+            Layout.preferredWidth: 30
+            Layout.preferredHeight: 28
+            radius: WxTheme.radiusSmall
+            color: settingsArea.containsMouse ? WxTheme.clBgHover : "transparent"
 
-            Rectangle {
-                id: glassControl
-                Layout.preferredWidth: 124
-                Layout.preferredHeight: 28
-                radius: 14
-                color: glassArea.containsMouse ? WxTheme.clBgHover : WxTheme.clSurfaceStrong
-                border.width: 1
-                border.color: glassArea.containsMouse ? WxTheme.clPrimary : WxTheme.clBorder
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    spacing: 6
-
-                    Rectangle {
-                        Layout.preferredWidth: 28
-                        Layout.preferredHeight: 16
-                        radius: 8
-                        color: WxTheme.glassEnabled ? WxTheme.clPrimary : WxTheme.clSwitchTrackOff
-
-                        Rectangle {
-                            width: 12
-                            height: 12
-                            radius: 6
-                            y: 2
-                            x: WxTheme.glassEnabled ? 14 : 2
-                            color: WxTheme.clSwitchThumb
-
-                            Behavior on x {
-                                NumberAnimation { duration: WxTheme.animNormal; easing.type: Easing.OutQuad }
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "毛玻璃"
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeTiny
-                        color: WxTheme.clTextPrimary
-                    }
-
-                    Text {
-                        text: WxTheme.glassOpacity + "%"
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeTiny
-                        color: WxTheme.glassEnabled ? WxTheme.clPrimary : WxTheme.clTextHint
-                        Layout.alignment: Qt.AlignRight
-                    }
-                }
-
-                MouseArea {
-                    id: glassArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.setGlassEnabled(!WxTheme.glassEnabled)
-                    onWheel: function(wheel) {
-                        var step = wheel.angleDelta.y > 0 ? 5 : -5
-                        root.setGlassOpacity(WxTheme.glassOpacity + step, true)
-                        wheel.accepted = true
-                    }
-                }
-
-                Rectangle {
-                    visible: glassArea.containsMouse
-                    z: 20
-                    width: tooltipText.implicitWidth + 16
-                    height: 24
-                    radius: 6
-                    color: WxTheme.clToastBg
-                    x: parent.width / 2 - width / 2
-                    y: parent.height + 6
-
-                    Text {
-                        id: tooltipText
-                        anchors.centerIn: parent
-                        text: "滚轮调整透明度"
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeTiny
-                        color: WxTheme.clToastText
-                    }
-                }
+            WxIcon {
+                anchors.centerIn: parent
+                iconSource: "../icons/settings.svg"
+                iconColor: WxTheme.clTextSecondary
+                iconSize: 16
             }
 
-            Rectangle {
-                id: themeToggleBtn
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                radius: 14
-                color: themeArea.containsMouse ? WxTheme.clBgHover : WxTheme.clSurfaceStrong
-                border.color: WxTheme.clBorder
-                border.width: 1
-
-                scale: themeArea.containsMouse ? 1.08 : 1.0
-                Behavior on scale {
-                    NumberAnimation { duration: WxTheme.animNormal; easing.type: Easing.OutQuad }
-                }
-
-                WxIcon {
-                    id: themeIcon
-                    anchors.centerIn: parent
-                    iconSource: WxTheme.isDark ? "../icons/sun.svg" : "../icons/moon.svg"
-                    iconColor: WxTheme.isDark ? WxTheme.clWarning : WxTheme.clTextSecondary
-                    hoverColor: WxTheme.clPrimary
-                    iconSize: 16
-                    hoverScale: false
-                }
-
-                MouseArea {
-                    id: themeArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        themeIcon.rotation += 360
-                        WxTheme.isDark = !WxTheme.isDark
-                        if (root.titleBackend) root.titleBackend.isDark = WxTheme.isDark
-                    }
-                }
-            }
-
-            Rectangle {
-                id: settingsButton
-                Layout.preferredWidth: 30
-                Layout.preferredHeight: 28
-                radius: WxTheme.radiusSmall
-                color: settingsArea.containsMouse ? WxTheme.clBgHover : "transparent"
-
-                WxIcon {
-                    anchors.centerIn: parent
-                    iconSource: "../icons/settings.svg"
-                    iconColor: WxTheme.clTextSecondary
-                    iconSize: 16
-                }
-
-                MouseArea {
-                    id: settingsArea
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: if (root.openSettings) root.openSettings()
-                }
+            MouseArea {
+                id: settingsArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (root.openSettings) root.openSettings()
             }
         }
 
@@ -486,16 +330,4 @@ Rectangle {
         }
     }
 
-    Connections {
-        target: root.titleBackend
-        ignoreUnknownSignals: true
-
-        function onGlassEnabledChanged() {
-            WxTheme.glassEnabled = root.titleBackend.glassEnabled
-        }
-
-        function onGlassOpacityChanged() {
-            WxTheme.glassOpacity = root.clampOpacity(root.titleBackend.glassOpacity)
-        }
-    }
 }

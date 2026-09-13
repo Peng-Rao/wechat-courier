@@ -13,6 +13,7 @@ ApplicationWindow {
     minimumWidth: 960
     minimumHeight: 680
     visible: true
+    opacity: 0
     title: "五阿哥微信助手"
     color: "transparent"
     flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint
@@ -21,10 +22,41 @@ ApplicationWindow {
     property bool _applyingWindowLayout: false
 
     function screenGeometry() {
-        if (root.screen && root.screen.availableGeometry.width > 0) {
-            return root.screen.availableGeometry
+        if (Screen.desktopAvailableWidth > 0 && Screen.desktopAvailableHeight > 0) {
+            return Qt.rect(
+                Screen.virtualX,
+                Screen.virtualY,
+                Screen.desktopAvailableWidth,
+                Screen.desktopAvailableHeight
+            )
         }
-        return Qt.rect(0, 0, Screen.width, Screen.height)
+        return Qt.rect(Screen.virtualX, Screen.virtualY, Screen.width, Screen.height)
+    }
+
+    function initializeWindowGeometry() {
+        var geometry = root.screenGeometry()
+        var widthMargin = geometry.width > root.minimumWidth ? 32 : 0
+        var heightMargin = geometry.height > root.minimumHeight ? 32 : 0
+        var targetWidth = Math.max(
+            root.minimumWidth,
+            Math.min(1320, geometry.width - widthMargin)
+        )
+        var targetHeight = Math.max(
+            root.minimumHeight,
+            Math.min(880, geometry.height - heightMargin)
+        )
+
+        root._applyingWindowLayout = true
+        root.width = Math.round(targetWidth)
+        root.height = Math.round(targetHeight)
+        root.x = Math.round(geometry.x + Math.max(0, (geometry.width - targetWidth) / 2))
+        root.y = Math.round(geometry.y + Math.max(0, (geometry.height - targetHeight) / 2))
+        root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
+        root._applyingWindowLayout = false
+
+        root.show()
+        root.opacity = 1
+        root.syncWindowVisuals()
     }
 
     function captureNormalGeometry() {
@@ -148,21 +180,15 @@ ApplicationWindow {
         }
     }
 
-    // 窗口居中并初始化 DWM 原生效果
+    // 先读取持久化外观，再在事件循环中按可用工作区显示窗口。
     Component.onCompleted: {
-        var geometry = root.screenGeometry()
-        root.width = Math.max(root.minimumWidth, Math.min(1320, geometry.width - 32))
-        root.height = Math.max(root.minimumHeight, Math.min(880, geometry.height - 32))
-        root.x = geometry.x + Math.round((geometry.width - root.width) / 2)
-        root.y = geometry.y + Math.round((geometry.height - root.height) / 2)
-        root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
         if (typeof backend !== "undefined" && backend) {
             root.title = backend.versionInfo
             WxTheme.isDark = backend.isDark
             WxTheme.glassEnabled = backend.glassEnabled
             WxTheme.glassOpacity = backend.glassOpacity
-            root.syncWindowVisuals()
         }
+        Qt.callLater(root.initializeWindowGeometry)
     }
 
     Connections {

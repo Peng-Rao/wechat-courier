@@ -8,9 +8,12 @@ TestCase {
 
     QtObject {
         id: mockBackend
-        property bool glassEnabled: true
-        property int glassOpacity: 72
-        function showToast(message, type) {}
+        property QtObject agent: QtObject {
+            property bool connected: false
+            property bool wechatConnected: false
+            property bool wechatSupported: false
+            property string wechatVersion: ""
+        }
     }
 
     WxTitleBar {
@@ -22,28 +25,14 @@ TestCase {
     function cleanup() {
         WxTheme.glassEnabled = true
         WxTheme.glassOpacity = 72
-        mockBackend.glassEnabled = true
-        mockBackend.glassOpacity = 72
     }
 
     function test_titlebar_height() {
         compare(titleBar.height, 40)
     }
 
-    function test_glass_enabled_updates_backend_and_theme() {
-        titleBar.setGlassEnabled(false)
-
-        compare(WxTheme.glassEnabled, false)
-        compare(mockBackend.glassEnabled, false)
-    }
-
-    function test_glass_opacity_clamps_to_supported_range() {
-        titleBar.setGlassOpacity(10, false)
-        compare(WxTheme.glassOpacity, 45)
-        compare(mockBackend.glassOpacity, 45)
-
-        titleBar.setGlassOpacity(95, false)
-        compare(WxTheme.glassOpacity, 90)
-        compare(mockBackend.glassOpacity, 90)
+    function test_titlebar_does_not_change_visual_preferences() {
+        compare(WxTheme.glassEnabled, true)
+        compare(WxTheme.glassOpacity, 72)
     }
 }

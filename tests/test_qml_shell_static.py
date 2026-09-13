@@ -81,21 +81,19 @@ def test_titlebar_layout_menu_is_explicit_and_right_anchored():
     assert "maxButton.mapToItem(root" not in title_bar
 
 
-def test_theme_toggle_moves_out_of_tab_bar():
+def test_visual_controls_live_only_in_settings_dialog():
     tab_bar = read_qml("qml/components/WxTabBar.qml")
     title_bar = read_qml("qml/components/WxTitleBar.qml")
+    settings = read_qml("qml/components/SettingsDialog.qml")
 
     assert "WxTheme.isDark = !WxTheme.isDark" not in tab_bar
-    assert "WxTheme.isDark = !WxTheme.isDark" in title_bar
-
-
-def test_titlebar_exposes_glass_controls_and_wheel_opacity():
-    title_bar = read_qml("qml/components/WxTitleBar.qml")
-
-    assert "glassEnabled" in title_bar
-    assert "glassOpacity" in title_bar
-    assert "onWheel" in title_bar
-    assert "毛玻璃" in title_bar
+    assert "glassControl" not in title_bar
+    assert "themeToggleBtn" not in title_bar
+    assert "毛玻璃" not in title_bar
+    assert "颜色模式" in settings
+    assert "毛玻璃背景" in settings
+    assert "毛玻璃透明度" in settings
+    assert "wheelEnabled: true" in settings
 
 
 def test_theme_defines_single_glass_surface_tokens():
