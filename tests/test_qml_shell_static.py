@@ -72,11 +72,13 @@ def test_titlebar_exposes_window_layout_controls():
         assert unsafe_token not in title_bar
 
 
-def test_titlebar_layout_menu_uses_root_coordinates():
+def test_titlebar_layout_menu_is_explicit_and_right_anchored():
     title_bar = read_qml("qml/components/WxTitleBar.qml")
 
-    assert "maxButton.mapToItem(root" in title_bar
-    assert "maxButton.x + maxButton.width - width" not in title_bar
+    assert "layoutMenuOpen" in title_bar
+    assert "mouse.button === Qt.RightButton" in title_bar
+    assert "anchors.right: parent.right" in title_bar
+    assert "maxButton.mapToItem(root" not in title_bar
 
 
 def test_theme_toggle_moves_out_of_tab_bar():

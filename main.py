@@ -35,7 +35,7 @@ def main():
     os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
     app = QGuiApplication(sys.argv)
-    app.setApplicationName("五阿哥群发助手")
+    app.setApplicationName("五阿哥微信助手")
     app.setApplicationVersion(__version__)
 
     icon_path = os.path.join(get_assets_dir(), "app.ico")
@@ -43,7 +43,8 @@ def main():
         app.setWindowIcon(QIcon(icon_path))
 
     # 创建后端
-    backend = BackendController(__version__)
+    backend = BackendController(__version__, auto_start_agent=True)
+    app.aboutToQuit.connect(backend.shutdown)
 
     # QML 引擎
     engine = QQmlApplicationEngine()

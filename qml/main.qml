@@ -8,16 +8,16 @@ import "theme"
 ApplicationWindow {
     id: root
 
-    width: 960
-    height: 780
-    minimumWidth: 800
-    minimumHeight: 650
+    width: 1320
+    height: 880
+    minimumWidth: 960
+    minimumHeight: 680
     visible: true
-    title: "五阿哥群发助手"
+    title: "五阿哥微信助手"
     color: "transparent"
     flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint
 
-    property rect normalGeometry: Qt.rect(0, 0, 960, 780)
+    property rect normalGeometry: Qt.rect(0, 0, 1320, 880)
     property bool _applyingWindowLayout: false
 
     function screenGeometry() {
@@ -150,8 +150,12 @@ ApplicationWindow {
 
     // 窗口居中并初始化 DWM 原生效果
     Component.onCompleted: {
-        root.x = (Screen.width - root.width) / 2
-        root.y = (Screen.height - root.height) / 2
+        var geometry = root.screenGeometry()
+        root.width = Math.max(root.minimumWidth, Math.min(1320, geometry.width - 32))
+        root.height = Math.max(root.minimumHeight, Math.min(880, geometry.height - 32))
+        root.x = geometry.x + Math.round((geometry.width - root.width) / 2)
+        root.y = geometry.y + Math.round((geometry.height - root.height) / 2)
+        root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
         if (typeof backend !== "undefined" && backend) {
             root.title = backend.versionInfo
             WxTheme.isDark = backend.isDark
@@ -173,7 +177,8 @@ ApplicationWindow {
 
     onClosing: function(closeEvent) {
         if (typeof backend !== "undefined" && backend) {
-            if (backend.phase === "running" || backend.phase === "paused") {
+            if ((backend.task && backend.task.active)
+                    || backend.phase === "running" || backend.phase === "paused") {
                 closeEvent.accepted = false
                 closeConfirmDialog.open()
             }
@@ -183,7 +188,7 @@ ApplicationWindow {
     // 关闭确认对话框
     ConfirmDialog {
         id: closeConfirmDialog
-        message: "发送任务正在进行中，关闭窗口将中断发送。是否确认关闭？"
+        message: "自动化任务正在进行中，关闭窗口会请求安全停止。是否确认关闭？"
         isDanger: true
         confirmText: "确认关闭"
         cancelText: "取消"
@@ -201,9 +206,12 @@ ApplicationWindow {
             z: 100
             window: root
             titleBackend: typeof backend !== "undefined" ? backend : null
+            openSettings: function() { appRoot.openSettings(3) }
         }
 
         App {
+            id: appRoot
+            objectName: "appRoot"
             Layout.fillWidth: true
             Layout.fillHeight: true
             appBackend: typeof backend !== "undefined" ? backend : null
@@ -362,7 +370,7 @@ ApplicationWindow {
             }
 
             Text {
-                text: "五阿哥群发助手"
+                text: "五阿哥微信助手"
                 anchors.horizontalCenter: parent.horizontalCenter
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeNormal + 2
