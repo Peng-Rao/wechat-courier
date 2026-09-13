@@ -12,6 +12,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Property, QSettings, QTimer, Signal, Slot
 
 from .agent.client import AgentClient
+from .agent.workflows import normalize_identity
 from .models import extract_greeting_name
 from .task_models import (
     FriendImportModel,
@@ -160,9 +161,10 @@ class MessageController(QObject):
         seen = set()
         for line in self._recipients.splitlines():
             target = line.strip()
-            if not target or target in seen:
+            identity = normalize_identity(target)
+            if not identity or identity in seen:
                 continue
-            seen.add(target)
+            seen.add(identity)
             result.append(target)
         return result
 
@@ -441,6 +443,8 @@ class AgentController(QObject):
     errorOccurred = Signal(str)
     helloReceived = Signal(object)
     connectionLost = Signal()
+    replyReceived = Signal(int, object)
+    rpcErrorReceived = Signal(int, int, str)
 
     def __init__(self, client: AgentClient | None = None, parent=None):
         super().__init__(parent)
@@ -449,6 +453,7 @@ class AgentController(QObject):
         self._connected = bool(getattr(self._client, "connected", False))
         self._wechat_connected = False
         self._wechat_supported = False
+        self._uia_ready = False
         self._wechat_version = ""
         self._detail = "等待检测微信"
         self._inspect_request_id = 0
@@ -477,6 +482,10 @@ class AgentController(QObject):
     def wechatSupported(self):
         return self._wechat_supported
 
+    @Property(bool, notify=inspectionChanged)
+    def uiaReady(self):
+        return self._uia_ready
+
     @Property(str, notify=inspectionChanged)
     def wechatVersion(self):
         return self._wechat_version
@@ -487,7 +496,12 @@ class AgentController(QObject):
 
     @Property(bool, notify=inspectionChanged)
     def automationReady(self):
-        return self._connected and self._wechat_connected and self._wechat_supported
+        return (
+            self._connected
+            and self._wechat_connected
+            and self._wechat_supported
+            and self._uia_ready
+        )
 
     @Slot()
     def start(self) -> None:
@@ -513,6 +527,7 @@ class AgentController(QObject):
     def applyInspection(self, result: dict[str, Any]) -> None:
         self._wechat_connected = bool(result.get("connected", False))
         self._wechat_supported = bool(result.get("supported", False))
+        self._uia_ready = bool(result.get("uiaReady", False))
         self._wechat_version = str(result.get("version", ""))
         self._detail = str(result.get("detail", ""))
         self.inspectionChanged.emit()
@@ -536,6 +551,7 @@ class AgentController(QObject):
         else:
             self._wechat_connected = False
             self._wechat_supported = False
+            self._uia_ready = False
             self._detail = "Agent 已断开"
             if was_connected:
                 self.connectionLost.emit()
@@ -544,13 +560,24 @@ class AgentController(QObject):
     def _on_reply(self, request_id: int, result: Any) -> None:
         if request_id == self._inspect_request_id and isinstance(result, dict):
             self.applyInspection(result)
+        self.replyReceived.emit(request_id, result)
 
     @Slot(int, int, str)
-    def _on_rpc_error(self, _request_id: int, _code: int, message: str) -> None:
+    def _on_rpc_error(self, request_id: int, code: int, message: str) -> None:
+        self.rpcErrorReceived.emit(request_id, code, message)
         self.errorOccurred.emit(message)
 
     def close(self) -> None:
-        self._client.close()
+        shutdown = getattr(self._client, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
+        else:
+            if self._connected:
+                try:
+                    self._client.call("agent.shutdown")
+                except Exception:
+                    pass
+            self._client.close()
 
 
 class TaskController(QObject):
@@ -592,6 +619,7 @@ class TaskController(QObject):
         self._recovery_required = False
         self._recovery_detail = ""
         self._wechat_restart_attempted = False
+        self._pending_start_request_id = 0
         self._login_deadline = 0.0
         self._inspection_grace = QTimer(self)
         self._inspection_grace.setSingleShot(True)
@@ -605,6 +633,8 @@ class TaskController(QObject):
         self._agent.connectionLost.connect(self._on_connection_lost)
         self._agent.helloReceived.connect(self._on_agent_hello)
         self._agent.inspectionChanged.connect(self._resume_if_ready)
+        self._agent.replyReceived.connect(self._on_agent_reply)
+        self._agent.rpcErrorReceived.connect(self._on_agent_rpc_error)
 
     @Property(QObject, constant=True)
     def items(self):
@@ -723,8 +753,11 @@ class TaskController(QObject):
         self._inspection_grace.stop()
         self._recovery_poll.stop()
         try:
-            self._agent.call("task.start", payload)
+            self._pending_start_request_id = self._agent.call(
+                "task.start", payload
+            )
         except Exception as exc:
+            self._pending_start_request_id = 0
             self._set_error(str(exc))
             return False
         self._set_active(True)
@@ -737,6 +770,18 @@ class TaskController(QObject):
     @Slot()
     def _on_connection_lost(self) -> None:
         if not self._active or self._phase == "stopping":
+            return
+        if (
+            self._original_payload
+            and self._original_payload.get("options", {}).get("useForward")
+        ):
+            self._pending_resume = False
+            self._set_active(False)
+            self._set_phase("error")
+            self._set_error(
+                "合并转发任务已中断，为避免重复上传或转发，不会自动恢复"
+            )
+            self._agent.restart()
             return
         if self._restart_attempts >= self._settings.agentRestartLimit:
             self._set_active(False)
@@ -829,8 +874,11 @@ class TaskController(QObject):
         payload["items"] = remaining
         self._recovery_offset = self._done
         try:
-            self._agent.call("task.start", payload)
+            self._pending_start_request_id = self._agent.call(
+                "task.start", payload
+            )
         except Exception as exc:
+            self._pending_start_request_id = 0
             self._set_active(False)
             self._set_phase("error")
             self._set_error(f"恢复任务失败：{exc}")
@@ -838,6 +886,29 @@ class TaskController(QObject):
         self._pending_resume = False
         self._set_phase("running")
         self._set_error("")
+
+    @Slot(int, object)
+    def _on_agent_reply(self, request_id: int, result: Any) -> None:
+        if request_id != self._pending_start_request_id:
+            return
+        self._pending_start_request_id = 0
+        if isinstance(result, dict) and result.get("accepted", True):
+            return
+        self._set_active(False)
+        self._set_phase("error")
+        self._set_error("Agent 未接受任务")
+
+    @Slot(int, int, str)
+    def _on_agent_rpc_error(
+        self, request_id: int, _code: int, message: str
+    ) -> None:
+        if request_id != self._pending_start_request_id:
+            return
+        self._pending_start_request_id = 0
+        self._pending_resume = False
+        self._set_active(False)
+        self._set_phase("error")
+        self._set_error(message)
 
     @Slot()
     def _check_reconnect_inspection(self) -> None:
@@ -984,7 +1055,17 @@ class TaskController(QObject):
                 self._completed_item_ids.add(str(params.get("itemId", "")))
             self.progressChanged.emit()
             self.currentStepChanged.emit()
+            if self._current_step in {"send_verified", "submit_verified"}:
+                self._agent.call(
+                    "recovery.approve",
+                    {
+                        "decision": "acknowledge",
+                        "taskId": self._task_id,
+                        "itemId": str(params.get("itemId", "")),
+                    },
+                )
         elif method == "task.finished" and params.get("taskId") == self._task_id:
+            self._pending_start_request_id = 0
             raw_done = int(params.get("done", 0))
             self._done = min(
                 self._total,

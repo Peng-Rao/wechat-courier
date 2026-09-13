@@ -33,6 +33,7 @@ def test_friend_workspace_has_editable_import_table_and_selection_limit():
     assert "selectedCount" in source
     assert "/ 20" in source
     assert "startFriends" in source
+    assert 'status === "working" ? "执行中"' in source
 
 
 def test_monitor_uses_chinese_state_machine_and_runtime_log():
@@ -43,6 +44,7 @@ def test_monitor_uses_chinese_state_machine_and_runtime_log():
     assert "runtimeLogs" in source
     assert "发送结果已确认" in source
     assert "提交结果已确认" in source
+    assert 'result === "working" ? "执行中"' in source
 
 
 def test_settings_center_contains_task_recovery_and_appearance_sections():

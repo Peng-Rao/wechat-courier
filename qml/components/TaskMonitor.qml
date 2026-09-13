@@ -206,16 +206,19 @@ Item {
                                     color: result === "success" ? WxTheme.clSuccessSoft
                                         : result === "error" ? WxTheme.clDangerSoft
                                         : result === "unknown" ? WxTheme.clWarningSoft
+                                        : result === "working" ? WxTheme.clInfoSoft
                                         : WxTheme.clNeutralSoft
                                     Text {
                                         anchors.centerIn: parent
                                         text: result === "success" ? "成功"
                                             : result === "error" ? "异常"
                                             : result === "unknown" ? "结果未知"
+                                            : result === "working" ? "执行中"
                                             : "等待中"
                                         color: result === "success" ? WxTheme.clSuccessText
                                             : result === "error" ? WxTheme.clDangerNew
                                             : result === "unknown" ? WxTheme.clWarningText
+                                            : result === "working" ? WxTheme.clInfo
                                             : WxTheme.clTextSecondary
                                         font.family: WxTheme.fontFamily
                                         font.pixelSize: WxTheme.fontSizeTiny

@@ -73,6 +73,67 @@ class WeixinWorkflowEngine:
         done = 0
         forced_stop = False
         try:
+            if request.kind == "message_send" and request.options.use_forward:
+                if not request.options.file_paths:
+                    raise ValueError("merged forwarding requires at least one file")
+                first_item = request.items[0]
+                self._mark_boundary(
+                    request, first_item, "forward_source_upload", 0
+                )
+                try:
+                    preparation = driver.prepare_forward_bundle(
+                        request.options.file_paths
+                    )
+                except Exception as exc:
+                    preparation = {
+                        "outcome": "unknown",
+                        "detail": f"源文件上传后自动化连接中断：{exc}",
+                    }
+                if preparation.get("outcome") != "success":
+                    detail = str(
+                        preparation.get("detail", "合并转发源文件准备失败")
+                    )
+                    outcome = (
+                        "unknown"
+                        if preparation.get("outcome") == "unknown"
+                        else "error"
+                    )
+                    for index, item in enumerate(request.items):
+                        if index == 0:
+                            self._finish_boundary(
+                                emit,
+                                request,
+                                item,
+                                "send_verified",
+                                outcome,
+                                detail,
+                                index,
+                                control,
+                            )
+                        else:
+                            self._event(
+                                emit,
+                                request,
+                                item,
+                                "send_verified",
+                                outcome,
+                                detail,
+                                index + 1,
+                            )
+                    return {
+                        "outcome": outcome,
+                        "done": len(request.items),
+                        "total": len(request.items),
+                        "success": 0,
+                        "error": len(request.items) if outcome == "error" else 0,
+                        "unknown": (
+                            len(request.items) if outcome == "unknown" else 0
+                        ),
+                        "stopped": 0,
+                    }
+                self._mark_boundary(
+                    request, first_item, "forward_source_ready", 0
+                )
             for index, item in enumerate(request.items):
                 try:
                     self._safe_point(control)
@@ -149,6 +210,14 @@ class WeixinWorkflowEngine:
             if close is not None:
                 close()
 
+        if (
+            request.kind == "message_send"
+            and request.options.use_forward
+            and self._journal is not None
+            and not control.stop_requested
+        ):
+            self._journal.clear(task_id=request.task_id)
+
         overall = "success"
         if counts["stopped"]:
             overall = "stopped"
@@ -216,18 +285,44 @@ class WeixinWorkflowEngine:
         step: str,
         detail: str,
         index: int,
+        control,
     ) -> str:
-        self._event(
+        return self._finish_boundary(
             emit,
             request,
             item,
             step,
             "unknown",
             detail,
+            index,
+            control,
+        )
+
+    def _finish_boundary(
+        self,
+        emit,
+        request: TaskRequest,
+        item: TaskItem,
+        step: str,
+        outcome: str,
+        detail: str,
+        index: int,
+        control,
+    ) -> str:
+        self._event(
+            emit,
+            request,
+            item,
+            step,
+            outcome,
+            detail,
             index + 1,
         )
-        self._clear_boundary(request, item)
-        return "unknown"
+        if control.wait_for_result_ack(item.item_id, timeout=5.0):
+            self._clear_boundary(request, item)
+        else:
+            control.request_stop()
+        return outcome
 
     @staticmethod
     def _event(
@@ -316,59 +411,127 @@ class WeixinWorkflowEngine:
             emit, request, item, "composer_ready", "输入框已就绪", index
         )
 
-        driver.set_composer_text(item.message)
-        if driver.read_composer_text() != item.message:
-            raise WorkflowError("content_inserted", "输入内容回读不一致")
+        if item.message:
+            driver.set_composer_text(item.message)
+            if driver.read_composer_text() != item.message:
+                raise WorkflowError("content_inserted", "输入内容回读不一致")
         self._success_step(
-            emit, request, item, "content_inserted", "内容已写入并核对", index
+            emit,
+            request,
+            item,
+            "content_inserted",
+            "内容已写入并核对" if item.message else "本项仅发送附件",
+            index,
         )
 
         self._safe_point(control)
-        self._mark_boundary(request, item, "send_triggered", index)
-        try:
-            if request.options.use_forward:
+        boundary_marked = False
+        if request.options.use_forward:
+            self._mark_boundary(request, item, "send_triggered", index)
+            boundary_marked = True
+            try:
                 result = driver.forward_bundle(
                     item.target, item.message, request.options.file_paths
                 )
                 self._success_step(
                     emit, request, item, "send_triggered", "已触发合并转发", index
                 )
-                verified = result.get("outcome") == "success"
-            else:
+            except Exception as exc:
+                return self._boundary_exception(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    f"转发已触发，但自动化连接中断：{exc}；不会自动重发",
+                    index,
+                    control,
+                )
+            outcome = str(result.get("outcome", "unknown"))
+            if outcome == "unknown":
+                return self._finish_boundary(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    "unknown",
+                    str(result.get("detail", "合并转发结果无法确认；不会自动重发")),
+                    index,
+                    control,
+                )
+            if outcome != "success":
+                return self._finish_boundary(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    "error",
+                    str(result.get("detail", "合并转发失败")),
+                    index,
+                    control,
+                )
+            return self._finish_boundary(
+                emit,
+                request,
+                item,
+                "send_verified",
+                "success",
+                str(result.get("detail", "合并转发结果已确认")),
+                index,
+                control,
+            )
+
+        if item.message:
+            self._mark_boundary(request, item, "send_triggered", index)
+            boundary_marked = True
+            try:
                 before = driver.message_snapshot()
                 driver.trigger_send()
                 self._success_step(
                     emit, request, item, "send_triggered", "已触发发送", index
                 )
                 verified = driver.verify_sent(before, item.message, timeout=5.0)
-        except Exception as exc:
-            return self._boundary_exception(
-                emit,
-                request,
-                item,
-                "send_verified",
-                f"发送已触发，但自动化连接中断：{exc}；不会自动重发",
-                index,
-            )
+            except Exception as exc:
+                return self._boundary_exception(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    f"发送已触发，但自动化连接中断：{exc}；不会自动重发",
+                    index,
+                    control,
+                )
 
-        if verified is None:
-            self._event(
-                emit,
-                request,
-                item,
-                "send_verified",
-                "unknown",
-                "已触发发送，但无法确认结果；不会自动重发",
-                index + 1,
-            )
-            self._clear_boundary(request, item)
-            return "unknown"
-        if not verified:
-            self._clear_boundary(request, item)
-            raise WorkflowError("send_verified", "发送结果校验失败")
+            if verified is None:
+                return self._finish_boundary(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    "unknown",
+                    "已触发发送，但无法确认结果；不会自动重发",
+                    index,
+                    control,
+                )
+            if not verified:
+                return self._finish_boundary(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    "error",
+                    "发送结果校验失败",
+                    index,
+                    control,
+                )
 
         detail = "发送结果已确认"
-        if request.options.file_paths and not request.options.use_forward:
+        if request.options.file_paths:
+            if not boundary_marked:
+                self._mark_boundary(request, item, "send_triggered", index)
+                boundary_marked = True
+                self._success_step(
+                    emit, request, item, "send_triggered", "已触发附件发送", index
+                )
             try:
                 file_results = driver.send_files(request.options.file_paths)
             except Exception as exc:
@@ -379,37 +542,53 @@ class WeixinWorkflowEngine:
                     "send_verified",
                     f"文本已发送，但附件结果无法确认：{exc}；不会重放整项",
                     index,
+                    control,
                 )
-            failed = [
+            unknown = [
                 result
                 for result in file_results
-                if result.get("outcome") != "success"
+                if result.get("outcome") == "unknown"
             ]
+            if unknown:
+                return self._finish_boundary(
+                    emit,
+                    request,
+                    item,
+                    "send_verified",
+                    "unknown",
+                    f"{len(unknown)} 个附件结果未知；不会重放整项",
+                    index,
+                    control,
+                )
+            failed = [result for result in file_results if result.get("outcome") != "success"]
             if failed:
-                detail = f"文本已发送，{len(failed)} 个附件失败"
-                self._event(
+                prefix = "文本已发送，" if item.message else ""
+                detail = f"{prefix}{len(failed)} 个附件失败"
+                return self._finish_boundary(
                     emit,
                     request,
                     item,
                     "send_verified",
                     "error",
                     detail,
-                    index + 1,
+                    index,
+                    control,
                 )
-                self._clear_boundary(request, item)
-                return "error"
-            detail = f"文本及 {len(file_results)} 个附件已确认"
-        self._event(
+            detail = (
+                f"文本及 {len(file_results)} 个附件已确认"
+                if item.message
+                else f"{len(file_results)} 个附件已确认"
+            )
+        return self._finish_boundary(
             emit,
             request,
             item,
             "send_verified",
             "success",
             detail,
-            index + 1,
+            index,
+            control,
         )
-        self._clear_boundary(request, item)
-        return "success"
 
     def _run_friend_item(
         self,
@@ -488,33 +667,40 @@ class WeixinWorkflowEngine:
                 "submit_verified",
                 f"已点击确定，但自动化连接中断：{exc}；不会再次提交",
                 index,
+                control,
             )
         if verified is None:
-            self._event(
+            return self._finish_boundary(
                 emit,
                 request,
                 item,
                 "submit_verified",
                 "unknown",
                 "已点击确定，但无法确认结果；不会再次提交",
-                index + 1,
+                index,
+                control,
             )
-            self._clear_boundary(request, item)
-            return "unknown"
         if not verified:
-            self._clear_boundary(request, item)
-            raise WorkflowError("submit_verified", "好友申请提交校验失败")
-        self._event(
+            return self._finish_boundary(
+                emit,
+                request,
+                item,
+                "submit_verified",
+                "error",
+                "好友申请提交校验失败",
+                index,
+                control,
+            )
+        return self._finish_boundary(
             emit,
             request,
             item,
             "submit_verified",
             "success",
             "提交结果已确认",
-            index + 1,
+            index,
+            control,
         )
-        self._clear_boundary(request, item)
-        return "success"
 
 
 __all__ = [

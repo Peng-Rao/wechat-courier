@@ -113,3 +113,25 @@ def test_accessibility_session_rejects_an_unexpected_original_byte():
 
     assert backend.writes == []
     assert backend.closed is True
+
+
+def test_cleanup_restores_gate_even_if_screen_reader_restore_fails():
+    class CleanupFailureBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self._screen_reader_reads = 0
+
+        def get_screen_reader(self):
+            self._screen_reader_reads += 1
+            if self._screen_reader_reads > 1:
+                raise RuntimeError("screen reader restore failed")
+            return super().get_screen_reader()
+
+    backend = CleanupFailureBackend()
+    session = WeixinAccessibilitySession(backend).__enter__()
+
+    with pytest.raises(RuntimeError, match="screen reader restore failed"):
+        session.close()
+
+    assert backend.memory[session.gate_address] == 0
+    assert backend.closed is True

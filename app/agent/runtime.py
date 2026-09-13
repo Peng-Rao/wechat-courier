@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
@@ -14,10 +15,12 @@ from .profile import SUPPORTED_WEIXIN_VERSION
 class TaskControl:
     """Thread-safe pause and stop flags checked at workflow safe points."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_result_ack: bool = False) -> None:
         self._condition = threading.Condition()
         self._paused = False
         self._stop_requested = False
+        self._require_result_ack = require_result_ack
+        self._result_acks: set[str] = set()
 
     @property
     def stop_requested(self) -> bool:
@@ -44,6 +47,25 @@ class TaskControl:
             while self._paused and not self._stop_requested:
                 self._condition.wait(0.2)
             return not self._stop_requested
+
+    def acknowledge_result(self, item_id: str) -> None:
+        with self._condition:
+            self._result_acks.add(str(item_id))
+            self._condition.notify_all()
+
+    def wait_for_result_ack(self, item_id: str, timeout: float) -> bool:
+        if not self._require_result_ack:
+            return True
+        item_id = str(item_id)
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while item_id not in self._result_acks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(0.2, remaining))
+            self._result_acks.remove(item_id)
+            return True
 
 
 class _UnavailableEngine:
@@ -144,12 +166,17 @@ class AgentRuntime(QObject):
         self._inspect_timeout = inspect_timeout_ms / 1000.0
         self._active_task_id = ""
         self._inspection_pending = False
+        self._shutdown_pending = False
         self._control: TaskControl | None = None
         self._fatal_exit = fatal_exit
         self._action_watchdog = QTimer(self)
         self._action_watchdog.setSingleShot(True)
         self._action_watchdog.setInterval(max(1_000, int(action_timeout_ms)))
         self._action_watchdog.timeout.connect(self._on_action_timeout)
+        self._shutdown_deadline = QTimer(self)
+        self._shutdown_deadline.setSingleShot(True)
+        self._shutdown_deadline.setInterval(2_500)
+        self._shutdown_deadline.timeout.connect(self.shutdownRequested.emit)
         self._thread = QThread(self)
         self._thread.setObjectName("wechat-automation")
         self._runner = _AutomationRunner(engine_factory)
@@ -207,7 +234,7 @@ class AgentRuntime(QObject):
         if not request.items:
             raise ValueError("task must contain at least one item")
         self._active_task_id = request.task_id
-        self._control = TaskControl()
+        self._control = TaskControl(require_result_ack=True)
         self._action_watchdog.start()
         self.taskRequested.emit({"request": request, "control": self._control})
         self._forward_notice(
@@ -236,9 +263,24 @@ class AgentRuntime(QObject):
 
     def approve_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
         decision = str(payload.get("decision", ""))
-        if decision not in {"mark_unknown", "discard", "stop", "restart_wechat"}:
+        if decision not in {
+            "acknowledge",
+            "mark_unknown",
+            "discard",
+            "stop",
+            "restart_wechat",
+        }:
             raise ValueError("invalid recovery decision")
-        if decision == "restart_wechat":
+        if decision == "acknowledge":
+            task_id = str(payload.get("taskId", ""))
+            item_id = str(payload.get("itemId", ""))
+            if not task_id or not item_id:
+                raise ValueError("result acknowledgement requires taskId and itemId")
+            if self._control is not None and task_id == self._active_task_id:
+                self._control.acknowledge_result(item_id)
+            else:
+                self._journal.clear(task_id=task_id, item_id=item_id)
+        elif decision == "restart_wechat":
             timeout = max(30, min(300, int(payload.get("loginTimeout", 90))))
             self.recoveryRequested.emit({"timeout": timeout})
         else:
@@ -247,8 +289,11 @@ class AgentRuntime(QObject):
 
     def shutdown(self) -> dict[str, Any]:
         if self._control is not None:
+            self._shutdown_pending = True
             self._control.request_stop()
-        QTimer.singleShot(0, self.shutdownRequested.emit)
+            self._shutdown_deadline.start()
+        else:
+            QTimer.singleShot(0, self.shutdownRequested.emit)
         return {"accepted": True}
 
     @Slot(str, object)
@@ -269,6 +314,10 @@ class AgentRuntime(QObject):
         payload["taskId"] = task_id
         self._forward_notice("task.finished", payload)
         self._forward_notice("agent.status", {"status": "ready", "taskId": ""})
+        if self._shutdown_pending:
+            self._shutdown_pending = False
+            self._shutdown_deadline.stop()
+            QTimer.singleShot(0, self.shutdownRequested.emit)
 
     @Slot(object)
     def _recovery_finished(self, envelope: dict[str, Any]) -> None:
@@ -308,6 +357,7 @@ class AgentRuntime(QObject):
 
     def close(self, timeout_ms: int = 2_000) -> None:
         self._action_watchdog.stop()
+        self._shutdown_deadline.stop()
         if self._control is not None:
             self._control.request_stop()
         self._thread.quit()

@@ -245,5 +245,17 @@ class AgentClient(QObject):
         self.close()
         self.start(self._executable)
 
+    def shutdown(self, grace_ms: int = 2_500) -> None:
+        if self._connected:
+            try:
+                self.call("agent.shutdown")
+                self._socket.waitForBytesWritten(250)
+            except Exception:
+                pass
+        process = self._process
+        if process is not None and process.waitForFinished(grace_ms):
+            self._process = None
+        self.close()
+
 
 __all__ = ["AgentClient"]

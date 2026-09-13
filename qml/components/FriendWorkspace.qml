@@ -259,6 +259,7 @@ Item {
                                     height: 24
                                     radius: WxTheme.radiusSmall
                                     color: !valid ? WxTheme.clDangerSoft
+                                        : status === "working" ? WxTheme.clInfoSoft
                                         : status === "success" ? WxTheme.clSuccessSoft
                                         : status === "unknown" ? WxTheme.clWarningSoft
                                         : WxTheme.clNeutralSoft
@@ -266,11 +267,13 @@ Item {
                                         id: statusText
                                         anchors.centerIn: parent
                                         text: !valid ? error
+                                            : status === "working" ? "执行中"
                                             : status === "success" ? "已提交"
                                             : status === "error" ? "执行异常"
                                             : status === "unknown" ? "结果未知" : "预检通过"
                                         elide: Text.ElideRight
                                         color: !valid || status === "error" ? WxTheme.clDangerNew
+                                            : status === "working" ? WxTheme.clInfo
                                             : status === "success" ? WxTheme.clSuccessText
                                             : status === "unknown" ? WxTheme.clWarningText
                                             : WxTheme.clTextSecondary

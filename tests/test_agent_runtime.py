@@ -7,7 +7,7 @@ from PySide6.QtNetwork import QLocalServer
 
 from app.agent.client import AgentClient
 from app.agent.journal import SafetyJournal
-from app.agent.runtime import AgentRuntime
+from app.agent.runtime import AgentRuntime, TaskControl
 from app.agent.server import AgentServer
 
 
@@ -114,6 +114,23 @@ def test_runtime_rejects_concurrent_tasks(qapp):
     runtime.close()
 
 
+def test_runtime_shutdown_waits_for_active_item_to_reach_safe_finish(qapp, qtbot):
+    engine = RecordingEngine()
+    runtime = AgentRuntime(engine_factory=lambda: engine)
+    shutdowns = []
+    runtime.shutdownRequested.connect(lambda: shutdowns.append(True))
+    runtime.start_task(message_request())
+    assert engine.started.wait(1)
+
+    assert runtime.shutdown() == {"accepted": True}
+    qtbot.wait(30)
+    assert shutdowns == []
+
+    engine.release.set()
+    qtbot.waitUntil(lambda: shutdowns == [True])
+    runtime.close()
+
+
 def test_runtime_reports_and_requires_acknowledgement_of_recovery_record(
     tmp_path, qapp
 ):
@@ -141,6 +158,25 @@ def test_runtime_reports_and_requires_acknowledgement_of_recovery_record(
     }
     assert journal.load() is None
     runtime.close()
+
+
+def test_task_control_waits_for_an_explicit_result_acknowledgement():
+    control = TaskControl(require_result_ack=True)
+    released = threading.Event()
+
+    worker = threading.Thread(
+        target=lambda: (
+            control.wait_for_result_ack("item-1", timeout=1.0),
+            released.set(),
+        )
+    )
+    worker.start()
+    assert released.wait(0.05) is False
+
+    control.acknowledge_result("item-1")
+    worker.join(1)
+
+    assert released.is_set() is True
 
 
 def test_runtime_action_timeout_uses_fatal_agent_exit(tmp_path, qapp):

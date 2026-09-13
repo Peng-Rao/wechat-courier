@@ -290,10 +290,18 @@ class WeixinAccessibilitySession:
             raise
 
     def close(self) -> None:
+        cleanup_error: Exception | None = None
         if self._original_screen_reader is not None:
             try:
                 if self.backend.get_screen_reader() != self._original_screen_reader:
-                    self.backend.set_screen_reader(self._original_screen_reader)
+                    if not self.backend.set_screen_reader(
+                        self._original_screen_reader
+                    ):
+                        raise RuntimeError(
+                            "failed to restore the screen-reader session flag"
+                        )
+            except Exception as exc:
+                cleanup_error = exc
             finally:
                 self._original_screen_reader = None
         if self._handle is not None:
@@ -306,9 +314,27 @@ class WeixinAccessibilitySession:
                     self.backend.write_byte(
                         self._handle, self.gate_address, self._original_gate
                     )
+                    if (
+                        self.backend.read_byte(self._handle, self.gate_address)
+                        != self._original_gate
+                    ):
+                        raise RuntimeError(
+                            "failed to restore the Weixin accessibility gate"
+                        )
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
             finally:
-                self.backend.close_process(self._handle)
-                self._handle = None
+                try:
+                    self.backend.close_process(self._handle)
+                except Exception as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                finally:
+                    self._handle = None
+                    self._original_gate = None
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()

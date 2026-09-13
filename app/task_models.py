@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, Signal, Slot
 
 from .friend_import import FriendRecord, load_friend_records, validate_records
+
+
+_TERMINAL_STEPS = {"send_verified", "submit_verified"}
+_TERMINAL_OUTCOMES = {"error", "unknown", "stopped"}
+
+
+def _display_result(event: dict[str, Any]) -> tuple[str, bool]:
+    outcome = str(event.get("outcome", "working"))
+    step = str(event.get("step", ""))
+    terminal = outcome in _TERMINAL_OUTCOMES or step in _TERMINAL_STEPS
+    return (outcome if terminal else "working"), terminal
+
+
+def _event_time(event: dict[str, Any]) -> datetime | None:
+    value = str(event.get("timestamp", "")).strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class FriendImportModel(QAbstractListModel):
@@ -169,7 +191,7 @@ class FriendImportModel(QAbstractListModel):
         for row, record in enumerate(self._records):
             if record.item_id != item_id:
                 continue
-            record.status = str(event.get("outcome", record.status))
+            record.status, _terminal = _display_result(event)
             index = self.index(row, 0)
             self.dataChanged.emit(index, index, [self.StatusRole])
             break
@@ -205,6 +227,7 @@ class TaskItemModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._items: list[TaskDisplayItem] = []
+        self._started_at: dict[str, datetime] = {}
 
     def roleNames(self):
         return self._ROLE_NAMES
@@ -228,6 +251,7 @@ class TaskItemModel(QAbstractListModel):
     def replace(self, items: Iterable[TaskDisplayItem]) -> None:
         self.beginResetModel()
         self._items = list(items)
+        self._started_at.clear()
         self.endResetModel()
 
     def apply_event(self, event: dict[str, Any]) -> None:
@@ -235,9 +259,16 @@ class TaskItemModel(QAbstractListModel):
         for row, item in enumerate(self._items):
             if item.item_id != item_id:
                 continue
+            timestamp = _event_time(event)
+            if timestamp is not None and item_id not in self._started_at:
+                self._started_at[item_id] = timestamp
             item.detail = str(event.get("detail", ""))
-            item.result = str(event.get("outcome", "working"))
+            item.result, terminal = _display_result(event)
             item.step_code = str(event.get("step", ""))
+            started = self._started_at.get(item_id)
+            if terminal and started is not None and timestamp is not None:
+                elapsed = max(0.0, (timestamp - started).total_seconds())
+                item.duration = f"{elapsed:.1f}s"
             index = self.index(row, 0)
             self.dataChanged.emit(index, index, list(self._ROLE_NAMES))
             break

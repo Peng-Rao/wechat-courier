@@ -22,6 +22,7 @@ class FakeAgentClient(QObject):
         self.next_id = 1
         self.started = False
         self.restart_count = 0
+        self.shutdown_count = 0
 
     def start(self):
         self.started = True
@@ -37,6 +38,9 @@ class FakeAgentClient(QObject):
 
     def restart(self):
         self.restart_count += 1
+
+    def shutdown(self):
+        self.shutdown_count += 1
 
 
 def settings(tmp_path):
@@ -55,6 +59,7 @@ def make_backend(tmp_path):
             "connected": True,
             "version": "4.1.13.65",
             "supported": True,
+            "uiaReady": True,
             "detail": "ready",
         }
     )
@@ -70,6 +75,14 @@ def test_backend_exposes_five_stable_qobject_facades(tmp_path, qapp):
     assert isinstance(backend.settings, QObject)
     assert isinstance(backend.agent, QObject)
     assert backend.versionInfo == "五阿哥微信助手 v0.3.0-test"
+
+
+def test_backend_shutdown_requests_graceful_agent_exit(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+
+    backend.shutdown()
+
+    assert client.shutdown_count == 1
 
 
 def test_message_task_is_built_for_the_agent_and_is_globally_exclusive(
@@ -91,6 +104,29 @@ def test_message_task_is_built_for_the_agent_and_is_globally_exclusive(
     assert backend.task.startFriends() is False
 
 
+def test_message_recipients_use_the_same_normalized_deduplication_as_agent(
+    tmp_path, qapp
+):
+    backend, _client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice\n alice \nＡｌｉｃｅ\nBob"
+
+    assert backend.message.recipients() == ["Alice", "Bob"]
+
+
+def test_async_task_start_rejection_releases_the_global_lock(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage() is True
+    request_id = client.calls[-1][0]
+
+    client.rpcError.emit(request_id, -32000, "Agent 拒绝了任务")
+
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert backend.task.error == "Agent 拒绝了任务"
+
+
 def test_unsupported_weixin_version_blocks_start_but_not_editing(tmp_path, qapp):
     backend, client = make_backend(tmp_path)
     backend.agent.applyInspection(
@@ -106,6 +142,45 @@ def test_unsupported_weixin_version_blocks_start_but_not_editing(tmp_path, qapp)
 
     assert backend.task.startMessage() is False
     assert backend.message.recipientsText == "Alice"
+    assert not any(method == "task.start" for _id, method, _payload in client.calls)
+
+
+def test_supported_version_with_unavailable_uia_still_blocks_start(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "uiaReady": False,
+            "detail": "UIA 控件树未就绪",
+        }
+    )
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+
+    assert backend.agent.automationReady is False
+    assert backend.task.startMessage() is False
+    assert not any(method == "task.start" for _id, method, _payload in client.calls)
+
+
+def test_supported_version_without_explicit_uia_readiness_still_blocks_start(
+    tmp_path, qapp
+):
+    backend, client = make_backend(tmp_path)
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "detail": "legacy inspection response",
+        }
+    )
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+
+    assert backend.agent.automationReady is False
+    assert backend.task.startMessage() is False
     assert not any(method == "task.start" for _id, method, _payload in client.calls)
 
 
@@ -154,6 +229,28 @@ def test_task_events_update_monitor_and_release_global_lock(tmp_path, qapp):
     assert backend.task.currentStepCode == "target_verified"
     assert backend.task.currentStepLabel == "目标校验通过"
     assert backend.task.runtimeLogs.rowCount() == 1
+
+    client.notificationReceived.emit(
+        "task.event",
+        {
+            "taskId": task_id,
+            "itemId": item_id,
+            "step": "send_verified",
+            "outcome": "success",
+            "detail": "发送结果已确认",
+            "done": 1,
+            "total": 1,
+            "timestamp": "2026-09-13T00:00:01+00:00",
+        },
+    )
+    assert client.calls[-1][1:] == (
+        "recovery.approve",
+        {
+            "decision": "acknowledge",
+            "taskId": task_id,
+            "itemId": item_id,
+        },
+    )
 
     client.notificationReceived.emit(
         "task.finished",
@@ -212,6 +309,7 @@ def test_agent_recovery_marks_boundary_item_unknown_and_resumes_remaining(
             "connected": True,
             "version": "4.1.13.65",
             "supported": True,
+            "uiaReady": True,
             "detail": "ready",
         }
     )
@@ -254,6 +352,23 @@ def test_agent_restart_limit_stops_active_task_safely(tmp_path, qapp):
     assert backend.task.active is False
     assert backend.task.phase == "error"
     assert "重启次数" in backend.task.error
+
+
+def test_merged_forward_task_is_not_resumed_after_agent_disconnect(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice\nBob"
+    backend.message.templateText = "hello"
+    backend.message.useForward = True
+    backend.message._files = ["one.pdf"]
+    assert backend.task.startMessage()
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert "不会自动恢复" in backend.task.error
+    assert client.restart_count == 1
 
 
 def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):

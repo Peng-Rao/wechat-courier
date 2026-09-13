@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -30,6 +31,14 @@ RISK_KEYWORDS = (
     "账号限制",
     "安全验证",
     "环境异常",
+)
+FORWARD_CONFIRMATION_KEYWORDS = ("聊天记录", "合并转发")
+FRIEND_IDENTITY_LABELS = ("微信号", "手机号", "账号", "帐号")
+FRIEND_SUBMIT_SUCCESS_NAMES = (
+    "朋友申请已发送",
+    "好友申请已发送",
+    "等待验证",
+    "申请已提交",
 )
 
 
@@ -94,6 +103,83 @@ def extract_contact_results(
     return results
 
 
+def extract_exact_forward_candidates(
+    nodes: Iterable[tuple[Any, int]], target: str
+) -> list[Any]:
+    expected = normalize_identity(target)
+    candidates = []
+    seen = set()
+    for control, _depth in nodes:
+        if str(safe_attr(control, "ControlTypeName", "")) not in {
+            "ListItemControl",
+            "ButtonControl",
+            "CheckBoxControl",
+        }:
+            continue
+        if not bool(safe_attr(control, "IsEnabled", False)):
+            continue
+        if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
+            continue
+        key = (
+            str(safe_attr(control, "AutomationId", "")),
+            str(safe_attr(control, "ClassName", "")),
+            str(safe_attr(control, "Name", "")),
+        )
+        if key not in seen:
+            seen.add(key)
+            candidates.append(control)
+    return candidates
+
+
+def filter_recent_message_bubbles(
+    nodes: Iterable[tuple[Any, int]],
+    accepted_classes: Sequence[str],
+    count: int,
+) -> list[Any]:
+    if count <= 0:
+        return []
+    accepted = set(accepted_classes)
+    bubbles = [
+        control
+        for control, _depth in nodes
+        if str(safe_attr(control, "ClassName", "")) in accepted
+    ]
+    return bubbles[-count:]
+
+
+def control_key(control: Any) -> tuple:
+    rectangle = safe_attr(control, "BoundingRectangle")
+    rect = None
+    if rectangle is not None:
+        rect = (
+            rectangle.left,
+            rectangle.top,
+            rectangle.right,
+            rectangle.bottom,
+        )
+    return (
+        str(safe_attr(control, "Name", "")),
+        str(safe_attr(control, "ClassName", "")),
+        str(safe_attr(control, "AutomationId", "")),
+        rect,
+    )
+
+
+def has_new_forward_confirmation(
+    controls: Iterable[Any], before: set[tuple]
+) -> bool:
+    for control in controls:
+        if control_key(control) in before:
+            continue
+        class_name = str(safe_attr(control, "ClassName", ""))
+        if "Chat" not in class_name and "Message" not in class_name:
+            continue
+        text = str(safe_attr(control, "Name", "")).strip()
+        if any(keyword in text for keyword in FORWARD_CONFIRMATION_KEYWORDS):
+            return True
+    return False
+
+
 def resolve_friend_form_fields(nodes: Iterable[tuple[Any, int]]):
     materialized = list(nodes)
     greeting = find_exact_control(
@@ -116,6 +202,38 @@ def raise_for_risk_controls(nodes: Iterable[tuple[Any, int]]) -> None:
         text = str(safe_attr(control, "Name", "")).strip()
         if text and any(keyword in text for keyword in RISK_KEYWORDS):
             raise RiskControlError(text)
+
+
+def extract_labeled_friend_identities(
+    nodes: Iterable[tuple[Any, int]],
+) -> list[str]:
+    """Read profile identities only from explicit account labels."""
+    materialized = list(nodes)
+    identities: list[str] = []
+    inline_pattern = re.compile(
+        rf"^(?:{'|'.join(FRIEND_IDENTITY_LABELS)})\s*[：:]\s*(.+)$"
+    )
+    for index, (control, depth) in enumerate(materialized):
+        text = str(safe_attr(control, "Name", "")).strip()
+        match = inline_pattern.match(text)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                identities.append(value)
+            continue
+        if text not in FRIEND_IDENTITY_LABELS:
+            continue
+        for next_control, next_depth in materialized[index + 1 : index + 3]:
+            value = str(safe_attr(next_control, "Name", "")).strip()
+            if next_depth < depth or value in FRIEND_IDENTITY_LABELS:
+                break
+            if value:
+                identities.append(value)
+                break
+    unique: dict[str, str] = {}
+    for value in identities:
+        unique.setdefault(normalize_identity(value), value)
+    return [value for key, value in unique.items() if key]
 
 
 class NativeWeixinDriver:
@@ -165,9 +283,17 @@ class NativeWeixinDriver:
         deadline = time.monotonic() + max(30, int(timeout))
         while time.monotonic() < deadline:
             current = self.inspect()
-            if current.get("connected") and current.get("supported"):
+            if (
+                current.get("connected")
+                and current.get("supported")
+                and current.get("uiaReady")
+            ):
                 return current
-            if current.get("connected") and current.get("version"):
+            if (
+                current.get("connected")
+                and not current.get("supported")
+                and current.get("version")
+            ):
                 raise RuntimeError(
                     f"微信已启动，但版本 {current['version']} 未通过安全门禁"
                 )
@@ -195,23 +321,35 @@ class NativeWeixinDriver:
             try:
                 get_weixin_profile(version)
                 supported = True
-                detail = "微信版本已验证"
+                detail = "微信版本已验证，正在检查 UIA 控件树"
             except UnsupportedWeixinVersion:
                 supported = False
                 detail = f"微信 {version} 尚未验证，自动化已禁用"
-            return {
+            result = {
                 "connected": True,
                 "hwnd": hwnd,
                 "pid": pid,
                 "version": version,
                 "supported": supported,
+                "uiaReady": False,
                 "detail": detail,
             }
+            if not supported:
+                return result
+            try:
+                self._ensure_session()
+            except Exception as exc:
+                result["detail"] = f"微信版本已验证，但 UIA 未就绪：{exc}"
+                return result
+            result["uiaReady"] = True
+            result["detail"] = "微信版本与 UIA 控件树均已验证"
+            return result
         except Exception as exc:
             return {
                 "connected": False,
                 "version": "",
                 "supported": False,
+                "uiaReady": False,
                 "detail": str(exc),
             }
 
@@ -490,21 +628,7 @@ class NativeWeixinDriver:
 
     @staticmethod
     def _control_key(control) -> tuple:
-        rectangle = safe_attr(control, "BoundingRectangle")
-        rect = None
-        if rectangle is not None:
-            rect = (
-                rectangle.left,
-                rectangle.top,
-                rectangle.right,
-                rectangle.bottom,
-            )
-        return (
-            str(safe_attr(control, "Name", "")),
-            str(safe_attr(control, "ClassName", "")),
-            str(safe_attr(control, "AutomationId", "")),
-            rect,
-        )
+        return control_key(control)
 
     def _message_controls(self) -> list[Any]:
         _root, nodes = self._walk(self._session.hwnd)
@@ -608,20 +732,243 @@ class NativeWeixinDriver:
             )
         return results
 
+    def _open_exact_chat(self, target: str) -> None:
+        if not self.ensure_search_ready():
+            raise RuntimeError("搜索入口不可用")
+        candidates = self.search_contacts(target)
+        expected = normalize_identity(target)
+        exact = [
+            candidate
+            for candidate in candidates
+            if normalize_identity(candidate) == expected
+        ]
+        if len(exact) != 1:
+            raise RuntimeError(f"无法定位唯一聊天目标：{target}")
+        self.select_search_result(exact[0])
+        if normalize_identity(self.current_chat_title()) != expected:
+            raise RuntimeError(f"聊天标题校验失败：{target}")
+
+    def prepare_forward_bundle(self, paths: Sequence[str]) -> dict[str, Any]:
+        materialized = [str(Path(value)) for value in paths]
+        if not materialized or any(not Path(path).is_file() for path in materialized):
+            return {"outcome": "error", "detail": "合并转发源文件不存在"}
+        self._open_exact_chat("文件传输助手")
+        results = self.send_files(materialized)
+        if any(result.get("outcome") == "unknown" for result in results):
+            return {"outcome": "unknown", "detail": "源文件上传结果未知"}
+        failed = [result for result in results if result.get("outcome") != "success"]
+        if failed:
+            return {
+                "outcome": "error",
+                "detail": f"{len(failed)} 个源文件上传失败",
+            }
+        self._forward_source_count = len(materialized)
+        return {"outcome": "success", "count": len(materialized)}
+
+    def _find_all_control(self, **selector):
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        return find_exact_control(nodes, **selector)
+
+    def _wait_all_control(self, **selector):
+        holder = {"control": None}
+
+        def locate():
+            holder["control"] = self._find_all_control(**selector)
+            return holder["control"] is not None
+
+        if not self._waiter.wait(locate, self._timeout, self._wake_event):
+            raise RuntimeError(f"转发控件未出现：{selector}")
+        return holder["control"]
+
+    def _recent_message_bubbles(self, count: int) -> list[Any]:
+        profile = self._session.profile
+        message_list = self._wait_control(
+            automation_id=profile.chat_message_list_automation_id,
+            enabled=False,
+        )
+        nodes = list(
+            self._uia.WalkControl(message_list, includeTop=False, maxDepth=5)
+        )
+        bubbles = filter_recent_message_bubbles(
+            nodes, profile.chat_message_classes, count
+        )
+        if len(bubbles) != count:
+            raise RuntimeError(f"源消息不足：需要 {count} 条，找到 {len(bubbles)} 条")
+        return bubbles
+
+    def _right_click_bounds(self, control) -> None:
+        rectangle = safe_attr(control, "BoundingRectangle")
+        if rectangle is None or rectangle.right <= rectangle.left:
+            raise RuntimeError("消息气泡没有可用边界")
+        self._uia.RightClick(
+            (rectangle.left + rectangle.right) // 2,
+            (rectangle.top + rectangle.bottom) // 2,
+        )
+
+    @staticmethod
+    def _selection_state(control) -> bool:
+        for getter, attribute in (
+            ("GetSelectionItemPattern", "IsSelected"),
+            ("GetTogglePattern", "ToggleState"),
+        ):
+            try:
+                pattern = getattr(control, getter)()
+                value = getattr(pattern, attribute)
+                return bool(value)
+            except Exception:
+                continue
+        return False
+
+    def _select_forward_bubble(self, control) -> None:
+        if self._selection_state(control):
+            return
+        self._actions.select(
+            control,
+            lambda: self._selection_state(control),
+            wake_event=self._wake_event,
+        )
+
+    def _forward_search_edit(self):
+        profile = self._session.profile
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        for automation_id in profile.forward_search_automation_ids:
+            control = find_exact_control(
+                nodes,
+                control_type="EditControl",
+                automation_id=automation_id,
+            )
+            if control is not None:
+                return control
+        return find_exact_control(
+            nodes,
+            name=("搜索", "查找"),
+            control_type="EditControl",
+        )
+
+    def _forward_candidate(self, target: str):
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        candidates = extract_exact_forward_candidates(nodes, target)
+        if len(candidates) != 1:
+            raise RuntimeError(f"转发目标不唯一或未找到：{target}")
+        return candidates[0]
+
+    def _forward_recipient_selected(self, target: str, search_edit) -> bool:
+        if self._selection_state(self._forward_candidate(target)):
+            return True
+        return (self._actions.read_text(search_edit) or "") == ""
+
+    def _forward_message_edit(self, search_edit):
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        for control, _depth in nodes:
+            if control is search_edit:
+                continue
+            if str(safe_attr(control, "ControlTypeName", "")) != "EditControl":
+                continue
+            name = str(safe_attr(control, "Name", "")).strip()
+            if name in {"留言", "附言", "给朋友留言"}:
+                return control
+        return None
+
+    def _invoke_once(self, control) -> str:
+        try:
+            pattern = control.GetInvokePattern()
+        except Exception:
+            pattern = None
+        if pattern is not None:
+            try:
+                result = pattern.Invoke(waitTime=0)
+            except TypeError:
+                result = pattern.Invoke()
+            if result is False:
+                raise RuntimeError("InvokePattern 返回失败")
+            return "invoke_pattern"
+        self._click_bounds(control)
+        return "uia_bounds_click"
+
     def forward_bundle(
         self, target: str, message: str, paths: Sequence[str]
     ) -> dict[str, str]:
-        # The caller treats this as one destructive boundary. Never retry here.
-        results = self.send_files(paths)
-        if any(result["outcome"] != "success" for result in results):
-            return {"outcome": "unknown", "detail": "合并内容中的附件结果未知"}
+        count = int(getattr(self, "_forward_source_count", 0))
+        if count != len(paths) or count <= 0:
+            return {"outcome": "error", "detail": "合并转发源文件尚未准备"}
+
+        target_snapshot = self.message_snapshot()
+        self._open_exact_chat("文件传输助手")
+        bubbles = self._recent_message_bubbles(count)
+        self._right_click_bounds(bubbles[-1])
+        multi = self._wait_all_control(
+            name=("多选", "选择多条", "多选消息"),
+        )
+        self._actions.invoke(
+            multi,
+            lambda: self._find_all_control(name=("转发",)) is not None,
+            wake_event=self._wake_event,
+        )
+
+        bubbles = self._recent_message_bubbles(count)
+        for bubble in bubbles:
+            self._select_forward_bubble(bubble)
+
+        forward = self._wait_all_control(name="转发")
+        self._actions.invoke(
+            forward,
+            lambda: self._find_all_control(
+                name=("合并转发", "合并发送")
+            )
+            is not None,
+            wake_event=self._wake_event,
+        )
+        merge = self._wait_all_control(name=("合并转发", "合并发送"))
+        self._actions.invoke(
+            merge,
+            lambda: self._forward_search_edit() is not None,
+            wake_event=self._wake_event,
+        )
+
+        search_edit = self._forward_search_edit()
+        if search_edit is None:
+            raise RuntimeError("转发搜索框未出现")
+        self._actions.set_text(search_edit, target, wake_event=self._wake_event)
+        candidate = self._forward_candidate(target)
+        self._actions.select(
+            candidate,
+            lambda: self._forward_recipient_selected(target, search_edit),
+            wake_event=self._wake_event,
+        )
+
         if message:
-            before = self.message_snapshot()
-            self.set_composer_text(message)
-            self.trigger_send()
-            if not self.verify_sent(before, message, self._timeout):
-                return {"outcome": "unknown", "detail": "留言结果未知"}
-        return {"outcome": "success", "detail": "内容已发送"}
+            message_edit = self._forward_message_edit(search_edit)
+            if message_edit is None:
+                raise RuntimeError("转发留言输入框未暴露到 UIA")
+            self._actions.set_text(
+                message_edit, message, wake_event=self._wake_event
+            )
+
+        send = self._wait_all_control(
+            name=("发送", "确定"),
+            control_type="ButtonControl",
+        )
+        self._invoke_once(send)
+
+        self._open_exact_chat(target)
+        appended = self._waiter.wait(
+            lambda: has_new_forward_confirmation(
+                self._message_controls(), target_snapshot
+            ),
+            self._timeout,
+            self._wake_event,
+        )
+        if not appended:
+            raise_for_risk_controls(self._all_nodes())
+            return {"outcome": "unknown", "detail": "已触发合并转发，但结果无法确认"}
+        return {
+            "outcome": "success",
+            "detail": f"{count} 个文件已合并转发并确认",
+        }
 
     def _activate_navigation(
         self,
@@ -692,7 +1039,11 @@ class NativeWeixinDriver:
         except RuntimeError:
             raise_for_risk_controls(self._walk(self._add_hwnd)[1])
             return None
-        return {"account": account, "control": button}
+        _root, nodes = self._walk(self._add_hwnd)
+        raise_for_risk_controls(nodes)
+        identities = extract_labeled_friend_identities(nodes)
+        verified_account = identities[0] if len(identities) == 1 else ""
+        return {"account": verified_account, "control": button}
 
     @staticmethod
     def profile_account(profile: dict[str, Any]) -> str:
@@ -751,15 +1102,28 @@ class NativeWeixinDriver:
     def verify_friend_request(self, timeout: float) -> bool | None:
         import win32gui
 
-        def closed():
-            if not self._verify_hwnd or not win32gui.IsWindow(self._verify_hwnd):
-                return True
-            if not win32gui.IsWindowVisible(self._verify_hwnd):
-                return True
-            raise_for_risk_controls(self._walk(self._verify_hwnd)[1])
-            return False
+        def explicitly_confirmed():
+            global_nodes = list(self._all_nodes())
+            raise_for_risk_controls(global_nodes)
+            status_nodes: list[tuple[Any, int]] = []
+            if self._add_hwnd:
+                status_nodes.extend(self._walk(self._add_hwnd)[1])
+            if (
+                self._verify_hwnd
+                and win32gui.IsWindow(self._verify_hwnd)
+                and win32gui.IsWindowVisible(self._verify_hwnd)
+            ):
+                status_nodes.extend(self._walk(self._verify_hwnd)[1])
+            raise_for_risk_controls(status_nodes)
+            return any(
+                str(safe_attr(control, "Name", "")).strip()
+                in FRIEND_SUBMIT_SUCCESS_NAMES
+                for control, _depth in status_nodes
+            )
 
-        if self._waiter.wait(closed, timeout, self._wake_event):
+        if self._waiter.wait(
+            explicitly_confirmed, timeout, self._wake_event
+        ):
             self._verify_hwnd = 0
             return True
         return None
@@ -785,7 +1149,11 @@ __all__ = [
     "NativeWeixinDriver",
     "RiskControlError",
     "extract_contact_results",
+    "extract_exact_forward_candidates",
+    "filter_recent_message_bubbles",
     "find_exact_control",
+    "has_new_forward_confirmation",
+    "extract_labeled_friend_identities",
     "raise_for_risk_controls",
     "resolve_friend_form_fields",
 ]
