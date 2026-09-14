@@ -199,6 +199,52 @@ def test_removing_a_row_revalidates_the_remaining_duplicate(qapp):
     assert model.removeRecord(1) is False
 
 
+def test_deleting_duplicate_selects_manual_row_on_first_valid_transition(qapp):
+    model = FriendImportModel()
+    model.replace_records(
+        load_friend_records(
+            [
+                ["账号", "打招呼语", "备注"],
+                ["wxid_existing", "", ""],
+            ]
+        )
+    )
+    manual_row = model.appendEmptyRecord()
+    assert model.setCell(manual_row, "account", "wxid_existing")
+    assert model.record_at(manual_row).valid is False
+    assert model.record_at(manual_row).selected is False
+
+    assert model.removeRecord(0) is True
+
+    assert model.record_at(0).valid is True
+    assert model.record_at(0).selected is True
+    assert model.selectedCount == 1
+
+
+def test_editing_other_duplicate_consumes_manual_rows_first_valid_selection(qapp):
+    model = FriendImportModel()
+    model.replace_records(
+        load_friend_records(
+            [
+                ["账号", "打招呼语", "备注"],
+                ["wxid_existing", "", ""],
+            ]
+        )
+    )
+    manual_row = model.appendEmptyRecord()
+    assert model.setCell(manual_row, "account", "wxid_existing")
+    assert model.record_at(manual_row).valid is False
+
+    assert model.setCell(0, "account", "wxid_changed")
+
+    assert model.record_at(manual_row).valid is True
+    assert model.record_at(manual_row).selected is True
+
+    assert model.setSelected(manual_row, False)
+    assert model.setCell(0, "account", "wxid_changed_again")
+    assert model.record_at(manual_row).selected is False
+
+
 def test_replacing_records_clears_pending_manual_auto_selection(qapp):
     model = FriendImportModel()
     row = model.appendEmptyRecord()

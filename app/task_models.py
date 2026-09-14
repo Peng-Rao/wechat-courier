@@ -102,6 +102,19 @@ class FriendImportModel(QAbstractListModel):
     def record_at(self, row: int) -> FriendRecord:
         return self._records[row]
 
+    def _select_newly_valid_manual_records(self) -> None:
+        selected_count = self.selectedCount
+        for record in self._records:
+            if (
+                record.item_id not in self._manual_rows_pending_selection
+                or not record.valid
+            ):
+                continue
+            self._manual_rows_pending_selection.discard(record.item_id)
+            if selected_count < 20:
+                record.selected = True
+                selected_count += 1
+
     def replace_records(self, records: Iterable[FriendRecord]) -> None:
         self.beginResetModel()
         self._records = list(records)
@@ -131,6 +144,7 @@ class FriendImportModel(QAbstractListModel):
         self._manual_rows_pending_selection.discard(item_id)
         self.endRemoveRows()
         validate_records(self._records)
+        self._select_newly_valid_manual_records()
         if self._records:
             self.dataChanged.emit(
                 self.index(0, 0),
@@ -164,14 +178,7 @@ class FriendImportModel(QAbstractListModel):
         setattr(self._records[row], field, str(value).strip())
         if field == "account":
             validate_records(self._records)
-            record = self._records[row]
-            if (
-                record.valid
-                and record.item_id in self._manual_rows_pending_selection
-            ):
-                self._manual_rows_pending_selection.discard(record.item_id)
-                if self.selectedCount < 20:
-                    record.selected = True
+            self._select_newly_valid_manual_records()
         top = self.index(0, 0)
         bottom = self.index(len(self._records) - 1, 0)
         if bottom.isValid():
