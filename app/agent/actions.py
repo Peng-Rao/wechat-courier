@@ -86,17 +86,36 @@ class VerifiedActions:
         method: str,
         method_label: str,
         postcondition: Callable[[], bool],
+        pre_resolve_control: Callable[[], Any] | None = None,
         resolve_control: Callable[[], Any] | None = None,
+        source_present: Callable[[], bool] | None = None,
         extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
+        if pre_resolve_control is not None:
+            try:
+                fresh_control = pre_resolve_control()
+            except Exception as exc:
+                raise ActionVerificationError(
+                    f"action={method_label}; pre-action control re-resolution "
+                    f"failed: {exc}; {describe_control(control)}"
+                ) from exc
+            if fresh_control is None:
+                raise ActionVerificationError(
+                    f"action={method_label}; pre-action control re-resolution "
+                    f"returned no control; {describe_control(control)}"
+                )
+            control = fresh_control
+
         def verified() -> bool:
             return bool(postcondition()) and (
                 extra_postcondition is None or bool(extra_postcondition())
             )
 
         pattern = _pattern(control, getter)
+        pattern_attempted = False
         if pattern is not None:
+            pattern_attempted = True
             try:
                 invoked = _call_pattern(pattern, method)
             except Exception:
@@ -105,6 +124,22 @@ class VerifiedActions:
                 verified, self.timeout, wake_event=wake_event
             ):
                 return ActionResult(method_label)
+
+        if pattern_attempted and source_present is not None:
+            try:
+                still_present = bool(source_present())
+            except Exception as exc:
+                raise ActionVerificationError(
+                    f"action={method_label}; source-presence check failed: {exc}; "
+                    f"{describe_control(control)}"
+                ) from exc
+            if not still_present:
+                if self.waiter.wait(verified, self.timeout, wake_event=wake_event):
+                    return ActionResult(f"{method_label}_transition")
+                raise ActionVerificationError(
+                    f"action={method_label}; source control disappeared but target "
+                    f"state was not established; {describe_control(control)}"
+                )
 
         fallback_control = control
         if resolve_control is not None:
@@ -144,7 +179,9 @@ class VerifiedActions:
         control: Any,
         postcondition: Callable[[], bool],
         *,
+        pre_resolve_control: Callable[[], Any] | None = None,
         resolve_control: Callable[[], Any] | None = None,
+        source_present: Callable[[], bool] | None = None,
         extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
@@ -154,7 +191,9 @@ class VerifiedActions:
             method="Invoke",
             method_label="invoke_pattern",
             postcondition=postcondition,
+            pre_resolve_control=pre_resolve_control,
             resolve_control=resolve_control,
+            source_present=source_present,
             extra_postcondition=extra_postcondition,
             wake_event=wake_event,
         )
@@ -164,7 +203,9 @@ class VerifiedActions:
         control: Any,
         postcondition: Callable[[], bool],
         *,
+        pre_resolve_control: Callable[[], Any] | None = None,
         resolve_control: Callable[[], Any] | None = None,
+        source_present: Callable[[], bool] | None = None,
         extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
@@ -174,9 +215,58 @@ class VerifiedActions:
             method="Select",
             method_label="selection_item_pattern",
             postcondition=postcondition,
+            pre_resolve_control=pre_resolve_control,
             resolve_control=resolve_control,
+            source_present=source_present,
             extra_postcondition=extra_postcondition,
             wake_event=wake_event,
+        )
+
+    def click(
+        self,
+        control: Any,
+        postcondition: Callable[[], bool],
+        *,
+        pre_resolve_control: Callable[[], Any] | None = None,
+        extra_postcondition: Callable[[], bool] | None = None,
+        wake_event=None,
+    ) -> ActionResult:
+        """Perform one bounds click on a freshly resolved control.
+
+        This deliberately has no automatic replay path. It is used for known
+        false-positive InvokePattern controls where a real click is required.
+        """
+        if pre_resolve_control is not None:
+            try:
+                fresh_control = pre_resolve_control()
+            except Exception as exc:
+                raise ActionVerificationError(
+                    "action=uia_bounds_click; pre-action control re-resolution "
+                    f"failed: {exc}; {describe_control(control)}"
+                ) from exc
+            if fresh_control is None:
+                raise ActionVerificationError(
+                    "action=uia_bounds_click; pre-action control re-resolution "
+                    f"returned no control; {describe_control(control)}"
+                )
+            control = fresh_control
+        try:
+            self.click_fallback(control)
+        except Exception as exc:
+            raise ActionVerificationError(
+                f"action=uia_bounds_click failed: {exc}; {describe_control(control)}"
+            ) from exc
+
+        def verified() -> bool:
+            return bool(postcondition()) and (
+                extra_postcondition is None or bool(extra_postcondition())
+            )
+
+        if self.waiter.wait(verified, self.timeout, wake_event=wake_event):
+            return ActionResult("uia_bounds_click")
+        raise ActionVerificationError(
+            "action=uia_bounds_click did not satisfy its postcondition; "
+            + describe_control(control)
         )
 
     @staticmethod

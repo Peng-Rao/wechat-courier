@@ -109,6 +109,88 @@ def test_selection_re_resolves_control_before_fallback_click():
     assert clicked == ["fresh"]
 
 
+def test_invoke_can_re_resolve_immediately_before_the_pattern_action():
+    state = {"opened": False}
+    stale = FakeControl(
+        invoke=FakePattern(lambda: pytest.fail("stale control must not be invoked")),
+        name="stale",
+    )
+    fresh = FakeControl(
+        invoke=FakePattern(lambda: state.__setitem__("opened", True)),
+        name="fresh",
+    )
+    actions = VerifiedActions(
+        waiter=ImmediateWaiter(),
+        click_fallback=lambda _item: None,
+        replace_text_fallback=lambda _item, _value: None,
+    )
+
+    result = actions.invoke(
+        stale,
+        lambda: state["opened"],
+        pre_resolve_control=lambda: fresh,
+    )
+
+    assert result.method == "invoke_pattern"
+    assert state["opened"] is True
+
+
+def test_verified_click_re_resolves_once_and_requires_its_postcondition():
+    state = {"opened": False}
+    stale = FakeControl(name="stale")
+    fresh = FakeControl(name="fresh")
+    clicked = []
+
+    def click(control):
+        clicked.append(control.Name)
+        state["opened"] = True
+
+    actions = VerifiedActions(
+        waiter=ImmediateWaiter(),
+        click_fallback=click,
+        replace_text_fallback=lambda _item, _value: None,
+    )
+
+    result = actions.click(
+        stale,
+        lambda: state["opened"],
+        pre_resolve_control=lambda: fresh,
+    )
+
+    assert result.method == "uia_bounds_click"
+    assert clicked == ["fresh"]
+
+
+def test_selection_does_not_click_when_source_disappears_during_page_transition():
+    source_present = {"value": True}
+    destination_checks = {"count": 0}
+
+    def select_and_remove_source():
+        source_present["value"] = False
+
+    def destination_ready():
+        destination_checks["count"] += 1
+        return destination_checks["count"] >= 2
+
+    control = FakeControl(selection=FakePattern(select_and_remove_source))
+    clicked = []
+    actions = VerifiedActions(
+        waiter=ImmediateWaiter(),
+        click_fallback=lambda item: clicked.append(item),
+        replace_text_fallback=lambda item, value: None,
+    )
+
+    result = actions.select(
+        control,
+        destination_ready,
+        source_present=lambda: source_present["value"],
+        resolve_control=lambda: None,
+    )
+
+    assert result.method == "selection_item_pattern_transition"
+    assert clicked == []
+
+
 def test_action_requires_optional_extra_postcondition():
     control = FakeControl(invoke=FakePattern())
     actions = VerifiedActions(

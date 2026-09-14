@@ -1824,6 +1824,26 @@ def mouse_event(dwFlags: int, dx: int, dy: int, dwData: int, dwExtraInfo: int) -
     ctypes.windll.user32.mouse_event(dwFlags, dx, dy, dwData, dwExtraInfo)
 
 
+def _ClickAtCursor(x: int, y: int, downFlag: int, upFlag: int, waitTime: float) -> None:
+    """Move to a virtual-screen point and press without re-normalizing it.
+
+    ``SetCursorPos`` accepts negative coordinates on monitors to the left of the
+    primary display.  Passing those coordinates through ``MOUSEEVENTF_ABSOLUTE``
+    a second time interprets them relative to the primary screen and can move the
+    pointer elsewhere.  Button-only events keep the verified cursor position.
+    """
+    if not SetCursorPos(x, y):
+        raise RuntimeError(f"cursor move failed: ({x}, {y})")
+    if GetCursorPos() != (x, y):
+        raise RuntimeError(f"cursor position mismatch: expected=({x}, {y})")
+    mouse_event(downFlag, 0, 0, 0, 0)
+    try:
+        time.sleep(0.05)
+    finally:
+        mouse_event(upFlag, 0, 0, 0, 0)
+    time.sleep(waitTime)
+
+
 def keybd_event(bVk: int, bScan: int, dwFlags: int, dwExtraInfo: int) -> None:
     """keybd_event from Win32."""
     ctypes.windll.user32.keybd_event(bVk, bScan, dwFlags, dwExtraInfo)
@@ -1853,12 +1873,9 @@ def Click(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     y: int.
     waitTime: float.
     """
-    SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(MouseEventFlag.LeftDown | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(0.05)
-    mouse_event(MouseEventFlag.LeftUp | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(waitTime)
+    _ClickAtCursor(
+        x, y, MouseEventFlag.LeftDown, MouseEventFlag.LeftUp, waitTime
+    )
 
 
 def MiddleClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
@@ -1868,12 +1885,9 @@ def MiddleClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     y: int.
     waitTime: float.
     """
-    SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(MouseEventFlag.MiddleDown | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(0.05)
-    mouse_event(MouseEventFlag.MiddleUp | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(waitTime)
+    _ClickAtCursor(
+        x, y, MouseEventFlag.MiddleDown, MouseEventFlag.MiddleUp, waitTime
+    )
 
 
 def RightClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
@@ -1883,12 +1897,9 @@ def RightClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     y: int.
     waitTime: float.
     """
-    SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(MouseEventFlag.RightDown | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(0.05)
-    mouse_event(MouseEventFlag.RightUp | MouseEventFlag.Absolute, x * 65535 // screenWidth, y * 65535 // screenHeight, 0, 0)
-    time.sleep(waitTime)
+    _ClickAtCursor(
+        x, y, MouseEventFlag.RightDown, MouseEventFlag.RightUp, waitTime
+    )
 
 
 def PressMouse(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:

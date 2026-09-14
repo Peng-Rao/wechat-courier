@@ -435,7 +435,7 @@ def _find_wechat_native_tray_buttons() -> List[_TrayButton]:
     return buttons
 
 
-def _is_wechat_main_window_visible() -> bool:
+def _is_wechat_main_window_visible(expected_pid: int | None = None) -> bool:
     """检查微信主界面是否已经恢复为可见状态。"""
     def callback(hwnd: int, result: List[bool]) -> bool:
         try:
@@ -445,7 +445,11 @@ def _is_wechat_main_window_visible() -> bool:
         except Exception:
             return True
 
-        if exe_name in WECHAT_EXE_NAMES and win32gui.IsWindowVisible(hwnd):
+        if (
+            exe_name in WECHAT_EXE_NAMES
+            and (expected_pid is None or int(pid) == int(expected_pid))
+            and win32gui.IsWindowVisible(hwnd)
+        ):
             if "TrayIconMessageWindow" not in class_name:
                 result[0] = True
                 return False
@@ -456,7 +460,11 @@ def _is_wechat_main_window_visible() -> bool:
     return result[0]
 
 
-def restore_wechat_from_native_tray(wait_after_event: float = 0.8) -> bool:
+def restore_wechat_from_native_tray(
+    wait_after_event: float = 0.8,
+    *,
+    expected_pid: int | None = None,
+) -> bool:
     """通过 Explorer 原生托盘数据恢复微信窗口。
 
     该函数只负责“模拟托盘点击”。它不做窗口强制显示或前台激活，避免再次
@@ -478,6 +486,13 @@ def restore_wechat_from_native_tray(wait_after_event: float = 0.8) -> bool:
     logger.info("尝试通过原生托盘消息恢复微信窗口")
     any_posted = False
     for button in buttons:
+        if expected_pid is not None:
+            try:
+                _, button_pid = win32process.GetWindowThreadProcessId(button.hwnd)
+            except Exception:
+                continue
+            if int(button_pid) != int(expected_pid):
+                continue
         logger.debug(f"微信原生托盘候选: {button.summary}")
         for label, event in TRAY_RESTORE_EVENTS:
             try:
@@ -488,7 +503,7 @@ def restore_wechat_from_native_tray(wait_after_event: float = 0.8) -> bool:
                 )
                 any_posted = True
                 time.sleep(wait_after_event)
-                if _is_wechat_main_window_visible():
+                if _is_wechat_main_window_visible(expected_pid):
                     return True
             except Exception as exc:
                 logger.debug(f"投递微信托盘消息失败: {exc}")

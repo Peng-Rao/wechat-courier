@@ -1,0 +1,24 @@
+{
+  "weixinVersion": "4.1.13.65",
+  "scenario": "top-window-and-navigation-control-share-weixin-name",
+  "controls": [
+    {
+      "depth": 0,
+      "name": "微信",
+      "controlType": "WindowControl",
+      "className": "mmui::MainWindow",
+      "automationId": "",
+      "enabled": true,
+      "offscreen": false
+    },
+    {
+      "depth": 3,
+      "name": "微信",
+      "controlType": "CustomControl",
+      "className": "mmui::MainTabItemView",
+      "automationId": "",
+      "enabled": true,
+      "offscreen": false
+    }
+  ]
+}

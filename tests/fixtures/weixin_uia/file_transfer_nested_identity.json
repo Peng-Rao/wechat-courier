@@ -1,0 +1,26 @@
+{
+  "weixinVersion": "4.1.13.65",
+  "scenario": "file-transfer-helper-real-search-row",
+  "controls": [
+    {
+      "depth": 2,
+      "name": "文件传输助手",
+      "controlType": "ListItemControl",
+      "className": "mmui::XTableCell",
+      "automationId": "search_item_function_1",
+      "runtimeId": [42, 1001],
+      "enabled": true,
+      "offscreen": false
+    },
+    {
+      "depth": 3,
+      "name": "文件传输助手",
+      "controlType": "TextControl",
+      "className": "mmui::XTextView",
+      "automationId": "",
+      "runtimeId": [42, 1002],
+      "enabled": true,
+      "offscreen": false
+    }
+  ]
+}

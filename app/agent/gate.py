@@ -6,9 +6,12 @@ import subprocess
 import struct
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .profile import WeixinProfile, get_weixin_profile
+
+if TYPE_CHECKING:
+    from src.core.win32 import WindowRef, WindowRestoreResult
 
 
 PROCESS_VM_OPERATION = 0x0008
@@ -61,11 +64,49 @@ class NativeGateBackend:
         if os.name != "nt":
             raise RuntimeError("Weixin automation is only available on Windows")
 
-    def find_main_window(self) -> int:
+    def discover_main_window(self) -> WindowRef | None:
         self._require_windows()
-        from src.core.win32 import find_wechat_window
+        from src.core.win32 import find_wechat_window_ref
 
-        return int(find_wechat_window() or 0)
+        return find_wechat_window_ref()
+
+    def find_main_window(self) -> int:
+        """Backward-compatible, read-only HWND discovery."""
+        window = self.discover_main_window()
+        return int(window.hwnd if window is not None else 0)
+
+    def window_inspection(self) -> dict[str, object]:
+        """Return JSON-compatible window state without restoring or mutating it."""
+        window = self.discover_main_window()
+        if window is None:
+            return {
+                "hwnd": 0,
+                "pid": 0,
+                "processPath": "",
+                "windowClass": "",
+                "title": "",
+                "visible": False,
+                "bounds": [0, 0, 0, 0],
+                "windowState": "missing",
+                "restorable": False,
+            }
+        result = window.as_dict()
+        result.update(
+            {
+                "windowState": "visible" if window.visible else "hidden",
+                "restorable": not window.visible,
+            }
+        )
+        return result
+
+    def prepare_main_window(self) -> WindowRestoreResult:
+        """Discover and, only when hidden, restore the main window."""
+        from src.core.win32 import WindowRestoreResult, restore_wechat_window
+
+        window = self.discover_main_window()
+        if window is None:
+            return WindowRestoreResult(None, None, False)
+        return restore_wechat_window(window)
 
     def get_window_pid(self, hwnd: int) -> int:
         import win32process
@@ -237,7 +278,7 @@ class NativeGateBackend:
     def set_screen_reader(enabled: bool) -> bool:
         return bool(
             ctypes.windll.user32.SystemParametersInfoW(
-                SPI_SETSCREENREADER, int(enabled), None, 0
+                SPI_SETSCREENREADER, int(enabled), None, 0x02
             )
         )
 
@@ -257,12 +298,32 @@ class WeixinAccessibilitySession:
         self._handle = None
         self._original_gate: int | None = None
         self._original_screen_reader: bool | None = None
+        self.window_restore: WindowRestoreResult | None = None
 
     def __enter__(self) -> "WeixinAccessibilitySession":
-        self.hwnd = int(self.backend.find_main_window() or 0)
-        if not self.hwnd:
-            raise RuntimeError("Weixin main window was not found")
-        self.pid = int(self.backend.get_window_pid(self.hwnd))
+        prepare = getattr(self.backend, "prepare_main_window", None)
+        if callable(prepare):
+            self.window_restore = prepare()
+            window = self.window_restore.window
+            if window is None:
+                raise RuntimeError("Weixin main window was not found")
+            if not window.visible:
+                outcomes = "; ".join(
+                    f"{stage.stage}: {stage.detail}"
+                    for stage in self.window_restore.stages
+                )
+                suffix = f" ({outcomes})" if outcomes else ""
+                raise RuntimeError(
+                    "Weixin main window could not be restored before gate access"
+                    + suffix
+                )
+            self.hwnd = int(window.hwnd)
+            self.pid = int(window.pid)
+        else:
+            self.hwnd = int(self.backend.find_main_window() or 0)
+            if not self.hwnd:
+                raise RuntimeError("Weixin main window was not found")
+            self.pid = int(self.backend.get_window_pid(self.hwnd))
         self.module = self.backend.find_module(self.pid, "Weixin.dll")
         self.version = str(self.backend.file_version(self.module.path))
         self.profile = get_weixin_profile(self.version)
@@ -289,6 +350,7 @@ class WeixinAccessibilitySession:
                 raise AccessibilitySafetyError(
                     f"unexpected gate value {self._original_gate!r}; refusing to write"
                 )
+            self._original_screen_reader = bool(self.backend.get_screen_reader())
             if self._original_gate == 0:
                 if not self.backend.write_byte(self._handle, self.gate_address, 1):
                     raise AccessibilitySafetyError(
@@ -298,12 +360,18 @@ class WeixinAccessibilitySession:
                     raise AccessibilitySafetyError(
                         "Weixin accessibility gate write-back failed"
                     )
-            self._original_screen_reader = bool(self.backend.get_screen_reader())
-            if not self._original_screen_reader:
-                if not self.backend.set_screen_reader(True):
-                    raise AccessibilitySafetyError(
-                        "failed to set the screen-reader session flag"
-                    )
+            # Weixin 4.1.13.65 materializes its MMUI tree only when this
+            # notification arrives after the runtime gate is active.  Notify
+            # even when the flag was already true; setting the value is also
+            # the broadcast used by the verified live probe.
+            if not self.backend.set_screen_reader(True):
+                raise AccessibilitySafetyError(
+                    "failed to notify the screen-reader session flag"
+                )
+            if not self.backend.get_screen_reader():
+                raise AccessibilitySafetyError(
+                    "screen-reader session flag notification did not persist"
+                )
             return self
         except Exception as exc:
             try:
@@ -318,19 +386,11 @@ class WeixinAccessibilitySession:
 
     def close(self) -> None:
         cleanup_error: Exception | None = None
-        if self._original_screen_reader is not None:
-            try:
-                if self.backend.get_screen_reader() != self._original_screen_reader:
-                    if not self.backend.set_screen_reader(
-                        self._original_screen_reader
-                    ):
-                        raise AccessibilitySafetyError(
-                            "failed to restore the screen-reader session flag"
-                        )
-            except Exception as exc:
-                cleanup_error = exc
-            finally:
-                self._original_screen_reader = None
+        gate_was_restored = True
+
+        # Restore the process gate before disabling the session flag. If the
+        # process gate cannot be rolled back, keep the flag enabled rather than
+        # leaving Weixin in the inconsistent gate=1/screen-reader=False state.
         if self._handle is not None:
             try:
                 if (
@@ -338,9 +398,12 @@ class WeixinAccessibilitySession:
                     and self.backend.read_byte(self._handle, self.gate_address)
                     != self._original_gate
                 ):
-                    self.backend.write_byte(
+                    if not self.backend.write_byte(
                         self._handle, self.gate_address, self._original_gate
-                    )
+                    ):
+                        raise AccessibilitySafetyError(
+                            "failed to restore the Weixin accessibility gate"
+                        )
                     if (
                         self.backend.read_byte(self._handle, self.gate_address)
                         != self._original_gate
@@ -349,17 +412,47 @@ class WeixinAccessibilitySession:
                             "failed to restore the Weixin accessibility gate"
                         )
             except Exception as exc:
+                gate_was_restored = False
                 if cleanup_error is None:
                     cleanup_error = exc
             finally:
-                try:
-                    self.backend.close_process(self._handle)
-                except Exception as exc:
-                    if cleanup_error is None:
-                        cleanup_error = exc
-                finally:
-                    self._handle = None
-                    self._original_gate = None
+                if gate_was_restored:
+                    try:
+                        self.backend.close_process(self._handle)
+                    except Exception as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                    finally:
+                        self._handle = None
+                        self._original_gate = None
+        if self._original_screen_reader is not None:
+            screen_reader_was_restored = False
+            try:
+                if gate_was_restored:
+                    if (
+                        self.backend.get_screen_reader()
+                        != self._original_screen_reader
+                    ):
+                        if not self.backend.set_screen_reader(
+                            self._original_screen_reader
+                        ):
+                            raise AccessibilitySafetyError(
+                                "failed to restore the screen-reader session flag"
+                            )
+                    if (
+                        self.backend.get_screen_reader()
+                        != self._original_screen_reader
+                    ):
+                        raise AccessibilitySafetyError(
+                            "screen-reader session flag restore verification failed"
+                        )
+                    screen_reader_was_restored = True
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            finally:
+                if screen_reader_was_restored:
+                    self._original_screen_reader = None
         if cleanup_error is not None:
             if isinstance(cleanup_error, AccessibilitySafetyError):
                 raise cleanup_error

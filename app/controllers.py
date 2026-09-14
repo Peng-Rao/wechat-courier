@@ -454,6 +454,7 @@ class AgentController(QObject):
         self._wechat_connected = False
         self._wechat_supported = False
         self._uia_ready = False
+        self._restorable = False
         self._wechat_version = ""
         self._detail = "等待检测微信"
         self._inspect_request_id = 0
@@ -486,6 +487,10 @@ class AgentController(QObject):
     def uiaReady(self):
         return self._uia_ready
 
+    @Property(bool, notify=inspectionChanged)
+    def restorable(self):
+        return self._restorable
+
     @Property(str, notify=inspectionChanged)
     def wechatVersion(self):
         return self._wechat_version
@@ -500,7 +505,7 @@ class AgentController(QObject):
             self._connected
             and self._wechat_connected
             and self._wechat_supported
-            and self._uia_ready
+            and (self._uia_ready or self._restorable)
         )
 
     @Slot()
@@ -528,6 +533,7 @@ class AgentController(QObject):
         self._wechat_connected = bool(result.get("connected", False))
         self._wechat_supported = bool(result.get("supported", False))
         self._uia_ready = bool(result.get("uiaReady", False))
+        self._restorable = bool(result.get("restorable", False))
         self._wechat_version = str(result.get("version", ""))
         self._detail = str(result.get("detail", ""))
         self.inspectionChanged.emit()
@@ -552,6 +558,7 @@ class AgentController(QObject):
             self._wechat_connected = False
             self._wechat_supported = False
             self._uia_ready = False
+            self._restorable = False
             self._detail = "Agent 已断开"
             if was_connected:
                 self.connectionLost.emit()

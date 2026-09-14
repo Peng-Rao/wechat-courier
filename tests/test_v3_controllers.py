@@ -164,6 +164,26 @@ def test_supported_version_with_unavailable_uia_still_blocks_start(tmp_path, qap
     assert not any(method == "task.start" for _id, method, _payload in client.calls)
 
 
+def test_hidden_verified_weixin_is_task_ready_when_backend_can_restore_it(
+    tmp_path, qapp
+):
+    backend, _client = make_backend(tmp_path)
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "uiaReady": False,
+            "windowState": "hidden",
+            "restorable": True,
+            "detail": "窗口位于托盘，任务开始时可恢复",
+        }
+    )
+
+    assert backend.agent.uiaReady is False
+    assert backend.agent.automationReady is True
+
+
 def test_supported_version_without_explicit_uia_readiness_still_blocks_start(
     tmp_path, qapp
 ):

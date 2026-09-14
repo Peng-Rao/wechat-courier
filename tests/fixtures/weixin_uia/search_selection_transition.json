@@ -1,0 +1,12 @@
+{
+  "weixinVersion": "4.1.13.65",
+  "scenario": "selected-search-row-disappears-before-chat-is-ready",
+  "before": {
+    "sourcePresent": true,
+    "destinationReady": false
+  },
+  "afterSelectionPattern": {
+    "sourcePresent": false,
+    "destinationReady": "delayed"
+  }
+}

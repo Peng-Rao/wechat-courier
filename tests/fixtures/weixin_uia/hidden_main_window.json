@@ -1,0 +1,17 @@
+{
+  "weixinVersion": "4.1.13.65",
+  "scenario": "tray-hidden-main-window-before-uia-gate",
+  "window": {
+    "title": "微信",
+    "nativeClass": "Qt51514QWindowIcon",
+    "uiaClass": "mmui::MainWindow",
+    "visible": false,
+    "bounds": [-986, 164, -21, 914]
+  },
+  "preFixInspection": {
+    "connected": true,
+    "supported": true,
+    "uiaReady": false,
+    "materializedNodeCount": 2
+  }
+}

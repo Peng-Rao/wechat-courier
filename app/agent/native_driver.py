@@ -4,11 +4,11 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .actions import VerifiedActions, describe_control
+from .actions import ActionVerificationError, VerifiedActions, describe_control
 from .gate import (
     AccessibilitySafetyError,
     NativeGateBackend,
@@ -61,9 +61,18 @@ class SearchCandidate:
     identities: frozenset[str]
     result_type: str
     automation_id: str
-    row_index: int
-    row_depth: int
-    runtime_id: tuple[int, ...] = ()
+    row_index: int = field(compare=False)
+    row_depth: int = field(compare=False)
+    runtime_id: tuple[int, ...] = field(default=(), compare=False)
+    semantic_row_key: str = field(default="", compare=False)
+
+
+@dataclass(frozen=True)
+class SearchResultRow:
+    """One ephemeral search snapshot entry with its exact originating row."""
+
+    candidate: SearchCandidate
+    control: Any = field(compare=False, repr=False)
 
 
 def _runtime_id(control: Any) -> tuple[int, ...]:
@@ -79,9 +88,15 @@ def _runtime_id(control: Any) -> tuple[int, ...]:
 
 def _search_row_kind(control: Any) -> str | None:
     name = str(safe_attr(control, "Name", "")).strip()
+    control_type = str(safe_attr(control, "ControlTypeName", ""))
     class_name = str(safe_attr(control, "ClassName", ""))
     automation_id = str(safe_attr(control, "AutomationId", ""))
-    if not name or "SearchContentCellView" not in class_name:
+    if control_type != "ListItemControl":
+        return None
+    if (
+        "SearchContentCellView" not in class_name
+        and class_name != "mmui::XTableCell"
+    ):
         return None
     if not automation_id.startswith("search_item_"):
         return None
@@ -91,7 +106,7 @@ def _search_row_kind(control: Any) -> str | None:
     if name in {"搜索网络结果", "网络搜索", "搜一搜"}:
         return None
     if automation_id.startswith("search_item_function"):
-        return "function" if name == "文件传输助手" else None
+        return "function"
     return "contact"
 
 
@@ -110,21 +125,30 @@ def find_exact_control(
     *,
     name: str | Sequence[str] | None = None,
     control_type: str | None = None,
+    control_types: Sequence[str] | None = None,
     class_name: str | None = None,
     automation_id: str | None = None,
     enabled: bool = True,
+    visible: bool | None = None,
 ):
     accepted_names = None
     if isinstance(name, str):
         accepted_names = {name.strip()}
     elif name is not None:
         accepted_names = {item.strip() for item in name}
+    accepted_control_types = set(control_types) if control_types is not None else None
     for control, _depth in nodes:
         if accepted_names is not None:
             if str(safe_attr(control, "Name", "")).strip() not in accepted_names:
                 continue
         if control_type is not None:
             if str(safe_attr(control, "ControlTypeName", "")) != control_type:
+                continue
+        if accepted_control_types is not None:
+            if (
+                str(safe_attr(control, "ControlTypeName", ""))
+                not in accepted_control_types
+            ):
                 continue
         if class_name is not None:
             if str(safe_attr(control, "ClassName", "")) != class_name:
@@ -134,15 +158,32 @@ def find_exact_control(
                 continue
         if enabled and not bool(safe_attr(control, "IsEnabled", False)):
             continue
+        if visible is True and bool(safe_attr(control, "IsOffscreen", True)):
+            continue
+        if visible is False and not bool(safe_attr(control, "IsOffscreen", False)):
+            continue
         return control
     return None
 
 
-def extract_contact_results(
+def _semantic_row_key(
+    result_type: str, automation_id: str, identities: Iterable[str]
+) -> str:
+    normalized = sorted(
+        {
+            normalize_identity(str(identity))
+            for identity in identities
+            if normalize_identity(str(identity))
+        }
+    )
+    return "|".join((result_type, automation_id, *normalized))
+
+
+def extract_search_result_rows(
     nodes: Iterable[tuple[Any, int]],
-) -> list[SearchCandidate]:
+) -> list[SearchResultRow]:
     materialized = list(nodes)
-    results: list[SearchCandidate] = []
+    results: list[SearchResultRow] = []
     row_index = 0
     for index, (control, depth) in enumerate(materialized):
         name = str(safe_attr(control, "Name", "")).strip()
@@ -152,28 +193,46 @@ def extract_contact_results(
             continue
         is_function = result_type == "function"
         identities: dict[str, str] = {}
-        identities.setdefault(normalize_identity(name), name)
-        if not is_function:
-            for child, child_depth in materialized[index + 1 :]:
-                if child_depth <= depth:
-                    break
-                child_name = str(safe_attr(child, "Name", "")).strip()
-                if child_name:
-                    identities.setdefault(normalize_identity(child_name), child_name)
-        values = frozenset(value for key, value in identities.items() if key)
+        if name:
+            identities.setdefault(normalize_identity(name), name)
+        for child, child_depth in materialized[index + 1 :]:
+            if child_depth <= depth:
+                break
+            child_name = str(safe_attr(child, "Name", "")).strip()
+            if child_name:
+                identities.setdefault(normalize_identity(child_name), child_name)
+        if is_function:
+            helper_key = normalize_identity("文件传输助手")
+            if helper_key not in identities:
+                continue
+            display_name = identities[helper_key]
+            values = frozenset({display_name})
+        else:
+            values = frozenset(value for key, value in identities.items() if key)
+            if not values:
+                continue
+            display_name = name or next(iter(identities.values()))
+        candidate = SearchCandidate(
+            display_name=display_name,
+            identities=values,
+            result_type=result_type,
+            automation_id=automation_id,
+            row_index=row_index,
+            row_depth=depth,
+            runtime_id=_runtime_id(control),
+            semantic_row_key=_semantic_row_key(result_type, automation_id, values),
+        )
         results.append(
-            SearchCandidate(
-                display_name=name,
-                identities=(frozenset({"文件传输助手"}) if is_function else values),
-                result_type=result_type,
-                automation_id=automation_id,
-                row_index=row_index,
-                row_depth=depth,
-                runtime_id=_runtime_id(control),
-            )
+            SearchResultRow(candidate=candidate, control=control)
         )
         row_index += 1
     return results
+
+
+def extract_contact_results(
+    nodes: Iterable[tuple[Any, int]],
+) -> list[SearchCandidate]:
+    return [entry.candidate for entry in extract_search_result_rows(nodes)]
 
 
 def extract_exact_forward_candidates(
@@ -191,13 +250,11 @@ def extract_exact_forward_candidates(
             continue
         if not bool(safe_attr(control, "IsEnabled", False)):
             continue
+        if bool(safe_attr(control, "IsOffscreen", True)):
+            continue
         if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
             continue
-        key = (
-            str(safe_attr(control, "AutomationId", "")),
-            str(safe_attr(control, "ClassName", "")),
-            str(safe_attr(control, "Name", "")),
-        )
+        key = _control_reference(control)
         if key not in seen:
             seen.add(key)
             candidates.append(control)
@@ -238,19 +295,57 @@ def control_key(control: Any) -> tuple:
     )
 
 
+def _stable_message_control_identity(control: Any) -> tuple:
+    """Identify a message independently from layout changes.
+
+    Weixin moves existing message controls when the chat is relaid out.  Bounds
+    therefore cannot be used to decide whether a confirmation card is new.
+    RuntimeId is preferred; providers without one fall back to stable semantic
+    properties only.
+    """
+
+    runtime_id = _runtime_id(control)
+    if runtime_id:
+        return ("runtime", runtime_id)
+    return (
+        "fallback",
+        str(safe_attr(control, "Name", "")),
+        str(safe_attr(control, "ControlTypeName", "")),
+        str(safe_attr(control, "ClassName", "")),
+        str(safe_attr(control, "AutomationId", "")),
+    )
+
+
 def has_new_forward_confirmation(
-    controls: Iterable[Any], before: set[tuple]
+    controls: Iterable[Any], before: Iterable[tuple]
 ) -> bool:
+    prior_identities = set()
+    for entry in before:
+        if (
+            isinstance(entry, tuple)
+            and len(entry) == 2
+            and isinstance(entry[0], tuple)
+            and entry[0]
+            and entry[0][0] in {"runtime", "fallback"}
+        ):
+            prior_identities.add(entry[0])
+        else:
+            prior_identities.add(entry)
+
+    message_controls = []
     for control in controls:
-        if control_key(control) in before:
-            continue
         class_name = str(safe_attr(control, "ClassName", ""))
         if "Chat" not in class_name and "Message" not in class_name:
             continue
-        text = str(safe_attr(control, "Name", "")).strip()
-        if any(keyword in text for keyword in FORWARD_CONFIRMATION_KEYWORDS):
-            return True
-    return False
+        message_controls.append(control)
+
+    if not message_controls:
+        return False
+    tail = message_controls[-1]
+    if _stable_message_control_identity(tail) in prior_identities:
+        return False
+    text = str(safe_attr(tail, "Name", "")).strip()
+    return any(keyword in text for keyword in FORWARD_CONFIRMATION_KEYWORDS)
 
 
 def resolve_friend_form_fields(nodes: Iterable[tuple[Any, int]]):
@@ -309,6 +404,120 @@ def extract_labeled_friend_identities(
     return [value for key, value in unique.items() if key]
 
 
+def _profile_add_friend_buttons(
+    nodes: Sequence[tuple[Any, int]],
+) -> list[Any]:
+    """Return only add-friend buttons nested in the real profile action card."""
+    matching: list[Any] = []
+    stack: list[tuple[int, str]] = []
+    for control, depth in nodes:
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        class_name = str(safe_attr(control, "ClassName", ""))
+        automation_id = str(safe_attr(control, "AutomationId", ""))
+        if (
+            str(safe_attr(control, "Name", "")).strip() == "添加到通讯录"
+            and str(safe_attr(control, "ControlTypeName", "")) == "ButtonControl"
+            and class_name == "mmui::XOutlineButton"
+            and automation_id.endswith("ProfileActionUi.add_friend_button")
+            and bool(safe_attr(control, "IsEnabled", False))
+            and not bool(safe_attr(control, "IsOffscreen", True))
+            and any(
+                ancestor_class == "mmui::ProfileActionUi"
+                for _ancestor_depth, ancestor_class in stack
+            )
+            and any(
+                ancestor_class == "mmui::ProfileViewNormal"
+                for _ancestor_depth, ancestor_class in stack
+            )
+        ):
+            matching.append(control)
+        stack.append((depth, class_name))
+    return matching
+
+
+def _unique_visible_add_friend_button(
+    nodes: Sequence[tuple[Any, int]],
+) -> Any | None:
+    structured = _profile_add_friend_buttons(nodes)
+    if len(structured) == 1:
+        return structured[0]
+    if structured:
+        return None
+    generic = [
+        control
+        for control, _depth in nodes
+        if str(safe_attr(control, "Name", "")).strip() == "添加到通讯录"
+        and str(safe_attr(control, "ControlTypeName", "")) == "ButtonControl"
+        and bool(safe_attr(control, "IsEnabled", False))
+        and not bool(safe_attr(control, "IsOffscreen", True))
+    ]
+    return generic[0] if len(generic) == 1 else None
+
+
+def _control_reference(control: Any) -> tuple[Any, ...]:
+    """Capture a fail-closed reference for one current UIA control instance."""
+    semantic = (
+        str(safe_attr(control, "Name", "")),
+        str(safe_attr(control, "ControlTypeName", "")),
+        str(safe_attr(control, "ClassName", "")),
+        str(safe_attr(control, "AutomationId", "")),
+    )
+    runtime_id = _runtime_id(control)
+    if runtime_id:
+        return ("runtime", runtime_id, semantic)
+    # Bounds are only a last-resort discriminator when a provider offers no
+    # RuntimeId. The unlabeled friend-profile boundary requires RuntimeId and
+    # therefore never takes this weaker path.
+    return ("semantic_bounds", semantic, control_key(control)[-1])
+
+
+def _exact_query_profile_card_button(
+    nodes: Sequence[tuple[Any, int]],
+    *,
+    search_control: Any,
+    account: str,
+    read_text,
+) -> Any | None:
+    """Verify the real 4.1.13.65 profile card when it exposes no ID label.
+
+    The current build shows only a nickname on this card. In that layout, the
+    exact search value, one visible profile action, and its verified ancestor
+    chain jointly form the pre-request boundary. A generic search box or an
+    unscoped same-name button is never sufficient.
+    """
+    expected = normalize_identity(account)
+    if not expected or normalize_identity(read_text(search_control) or "") != expected:
+        return None
+    if (
+        str(safe_attr(search_control, "ControlTypeName", "")) != "EditControl"
+        or str(safe_attr(search_control, "ClassName", ""))
+        != "mmui::XValidatorTextEdit"
+    ):
+        return None
+
+    profile_count = sum(
+        1
+        for control, _depth in nodes
+        if str(safe_attr(control, "ClassName", "")) == "mmui::ProfileViewNormal"
+    )
+    if profile_count != 1:
+        return None
+    matching_buttons = _profile_add_friend_buttons(nodes)
+    if len(matching_buttons) != 1:
+        return None
+    button = matching_buttons[0]
+    # The unlabeled-card fallback has no account label to bind against. A
+    # RuntimeId is therefore mandatory so the exact verified button can be
+    # checked again immediately before invoking it.
+    profile = next(
+        control
+        for control, _depth in nodes
+        if str(safe_attr(control, "ClassName", "")) == "mmui::ProfileViewNormal"
+    )
+    return button if _runtime_id(button) and _runtime_id(profile) else None
+
+
 class NativeWeixinDriver:
     """Exact-profile UIA driver for Weixin 4.1.13.65."""
 
@@ -335,6 +544,9 @@ class NativeWeixinDriver:
         self._add_hwnd = 0
         self._verify_hwnd = 0
         self._friend_account = ""
+        self._friend_profile_reset_for = ""
+        self._friend_query_generation = 0
+        self._friend_profile_token: tuple[Any, ...] | None = None
         self._uia_initialized = False
         self._wake_event = threading.Event()
         self._event_subscription = None
@@ -382,15 +594,32 @@ class NativeWeixinDriver:
 
     def inspect(self) -> dict[str, Any]:
         try:
-            hwnd = int(self._gate_backend.find_main_window() or 0)
+            inspect_window = getattr(self._gate_backend, "window_inspection", None)
+            if callable(inspect_window):
+                window_info = dict(inspect_window())
+                hwnd = int(window_info.get("hwnd", 0) or 0)
+                pid = int(window_info.get("pid", 0) or 0)
+            else:
+                hwnd = int(self._gate_backend.find_main_window() or 0)
+                pid = (
+                    int(self._gate_backend.get_window_pid(hwnd)) if hwnd else 0
+                )
+                window_info = {
+                    "windowState": "visible" if hwnd else "missing",
+                    "restorable": False,
+                }
             if not hwnd:
                 return {
                     "connected": False,
                     "version": "",
                     "supported": False,
+                    "uiaReady": False,
+                    "windowState": str(
+                        window_info.get("windowState", "missing")
+                    ),
+                    "restorable": False,
                     "detail": "未找到已登录的微信窗口",
                 }
-            pid = int(self._gate_backend.get_window_pid(hwnd))
             module = self._gate_backend.find_module(pid, "Weixin.dll")
             version = str(self._gate_backend.file_version(module.path))
             try:
@@ -407,9 +636,18 @@ class NativeWeixinDriver:
                 "version": version,
                 "supported": supported,
                 "uiaReady": False,
+                "windowState": str(
+                    window_info.get("windowState", "visible")
+                ),
+                "restorable": bool(window_info.get("restorable", False)),
                 "detail": detail,
             }
             if not supported:
+                return result
+            if result["windowState"] == "hidden":
+                result["detail"] = (
+                    "微信版本已验证，窗口位于托盘；任务开始时将先恢复窗口"
+                )
                 return result
             try:
                 self._ensure_session()
@@ -417,6 +655,8 @@ class NativeWeixinDriver:
                 result["detail"] = f"微信版本已验证，但 UIA 未就绪：{exc}"
                 return result
             result["uiaReady"] = True
+            result["windowState"] = "visible"
+            result["restorable"] = False
             result["detail"] = "微信版本与 UIA 控件树均已验证"
             return result
         except Exception as exc:
@@ -425,6 +665,8 @@ class NativeWeixinDriver:
                 "version": "",
                 "supported": False,
                 "uiaReady": False,
+                "windowState": "missing",
+                "restorable": False,
                 "detail": str(exc),
             }
 
@@ -437,11 +679,15 @@ class NativeWeixinDriver:
 
         uia.InitializeUIAutomationInCurrentThread()
         self._uia_initialized = True
+        # Publish partially acquired resources before entering the gate session.
+        # __enter__ performs its own best-effort rollback, but if that rollback
+        # fails close() must still be able to retry both the gate restore and the
+        # thread-local UIA teardown.
+        self._uia = uia
         try:
             session = WeixinAccessibilitySession(self._gate_backend)
-            session.__enter__()
             self._session = session
-            self._uia = uia
+            session.__enter__()
             self._root = uia.ControlFromHandle(session.hwnd)
             if self._root is None:
                 raise RuntimeError("无法从微信句柄建立 UIA 根控件")
@@ -457,12 +703,31 @@ class NativeWeixinDriver:
             self.close()
             raise
 
+    def _prepare_existing_session(self):
+        session = self._session
+        prepare = getattr(self._gate_backend, "prepare_main_window", None)
+        if session is None or not callable(prepare):
+            return None
+        result = prepare()
+        window = safe_attr(result, "window")
+        if window is None:
+            raise RuntimeError("Weixin main window disappeared before reuse")
+        if not bool(safe_attr(window, "visible", False)):
+            raise RuntimeError("Weixin main window could not be restored before reuse")
+        if (
+            int(safe_attr(window, "pid", 0) or 0) != int(session.pid)
+            or int(safe_attr(window, "hwnd", 0) or 0) != int(session.hwnd)
+        ):
+            self.close()
+        return result
+
     def bind_window(self) -> dict[str, Any]:
         from src.core.win32 import bring_window_to_front
 
         failures = []
         for attempt in range(2):
             try:
+                window_restore = self._prepare_existing_session()
                 self._ensure_session()
             except Exception as exc:
                 if not self._bind_retry_is_safe(exc):
@@ -496,13 +761,20 @@ class NativeWeixinDriver:
                     + "; ".join(failures)
                 ) from exc
             if visible_root:
-                return {
+                result = {
                     "connected": True,
                     "hwnd": hwnd,
                     "pid": self._session.pid,
                     "version": self._session.version,
                     "supported": True,
                 }
+                restore_result = window_restore or safe_attr(
+                    self._session, "window_restore"
+                )
+                as_dict = getattr(restore_result, "as_dict", None)
+                if callable(as_dict):
+                    result["windowRestore"] = as_dict()
+                return result
             failures.append(
                 self._bind_failure_detail(
                     "activate",
@@ -587,25 +859,118 @@ class NativeWeixinDriver:
         return root, nodes
 
     def _process_window(self, accepted_classes: Sequence[str]) -> int:
+        windows = self._process_windows(accepted_classes)
+        return windows[0] if windows else 0
+
+    def _process_windows(
+        self,
+        accepted_classes: Sequence[str],
+        *,
+        visible: bool | None = True,
+        strict: bool = False,
+    ) -> list[int]:
         import win32gui
         import win32process
 
         found = []
+        parse_failures: list[str] = []
+        target_pid = int(self._session.pid)
 
         def collect(hwnd, _extra):
             try:
-                pid = win32process.GetWindowThreadProcessId(hwnd)[1]
-                if pid != self._session.pid or not win32gui.IsWindowVisible(hwnd):
+                pid = int(win32process.GetWindowThreadProcessId(hwnd)[1])
+                if pid != target_pid:
+                    return True
+                is_visible = bool(win32gui.IsWindowVisible(hwnd))
+                if visible is not None and is_visible is not visible:
+                    return True
+                native_class = str(win32gui.GetClassName(hwnd) or "")
+                native_class_key = native_class.casefold()
+                if not (
+                    native_class_key.startswith("chrome_widgetwin")
+                    or (
+                        native_class_key.startswith("qt")
+                        and native_class_key.endswith("qwindowicon")
+                    )
+                ):
                     return True
                 root = self._uia.ControlFromHandle(hwnd)
-                if str(safe_attr(root, "ClassName", "")) in accepted_classes:
+                if root is None:
+                    raise RuntimeError("ControlFromHandle returned no root")
+                if strict:
+                    root_class_value = getattr(root, "ClassName")
+                    if root_class_value is None or not str(root_class_value).strip():
+                        raise RuntimeError("UIA root class is empty")
+                    root_class = str(root_class_value)
+                else:
+                    root_class = str(safe_attr(root, "ClassName", ""))
+                if root_class in accepted_classes:
                     found.append(hwnd)
-            except Exception:
-                pass
+            except Exception as exc:
+                if strict:
+                    parse_failures.append(f"HWND {int(hwnd)}: {exc}")
             return True
 
         win32gui.EnumWindows(collect, None)
-        return int(found[0]) if found else 0
+        if parse_failures:
+            raise RuntimeError(
+                "无法安全解析同 PID 的微信顶层窗口：" + "; ".join(parse_failures)
+            )
+        return [int(hwnd) for hwnd in found]
+
+    def _restore_owned_process_window(
+        self, hwnd: int, accepted_classes: Sequence[str]
+    ) -> bool:
+        import win32con
+        import win32gui
+        import win32process
+        from src.core.win32 import _foreground_with_thread_handshake
+
+        def is_exact_window(*, visible: bool | None = None) -> bool:
+            try:
+                if not win32gui.IsWindow(hwnd):
+                    return False
+                pid = int(win32process.GetWindowThreadProcessId(hwnd)[1])
+                if pid != int(self._session.pid):
+                    return False
+                if visible is not None and bool(
+                    win32gui.IsWindowVisible(hwnd)
+                ) is not visible:
+                    return False
+                root = self._uia.ControlFromHandle(hwnd)
+                return str(safe_attr(root, "ClassName", "")) in accepted_classes
+            except Exception:
+                return False
+
+        if not is_exact_window():
+            return False
+        # Recheck ownership immediately before the Win32 action so a recycled
+        # HWND can never be shown or focused.
+        if not is_exact_window():
+            return False
+        try:
+            if not is_exact_window(visible=True):
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            _foreground_with_thread_handshake(hwnd)
+        except Exception:
+            return False
+
+        def prepared() -> bool:
+            try:
+                return is_exact_window(visible=True) and int(
+                    win32gui.GetForegroundWindow()
+                ) == int(hwnd)
+            except Exception:
+                return False
+
+        return bool(
+            self._waiter.wait(
+                prepared,
+                self._timeout,
+                self._wake_event,
+            )
+        )
 
     def _all_nodes(self) -> list[tuple[Any, int]]:
         _root, nodes = self._walk(self._session.hwnd)
@@ -708,12 +1073,20 @@ class NativeWeixinDriver:
         window_root, window_rectangle = self._owning_window(control)
         row_rectangle = safe_attr(control, "BoundingRectangle")
 
+        def click(point: tuple[int, int]) -> None:
+            # The owner can lose foreground between navigation and this actual
+            # mouse injection.  Revalidate and foreground the exact same-PID
+            # HWND at the last possible moment; otherwise a valid coordinate
+            # could land on the main window covering a secondary Weixin window.
+            self._prepare_click_window(window_root, control, point)
+            self._uia.Click(*point)
+
         point = self._clickable_point(control)
         if point is not None and self._point_in_rect(point, window_rectangle):
             if not self._rect_valid(row_rectangle) or self._point_in_rect(
                 point, row_rectangle
             ):
-                self._uia.Click(*point)
+                click(point)
                 return
 
         if self._rect_valid(row_rectangle):
@@ -722,7 +1095,7 @@ class NativeWeixinDriver:
                 (row_rectangle.top + row_rectangle.bottom) // 2,
             )
             if self._point_in_rect(point, window_rectangle):
-                self._uia.Click(*point)
+                click(point)
                 return
 
         try:
@@ -749,9 +1122,116 @@ class NativeWeixinDriver:
                 point, row_rectangle
             ):
                 continue
-            self._uia.Click(*point)
+            click(point)
             return
         raise RuntimeError("UIA 控件及其候选子树没有安全的可点击点")
+
+    def _prepare_click_window(
+        self, window_root, control, point: tuple[int, int]
+    ) -> None:
+        """Make the exact live owner foreground immediately before a click."""
+        if self._session is None:
+            return
+
+        import win32con
+        import win32gui
+        import win32process
+        from src.core.win32 import _foreground_with_thread_handshake
+
+        hwnd = int(safe_attr(window_root, "NativeWindowHandle", 0) or 0)
+        expected_pid = int(safe_attr(self._session, "pid", 0) or 0)
+        uia_class = str(safe_attr(window_root, "ClassName", ""))
+        try:
+            native_class = str(win32gui.GetClassName(hwnd))
+        except Exception:
+            native_class = ""
+        is_passive_popover = (
+            "Popover" in uia_class
+            and native_class.casefold().endswith("qwindowtoolsavebits")
+        )
+        activation_hwnd = hwnd
+        if is_passive_popover:
+            try:
+                activation_hwnd = int(
+                    win32gui.GetWindow(hwnd, win32con.GW_OWNER) or 0
+                )
+            except Exception:
+                activation_hwnd = 0
+
+        def valid_process_window(candidate_hwnd: int) -> bool:
+            try:
+                return (
+                    bool(candidate_hwnd)
+                    and bool(expected_pid)
+                    and bool(win32gui.IsWindow(candidate_hwnd))
+                    and bool(win32gui.IsWindowVisible(candidate_hwnd))
+                    and int(
+                        win32process.GetWindowThreadProcessId(candidate_hwnd)[1]
+                    )
+                    == expected_pid
+                )
+            except Exception:
+                return False
+
+        def point_hits_exact_owner() -> bool:
+            try:
+                hit = int(win32gui.WindowFromPoint(point) or 0)
+                hit_root = int(
+                    win32gui.GetAncestor(hit, win32con.GA_ROOT) or hit
+                )
+                return bool(hit_root) and hit_root == hwnd
+            except Exception:
+                return False
+
+        def valid_owner(*, require_foreground: bool) -> bool:
+            try:
+                return (
+                    valid_process_window(hwnd)
+                    and valid_process_window(activation_hwnd)
+                    and (
+                        not is_passive_popover
+                        or int(
+                            win32gui.GetWindow(hwnd, win32con.GW_OWNER) or 0
+                        )
+                        == activation_hwnd
+                    )
+                    and point_hits_exact_owner()
+                    and (
+                        not require_foreground
+                        or int(win32gui.GetForegroundWindow() or 0)
+                        == activation_hwnd
+                    )
+                )
+            except Exception:
+                return False
+
+        if not valid_owner(require_foreground=False):
+            raise RuntimeError(
+                "坐标点击前控件所属微信窗口已失效；"
+                + describe_control(control)
+            )
+        try:
+            foreground_hwnd = int(win32gui.GetForegroundWindow() or 0)
+        except Exception:
+            foreground_hwnd = 0
+        if foreground_hwnd != activation_hwnd and not _foreground_with_thread_handshake(
+            activation_hwnd
+        ):
+            raise RuntimeError(
+                "无法置前控件所属微信窗口："
+                f"ownerHwnd={hwnd}, activationHwnd={activation_hwnd}; "
+                + describe_control(control)
+            )
+        if not self._waiter.wait(
+            lambda: valid_owner(require_foreground=True),
+            self._timeout,
+            self._wake_event,
+        ) or not valid_owner(require_foreground=True):
+            raise RuntimeError(
+                "控件所属微信窗口未保持前台或点击点被覆盖："
+                f"ownerHwnd={hwnd}, activationHwnd={activation_hwnd}; "
+                + describe_control(control)
+            )
 
     def _owning_window(self, control) -> tuple[Any, Any]:
         try:
@@ -857,16 +1337,41 @@ class NativeWeixinDriver:
     @staticmethod
     def _candidate_signature(candidates: Sequence[SearchCandidate]) -> tuple:
         return tuple(
-            (
+            candidate.semantic_row_key
+            or _semantic_row_key(
+                candidate.result_type,
                 candidate.automation_id,
-                candidate.row_index,
-                tuple(sorted(normalize_identity(value) for value in candidate.identities)),
-                candidate.runtime_id,
+                candidate.identities,
             )
             for candidate in candidates
         )
 
-    def _search_rows(self) -> tuple[list[SearchCandidate], list[Any]] | None:
+    @staticmethod
+    def _coerce_search_rows(snapshot) -> list[SearchResultRow] | None:
+        """Accept pre-refactor test doubles while production uses paired rows."""
+        if snapshot is None:
+            return None
+        if isinstance(snapshot, tuple) and len(snapshot) == 2:
+            candidates, controls = snapshot
+            return [
+                SearchResultRow(candidate=candidate, control=controls[index])
+                for index, candidate in enumerate(candidates)
+                if index < len(controls)
+            ]
+        return list(snapshot)
+
+    @staticmethod
+    def _same_candidate(left: SearchCandidate, right: SearchCandidate) -> bool:
+        return (
+            left.result_type == right.result_type
+            and left.automation_id == right.automation_id
+            and {
+                normalize_identity(value) for value in left.identities
+            }
+            == {normalize_identity(value) for value in right.identities}
+        )
+
+    def _search_rows(self) -> list[SearchResultRow] | None:
         profile = self._session.profile
         nodes = self._all_nodes()
         raise_for_risk_controls(nodes)
@@ -883,16 +1388,18 @@ class NativeWeixinDriver:
             )
         except Exception:
             return None
-        candidates = extract_contact_results(list_nodes)
-        rows = [control for control, _depth in list_nodes if _search_row_kind(control)]
-        return candidates, rows
+        return extract_search_result_rows(list_nodes)
 
     def search_contacts(self, target: str) -> list[SearchCandidate]:
         if not self.ensure_search_ready():
             return []
 
-        initial = self._search_rows()
-        initial_signature = self._candidate_signature(initial[0]) if initial else ()
+        initial = self._coerce_search_rows(self._search_rows())
+        initial_signature = (
+            self._candidate_signature([entry.candidate for entry in initial])
+            if initial
+            else ()
+        )
         self._search_results = []
         self._search_query = ""
         self._actions.set_text(self._search_edit, "", wake_event=self._wake_event)
@@ -902,13 +1409,16 @@ class NativeWeixinDriver:
         def cleared_results_refreshed() -> bool:
             if self._actions.read_text(self._search_edit) != "":
                 return False
-            current = self._search_rows()
+            current = self._coerce_search_rows(self._search_rows())
             if current is None:
                 refresh_state["cleared"] = True
                 return True
             refreshed = (
                 not initial_signature
-                or self._candidate_signature(current[0]) != initial_signature
+                or self._candidate_signature(
+                    [entry.candidate for entry in current]
+                )
+                != initial_signature
             )
             if refreshed:
                 refresh_state["cleared"] = True
@@ -936,11 +1446,11 @@ class NativeWeixinDriver:
             if self._actions.read_text(self._search_edit) != target:
                 reset_stability()
                 return False
-            current = self._search_rows()
+            current = self._coerce_search_rows(self._search_rows())
             if current is None:
                 reset_stability()
                 return False
-            candidates, _rows = current
+            candidates = [entry.candidate for entry in current]
             holder["last_state_valid"] = True
             signature = self._candidate_signature(candidates)
             if signature == holder["signature"]:
@@ -969,10 +1479,10 @@ class NativeWeixinDriver:
         return list(self._search_results)
 
     def _resolve_search_candidate(self, candidate: SearchCandidate):
-        current = self._search_rows()
+        current = self._coerce_search_rows(self._search_rows())
         if current is None:
             return None
-        candidates, controls = current
+        candidates = [entry.candidate for entry in current]
         expected = normalize_identity(self._search_query)
         matching_indexes = [
             index
@@ -987,7 +1497,7 @@ class NativeWeixinDriver:
         exact_indexes = [
             index
             for index, current_candidate in enumerate(candidates)
-            if current_candidate == candidate
+            if self._same_candidate(current_candidate, candidate)
         ]
         if len(exact_indexes) != 1:
             expected_identities = {
@@ -1009,7 +1519,15 @@ class NativeWeixinDriver:
         index = exact_indexes[0]
         if index != matching_indexes[0]:
             return None
-        return controls[index] if index < len(controls) else None
+        return current[index].control
+
+    def _search_candidate_present(self, candidate: SearchCandidate) -> bool:
+        current = self._coerce_search_rows(self._search_rows())
+        if current is None:
+            return False
+        return any(
+            self._same_candidate(entry.candidate, candidate) for entry in current
+        )
 
     def select_search_result(self, candidate: SearchCandidate) -> None:
         if not isinstance(candidate, SearchCandidate):
@@ -1024,17 +1542,61 @@ class NativeWeixinDriver:
             title = normalize_identity(self.current_chat_title())
             return bool(title) and any(
                 normalize_identity(identity) == title
-                for identity in candidate.identities
+                for identity in (self._selected_identities or candidate.identities)
             )
 
-        self._actions.select(
-            control,
-            lambda: self.composer_ready()
-            and selected_chat_verified(),
-            resolve_control=lambda: self._resolve_search_candidate(candidate),
-            extra_postcondition=lambda: self.composer_ready(),
-            wake_event=self._wake_event,
-        )
+        def destination_verified() -> bool:
+            return self.composer_ready() and selected_chat_verified()
+
+        try:
+            self._actions.select(
+                control,
+                destination_verified,
+                pre_resolve_control=lambda: self._resolve_search_candidate(candidate),
+                resolve_control=lambda: self._resolve_search_candidate(candidate),
+                source_present=lambda: self._search_candidate_present(candidate),
+                wake_event=self._wake_event,
+            )
+            return
+        except ActionVerificationError as initial_error:
+            if destination_verified():
+                return
+            try:
+                source_still_present = self._search_candidate_present(candidate)
+            except Exception:
+                source_still_present = True
+            if source_still_present:
+                raise
+
+            target = self._selected_target
+            refreshed = self.search_contacts(target)
+            expected = normalize_identity(target)
+            exact = [
+                item
+                for item in refreshed
+                if expected
+                in {normalize_identity(value) for value in item.identities}
+            ]
+            if len(exact) != 1:
+                raise RuntimeError(
+                    "搜索结果切换后无法重新确认唯一精确目标"
+                ) from initial_error
+            refreshed_candidate = exact[0]
+            refreshed_control = self._resolve_search_candidate(refreshed_candidate)
+            if refreshed_control is None:
+                raise RuntimeError(
+                    "搜索结果切换后无法重新解析精确目标控件"
+                ) from initial_error
+            self._selected_identities = refreshed_candidate.identities
+            self._click_search_candidate(refreshed_control)
+            if not self._waiter.wait(
+                destination_verified,
+                self._timeout,
+                self._wake_event,
+            ):
+                raise ActionVerificationError(
+                    "重新搜索并点击精确结果后，聊天标题或输入框仍未就绪"
+                ) from initial_error
 
     def current_chat_title(self) -> str:
         if not self._selected_target:
@@ -1061,9 +1623,10 @@ class NativeWeixinDriver:
                 continue
             if class_name != CHAT_TITLE_CONTROL_CLASS:
                 continue
-            if (
-                str(safe_attr(control, "AutomationId", ""))
-                != CHAT_TITLE_AUTOMATION_ID
+            automation_id = str(safe_attr(control, "AutomationId", ""))
+            if automation_id and not (
+                automation_id == CHAT_TITLE_AUTOMATION_ID
+                or automation_id.endswith("current_chat_name_label")
             ):
                 continue
             title = str(safe_attr(control, "Name", "")).strip()
@@ -1153,12 +1716,10 @@ class NativeWeixinDriver:
 
     @staticmethod
     def _message_identity(control: Any) -> tuple:
-        runtime_id = _runtime_id(control)
-        if runtime_id:
-            stable_id: tuple = ("runtime", runtime_id)
-        else:
-            stable_id = ("fallback", control_key(control))
-        return stable_id, str(safe_attr(control, "Name", "")).strip()
+        return (
+            _stable_message_control_identity(control),
+            str(safe_attr(control, "Name", "")).strip(),
+        )
 
     def message_snapshot(self) -> tuple[tuple, ...]:
         return tuple(
@@ -1291,10 +1852,41 @@ class NativeWeixinDriver:
         self._forward_source_count = len(materialized)
         return {"outcome": "success", "count": len(materialized)}
 
-    def _find_all_control(self, **selector):
+    def _matching_all_controls(self, **selector) -> list[Any]:
         nodes = self._all_nodes()
         raise_for_risk_controls(nodes)
-        return find_exact_control(nodes, **selector)
+        return [
+            control
+            for control, depth in nodes
+            if find_exact_control(((control, depth),), **selector) is control
+        ]
+
+    def _find_all_control(self, **selector):
+        matches = self._matching_all_controls(**selector)
+        return matches[0] if len(matches) == 1 else None
+
+    def _resolve_bound_all_control(
+        self, reference: tuple[Any, ...], **selector
+    ):
+        matches = [
+            control
+            for control in self._matching_all_controls(**selector)
+            if _control_reference(control) == reference
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _click_bound_all_control_once(
+        self, control, postcondition, **selector
+    ):
+        reference = _control_reference(control)
+        return self._actions.click(
+            control,
+            postcondition,
+            pre_resolve_control=lambda: self._resolve_bound_all_control(
+                reference, **selector
+            ),
+            wake_event=self._wake_event,
+        )
 
     def _wait_all_control(self, **selector):
         holder = {"control": None}
@@ -1307,7 +1899,7 @@ class NativeWeixinDriver:
             raise RuntimeError(f"转发控件未出现：{selector}")
         return holder["control"]
 
-    def _recent_message_bubbles(self, count: int) -> list[Any]:
+    def _message_bubbles(self) -> list[Any]:
         profile = self._session.profile
         message_list = self._wait_control(
             automation_id=profile.chat_message_list_automation_id,
@@ -1316,24 +1908,42 @@ class NativeWeixinDriver:
         nodes = list(
             self._uia.WalkControl(message_list, includeTop=False, maxDepth=5)
         )
-        bubbles = filter_recent_message_bubbles(
-            nodes, profile.chat_message_classes, count
+        return filter_recent_message_bubbles(
+            nodes, profile.chat_message_classes, len(nodes)
         )
+
+    def _recent_message_bubbles(self, count: int) -> list[Any]:
+        bubbles = self._message_bubbles()[-count:] if count > 0 else []
         if len(bubbles) != count:
             raise RuntimeError(f"源消息不足：需要 {count} 条，找到 {len(bubbles)} 条")
         return bubbles
 
+    def _resolve_message_bubble(self, reference: tuple[Any, ...]):
+        matches = [
+            bubble
+            for bubble in self._message_bubbles()
+            if _control_reference(bubble) == reference
+        ]
+        return matches[0] if len(matches) == 1 else None
+
     def _right_click_bounds(self, control) -> None:
         rectangle = safe_attr(control, "BoundingRectangle")
-        if rectangle is None or rectangle.right <= rectangle.left:
+        if (
+            rectangle is None
+            or rectangle.right <= rectangle.left
+            or rectangle.bottom <= rectangle.top
+        ):
             raise RuntimeError("消息气泡没有可用边界")
-        self._uia.RightClick(
+        point = (
             (rectangle.left + rectangle.right) // 2,
             (rectangle.top + rectangle.bottom) // 2,
         )
+        window_root, _window_rectangle = self._owning_window(control)
+        self._prepare_click_window(window_root, control, point)
+        self._uia.RightClick(*point)
 
     @staticmethod
-    def _selection_state(control) -> bool:
+    def _read_selection_state(control) -> bool | None:
         for getter, attribute in (
             ("GetSelectionItemPattern", "IsSelected"),
             ("GetTogglePattern", "ToggleState"),
@@ -1341,17 +1951,35 @@ class NativeWeixinDriver:
             try:
                 pattern = getattr(control, getter)()
                 value = getattr(pattern, attribute)
+                if attribute == "ToggleState":
+                    return int(value) == 1
                 return bool(value)
             except Exception:
                 continue
-        return False
+        return None
+
+    @staticmethod
+    def _selection_state(control) -> bool:
+        return NativeWeixinDriver._read_selection_state(control) is True
 
     def _select_forward_bubble(self, control) -> None:
-        if self._selection_state(control):
+        reference = _control_reference(control)
+
+        def resolve():
+            return self._resolve_message_bubble(reference)
+
+        current = resolve()
+        if current is None:
+            raise RuntimeError("待转发消息已变化，拒绝选择")
+        if self._selection_state(current):
             return
-        self._actions.select(
-            control,
-            lambda: self._selection_state(control),
+        self._actions.click(
+            current,
+            lambda: (
+                (fresh := resolve()) is not None
+                and self._selection_state(fresh)
+            ),
+            pre_resolve_control=resolve,
             wake_event=self._wake_event,
         )
 
@@ -1382,9 +2010,57 @@ class NativeWeixinDriver:
         return candidates[0]
 
     def _forward_recipient_selected(self, target: str, search_edit) -> bool:
-        if self._selection_state(self._forward_candidate(target)):
-            return True
-        return (self._actions.read_text(search_edit) or "") == ""
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        candidates = extract_exact_forward_candidates(nodes, target)
+        if len(candidates) != 1:
+            return False
+        target_control = candidates[0]
+        if self._read_selection_state(target_control) is not True:
+            return False
+
+        expected_owner = None
+        if self._session is not None:
+            try:
+                expected_owner, _rectangle = self._owning_window(search_edit)
+            except Exception:
+                return False
+
+        target_class = str(safe_attr(target_control, "ClassName", ""))
+        target_type = str(safe_attr(target_control, "ControlTypeName", ""))
+        selected_references = set()
+        seen_references = set()
+        for control, _depth in nodes:
+            if str(safe_attr(control, "ControlTypeName", "")) != target_type:
+                continue
+            if str(safe_attr(control, "ClassName", "")) != target_class:
+                continue
+            if expected_owner is not None:
+                try:
+                    owner, _rectangle = self._owning_window(control)
+                except Exception:
+                    return False
+                expected_hwnd = int(
+                    safe_attr(expected_owner, "NativeWindowHandle", 0) or 0
+                )
+                owner_hwnd = int(safe_attr(owner, "NativeWindowHandle", 0) or 0)
+                if expected_hwnd and owner_hwnd:
+                    if owner_hwnd != expected_hwnd:
+                        continue
+                elif owner is not expected_owner:
+                    continue
+
+            reference = _control_reference(control)
+            if reference in seen_references:
+                continue
+            seen_references.add(reference)
+            selection_state = self._read_selection_state(control)
+            if selection_state is None:
+                return False
+            if selection_state:
+                selected_references.add(reference)
+
+        return selected_references == {_control_reference(target_control)}
 
     def _forward_message_edit(self, search_edit):
         nodes = self._all_nodes()
@@ -1422,39 +2098,62 @@ class NativeWeixinDriver:
         if count != len(paths) or count <= 0:
             return {"outcome": "error", "detail": "合并转发源文件尚未准备"}
 
-        target_snapshot = {
-            control_key(control) for control in self._message_controls()
-        }
+        self._open_exact_chat(target)
+        target_snapshot = self.message_snapshot()
         self._open_exact_chat("文件传输助手")
         bubbles = self._recent_message_bubbles(count)
-        self._right_click_bounds(bubbles[-1])
-        multi = self._wait_all_control(
-            name=("多选", "选择多条", "多选消息"),
+        last_bubble = self._resolve_message_bubble(
+            _control_reference(bubbles[-1])
         )
-        self._actions.invoke(
+        if last_bubble is None:
+            raise RuntimeError("待转发消息已变化，拒绝打开多选")
+        self._right_click_bounds(last_bubble)
+        interactive_types = tuple(sorted(INTERACTIVE_CONTROL_TYPES))
+        multi_selector = dict(
+            name=("多选", "选择多条", "多选消息"),
+            control_types=interactive_types,
+            visible=True,
+        )
+        multi = self._wait_all_control(**multi_selector)
+        forward_selector = dict(
+            name=("转发",),
+            control_types=interactive_types,
+            visible=True,
+        )
+        self._click_bound_all_control_once(
             multi,
-            lambda: self._find_all_control(name=("转发",)) is not None,
-            wake_event=self._wake_event,
+            lambda: self._find_all_control(**forward_selector) is not None,
+            **multi_selector,
         )
 
         bubbles = self._recent_message_bubbles(count)
+        bubble_references = {_control_reference(bubble) for bubble in bubbles}
         for bubble in bubbles:
             self._select_forward_bubble(bubble)
+        selected_references = {
+            _control_reference(bubble)
+            for bubble in self._message_bubbles()
+            if self._selection_state(bubble)
+        }
+        if selected_references != bubble_references:
+            raise RuntimeError("多选消息集合与待转发文件不一致，拒绝继续")
 
-        forward = self._wait_all_control(name="转发")
-        self._actions.invoke(
-            forward,
-            lambda: self._find_all_control(
-                name=("合并转发", "合并发送")
-            )
-            is not None,
-            wake_event=self._wake_event,
+        forward = self._wait_all_control(**forward_selector)
+        merge_selector = dict(
+            name=("合并转发", "合并发送"),
+            control_types=interactive_types,
+            visible=True,
         )
-        merge = self._wait_all_control(name=("合并转发", "合并发送"))
-        self._actions.invoke(
+        self._click_bound_all_control_once(
+            forward,
+            lambda: self._find_all_control(**merge_selector) is not None,
+            **forward_selector,
+        )
+        merge = self._wait_all_control(**merge_selector)
+        self._click_bound_all_control_once(
             merge,
             lambda: self._forward_search_edit() is not None,
-            wake_event=self._wake_event,
+            **merge_selector,
         )
 
         search_edit = self._forward_search_edit()
@@ -1462,9 +2161,23 @@ class NativeWeixinDriver:
             raise RuntimeError("转发搜索框未出现")
         self._actions.set_text(search_edit, target, wake_event=self._wake_event)
         candidate = self._forward_candidate(target)
-        self._actions.select(
+        candidate_reference = _control_reference(candidate)
+
+        def resolve_candidate():
+            try:
+                current = self._forward_candidate(target)
+            except Exception:
+                return None
+            return (
+                current
+                if _control_reference(current) == candidate_reference
+                else None
+            )
+
+        self._actions.click(
             candidate,
             lambda: self._forward_recipient_selected(target, search_edit),
+            pre_resolve_control=resolve_candidate,
             wake_event=self._wake_event,
         )
 
@@ -1476,11 +2189,22 @@ class NativeWeixinDriver:
                 message_edit, message, wake_event=self._wake_event
             )
 
-        send = self._wait_all_control(
+        if not self._forward_recipient_selected(target, search_edit):
+            raise RuntimeError("转发收件人未保持唯一精确选中状态，拒绝发送")
+        send_selector = dict(
             name=("发送", "确定"),
             control_type="ButtonControl",
+            visible=True,
         )
-        self._invoke_once(send)
+        send = self._wait_all_control(**send_selector)
+        fresh_send = self._resolve_bound_all_control(
+            _control_reference(send), **send_selector
+        )
+        if fresh_send is None:
+            raise RuntimeError("转发发送按钮已变化，拒绝触发")
+        if not self._forward_recipient_selected(target, search_edit):
+            raise RuntimeError("转发收件人在发送前已变化，拒绝触发")
+        self._invoke_once(fresh_send)
 
         self._open_exact_chat(target)
         appended = self._waiter.wait(
@@ -1504,27 +2228,68 @@ class NativeWeixinDriver:
         names: Sequence[str],
         postcondition,
     ) -> None:
-        control = self._wait_control(hwnd=hwnd, name=names)
-        control_type = str(safe_attr(control, "ControlTypeName", ""))
-        if control_type not in INTERACTIVE_CONTROL_TYPES:
-            raise RuntimeError(f"控件不可交互：{names[0]}")
-        self._actions.invoke(
-            control, postcondition, wake_event=self._wake_event
+        selector = {
+            "name": names,
+            "control_types": tuple(sorted(INTERACTIVE_CONTROL_TYPES)),
+            "visible": True,
+        }
+        control = self._wait_control(hwnd=hwnd, **selector)
+
+        def resolve_navigation_control():
+            try:
+                _root, nodes = self._walk(hwnd)
+                return find_exact_control(nodes, **selector)
+            except Exception:
+                return None
+
+        if postcondition():
+            return
+        self._actions.click(
+            control,
+            postcondition,
+            pre_resolve_control=resolve_navigation_control,
+            wake_event=self._wake_event,
         )
 
     def open_add_friend(self) -> bool:
         self._ensure_session()
         profile = self._session.profile
-        existing = self._process_window((profile.add_friend_root_class,))
-        if existing:
-            self._add_hwnd = existing
+        expected_classes = (profile.add_friend_root_class,)
+        visible_windows = self._process_windows(
+            expected_classes, visible=True, strict=True
+        )
+        if len(visible_windows) > 1:
+            raise RuntimeError("检测到多个添加朋友窗口，拒绝继续")
+        if visible_windows:
+            visible_hwnd = visible_windows[0]
+            if not self._restore_owned_process_window(
+                visible_hwnd, expected_classes
+            ):
+                raise RuntimeError("添加朋友窗口置前失败")
+            self._add_hwnd = visible_hwnd
+            return True
+        hidden_windows = self._process_windows(
+            expected_classes, visible=False, strict=True
+        )
+        if len(hidden_windows) > 1:
+            raise RuntimeError("检测到多个隐藏的添加朋友窗口，拒绝继续")
+        if hidden_windows:
+            hidden_hwnd = hidden_windows[0]
+            if not self._restore_owned_process_window(
+                hidden_hwnd, expected_classes
+            ):
+                raise RuntimeError("隐藏的添加朋友窗口恢复失败")
+            self._add_hwnd = hidden_hwnd
             return True
         main_hwnd = self._session.hwnd
         self._activate_navigation(
             main_hwnd,
             ("微信",),
             lambda: find_exact_control(
-                self._walk(main_hwnd)[1], name="快捷操作"
+                self._walk(main_hwnd)[1],
+                name="快捷操作",
+                control_types=tuple(sorted(INTERACTIVE_CONTROL_TYPES)),
+                visible=True,
             )
             is not None,
         )
@@ -1532,7 +2297,10 @@ class NativeWeixinDriver:
             main_hwnd,
             ("快捷操作",),
             lambda: find_exact_control(
-                self._walk(main_hwnd)[1], name="添加朋友"
+                self._walk(main_hwnd)[1],
+                name="添加朋友",
+                control_types=tuple(sorted(INTERACTIVE_CONTROL_TYPES)),
+                visible=True,
             )
             is not None,
         )
@@ -1550,19 +2318,61 @@ class NativeWeixinDriver:
             name=("搜索", "微信号/手机号"),
             control_type="EditControl",
         )
-        self._friend_account = account
-        method = self._actions.set_text(
-            search, account, wake_event=self._wake_event
-        ).method
-        self._friend_search = search
-        return method
+        self._friend_profile_reset_for = ""
+        self._friend_profile_token = None
+        current_value = self._actions.read_text(search)
 
-    def search_friend(self, account: str) -> dict[str, str] | None:
+        def profile_absent() -> bool:
+            try:
+                _root, nodes = self._walk(self._add_hwnd)
+                return not any(
+                    str(safe_attr(control, "ClassName", ""))
+                    == "mmui::ProfileViewNormal"
+                    for control, _depth in nodes
+                )
+            except Exception:
+                return False
+
+        if current_value or not profile_absent():
+            self._actions.set_text(search, "", wake_event=self._wake_event)
+            if not self._waiter.wait(
+                lambda: self._actions.read_text(search) == "" and profile_absent(),
+                self._timeout,
+                self._wake_event,
+            ):
+                raise RuntimeError("旧好友资料未清空，拒绝搜索下一账号")
+        self._friend_account = account
+        result = self._actions.set_text(
+            search, account, wake_event=self._wake_event
+        )
+        self._friend_search = search
+        self._friend_profile_reset_for = normalize_identity(account)
+        self._friend_query_generation += 1
+        return result.method
+
+    def search_friend(self, account: str) -> dict[str, Any] | None:
+        exact_query_was_reset = (
+            self._friend_profile_reset_for == normalize_identity(account)
+        )
+        self._friend_profile_reset_for = ""
+        if exact_query_was_reset:
+            _root, before_nodes = self._walk(self._add_hwnd)
+            if any(
+                str(safe_attr(control, "ClassName", ""))
+                == "mmui::ProfileViewNormal"
+                or str(safe_attr(control, "Name", "")).strip()
+                == "添加到通讯录"
+                for control, _depth in before_nodes
+            ):
+                self._friend_profile_token = None
+                raise RuntimeError("本轮搜索前仍有旧好友资料，拒绝继续")
         self._friend_search.SendKeys("{Enter}", waitTime=0.05)
         try:
-            button = self._wait_control(
+            self._wait_control(
                 hwnd=self._add_hwnd,
                 name="添加到通讯录",
+                control_types=tuple(sorted(INTERACTIVE_CONTROL_TYPES)),
+                visible=True,
             )
         except RuntimeError:
             raise_for_risk_controls(self._walk(self._add_hwnd)[1])
@@ -1570,8 +2380,65 @@ class NativeWeixinDriver:
         _root, nodes = self._walk(self._add_hwnd)
         raise_for_risk_controls(nodes)
         identities = extract_labeled_friend_identities(nodes)
-        verified_account = identities[0] if len(identities) == 1 else ""
-        return {"account": verified_account, "control": button}
+        button = None
+        if len(identities) == 1:
+            verified_account = identities[0]
+            verification = "labeled_profile_identity"
+            button = _unique_visible_add_friend_button(nodes)
+        elif exact_query_was_reset and not identities:
+            button = _exact_query_profile_card_button(
+                nodes,
+                search_control=self._friend_search,
+                account=account,
+                read_text=self._actions.read_text,
+            )
+            if button is not None:
+                verified_account = account
+                verification = "exact_query_profile_card"
+            else:
+                verified_account = ""
+                verification = "unverified"
+        else:
+            verified_account = ""
+            verification = "unverified"
+        if button is None:
+            verified_account = ""
+            verification = "unverified"
+            control_reference: tuple[Any, ...] = ()
+            profile_reference: tuple[Any, ...] = ()
+            token = None
+        else:
+            control_reference = _control_reference(button)
+            profile_controls = [
+                control
+                for control, _depth in nodes
+                if str(safe_attr(control, "ClassName", ""))
+                == "mmui::ProfileViewNormal"
+            ]
+            profile_reference = (
+                _control_reference(profile_controls[0])
+                if len(profile_controls) == 1
+                else ()
+            )
+            token = (
+                self._friend_query_generation,
+                normalize_identity(account),
+                normalize_identity(verified_account),
+                verification,
+                profile_reference,
+                control_reference,
+            )
+        self._friend_profile_token = token
+        return {
+            "account": verified_account,
+            "control": button,
+            "verification": verification,
+            "query": account,
+            "queryGeneration": self._friend_query_generation,
+            "profileReference": profile_reference,
+            "controlReference": control_reference,
+            "profileToken": token,
+        }
 
     @staticmethod
     def profile_account(profile: dict[str, Any]) -> str:
@@ -1579,12 +2446,94 @@ class NativeWeixinDriver:
 
     def open_friend_request(self, profile: dict[str, Any]) -> bool:
         expected_classes = (self._session.profile.verify_friend_root_class,)
-        self._actions.invoke(
-            profile["control"],
-            lambda: bool(self._process_window(expected_classes)),
+        token = profile.get("profileToken")
+        expected_query = normalize_identity(str(profile.get("query", "")))
+        expected_account = normalize_identity(str(profile.get("account", "")))
+        expected_profile_reference = profile.get("profileReference")
+        expected_reference = profile.get("controlReference")
+        verification = str(profile.get("verification", ""))
+
+        def resolve_add_button():
+            try:
+                if (
+                    not token
+                    or token != self._friend_profile_token
+                    or int(profile.get("queryGeneration", -1))
+                    != self._friend_query_generation
+                    or expected_query != normalize_identity(self._friend_account)
+                    or expected_account != expected_query
+                    or normalize_identity(
+                        self._actions.read_text(self._friend_search) or ""
+                    )
+                    != expected_query
+                ):
+                    return None
+                _root, nodes = self._walk(self._add_hwnd)
+                raise_for_risk_controls(nodes)
+                identities = extract_labeled_friend_identities(nodes)
+                if verification == "exact_query_profile_card":
+                    if identities:
+                        return None
+                    button = _exact_query_profile_card_button(
+                        nodes,
+                        search_control=self._friend_search,
+                        account=expected_query,
+                        read_text=self._actions.read_text,
+                    )
+                elif verification == "labeled_profile_identity":
+                    if (
+                        len(identities) != 1
+                        or normalize_identity(identities[0]) != expected_account
+                    ):
+                        return None
+                    button = _unique_visible_add_friend_button(nodes)
+                else:
+                    return None
+                profile_controls = [
+                    control
+                    for control, _depth in nodes
+                    if str(safe_attr(control, "ClassName", ""))
+                    == "mmui::ProfileViewNormal"
+                ]
+                current_profile_reference = (
+                    _control_reference(profile_controls[0])
+                    if len(profile_controls) == 1
+                    else ()
+                )
+                if (
+                    button is None
+                    or current_profile_reference != expected_profile_reference
+                    or _control_reference(button) != expected_reference
+                ):
+                    return None
+                return button
+            except Exception:
+                return None
+
+        if self._process_windows(
+            expected_classes, visible=None, strict=True
+        ):
+            raise RuntimeError("检测到旧的好友申请表单，拒绝点击新的资料卡")
+
+        current_button = resolve_add_button()
+        if current_button is None:
+            raise RuntimeError("好友资料卡已变化或未绑定当前账号，拒绝点击")
+
+        def new_verify_window() -> bool:
+            return len(
+                self._process_windows(expected_classes, strict=True)
+            ) == 1
+
+        self._actions.click(
+            current_button,
+            new_verify_window,
+            pre_resolve_control=resolve_add_button,
             wake_event=self._wake_event,
         )
-        self._verify_hwnd = self._process_window(expected_classes)
+        verify_windows = self._process_windows(expected_classes, strict=True)
+        if len(verify_windows) != 1:
+            raise RuntimeError("好友申请表单未唯一出现，拒绝继续")
+        self._verify_hwnd = verify_windows[0]
         return bool(self._verify_hwnd)
 
     def set_friend_fields(
@@ -1657,27 +2606,44 @@ class NativeWeixinDriver:
         return None
 
     def close(self) -> None:
+        cleanup_error: Exception | None = None
         subscription = self._event_subscription
-        self._event_subscription = None
         if subscription is not None:
-            subscription.close()
+            try:
+                subscription.close()
+            except Exception as exc:
+                cleanup_error = exc
+            else:
+                self._event_subscription = None
         session = self._session
-        self._session = None
         if session is not None:
-            session.close()
+            try:
+                session.close()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
+                self._session = None
         if self._uia_initialized and self._uia is not None:
             try:
                 self._uia.UninitializeUIAutomationInCurrentThread()
-            finally:
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            else:
                 self._uia_initialized = False
                 self._uia = None
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 __all__ = [
     "NativeWeixinDriver",
     "RiskControlError",
     "SearchCandidate",
+    "SearchResultRow",
     "extract_contact_results",
+    "extract_search_result_rows",
     "extract_exact_forward_candidates",
     "filter_recent_message_bubbles",
     "find_exact_control",

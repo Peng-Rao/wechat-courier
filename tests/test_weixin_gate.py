@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+import src.core.win32 as win32_module
+import app.agent.gate as gate_module
 
 from app.agent.gate import (
     AccessibilitySafetyError,
@@ -97,6 +101,62 @@ def test_accessibility_session_verifies_enables_and_restores_gate():
     assert backend.closed is True
 
 
+def test_accessibility_session_writes_gate_before_notifying_screen_reader():
+    class OrderedBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def set_screen_reader(self, enabled):
+            self.events.append(("screen_reader", enabled))
+            return super().set_screen_reader(enabled)
+
+        def write_byte(self, handle, address, value):
+            self.events.append(("gate", value))
+            return super().write_byte(handle, address, value)
+
+    backend = OrderedBackend()
+
+    with WeixinAccessibilitySession(backend):
+        assert backend.events[:2] == [
+            ("gate", 1),
+            ("screen_reader", True),
+        ]
+
+
+def test_accessibility_session_notifies_even_when_screen_reader_is_already_on():
+    class NotifyingBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.screen_reader = True
+            self.notifications = []
+
+        def set_screen_reader(self, enabled):
+            self.notifications.append(enabled)
+            return super().set_screen_reader(enabled)
+
+    backend = NotifyingBackend()
+
+    with WeixinAccessibilitySession(backend):
+        assert backend.notifications == [True]
+
+    assert backend.screen_reader is True
+
+
+def test_native_screen_reader_notification_broadcasts_the_change(monkeypatch):
+    calls = []
+    user32 = SimpleNamespace(
+        SystemParametersInfoW=lambda *args: calls.append(args) or 1
+    )
+    monkeypatch.setattr(
+        gate_module.ctypes, "windll", SimpleNamespace(user32=user32)
+    )
+
+    assert NativeGateBackend.set_screen_reader(True) is True
+
+    assert calls == [(gate_module.SPI_SETSCREENREADER, 1, None, 0x02)]
+
+
 def test_accessibility_session_does_not_guess_an_unknown_version():
     backend = FakeGateBackend()
     backend.version = "4.1.14.1"
@@ -142,7 +202,7 @@ def test_cleanup_restores_gate_even_if_screen_reader_restore_fails():
 
         def get_screen_reader(self):
             self._screen_reader_reads += 1
-            if self._screen_reader_reads > 1:
+            if self._screen_reader_reads > 2:
                 raise RuntimeError("screen reader restore failed")
             return super().get_screen_reader()
 
@@ -154,3 +214,247 @@ def test_cleanup_restores_gate_even_if_screen_reader_restore_fails():
 
     assert backend.memory[session.gate_address] == 0
     assert backend.closed is True
+
+
+def test_cleanup_restores_gate_before_disabling_screen_reader():
+    class OrderedBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def set_screen_reader(self, enabled):
+            self.events.append(("screen_reader", enabled))
+            return super().set_screen_reader(enabled)
+
+        def write_byte(self, handle, address, value):
+            self.events.append(("gate", value))
+            return super().write_byte(handle, address, value)
+
+    backend = OrderedBackend()
+    session = WeixinAccessibilitySession(backend).__enter__()
+    backend.events.clear()
+
+    session.close()
+
+    assert backend.events[:2] == [("gate", 0), ("screen_reader", False)]
+
+
+def test_cleanup_keeps_screen_reader_enabled_when_gate_restore_fails():
+    class GateRestoreFailureBackend(FakeGateBackend):
+        fail_restore = True
+
+        def write_byte(self, handle, address, value):
+            if value == 0 and self.fail_restore:
+                return False
+            return super().write_byte(handle, address, value)
+
+    backend = GateRestoreFailureBackend()
+    session = WeixinAccessibilitySession(backend).__enter__()
+
+    with pytest.raises(AccessibilitySafetyError, match="restore.*gate"):
+        session.close()
+
+    assert backend.screen_reader is True
+    assert backend.closed is False
+
+    backend.fail_restore = False
+    session.close()
+
+    assert backend.memory[session.gate_address] == 0
+    assert backend.screen_reader is False
+    assert backend.closed is True
+
+
+def test_cleanup_retries_screen_reader_restore_after_a_transient_failure():
+    class ScreenReaderRetryBackend(FakeGateBackend):
+        fail_restore = True
+
+        def set_screen_reader(self, enabled):
+            if enabled is False and self.fail_restore:
+                return False
+            return super().set_screen_reader(enabled)
+
+    backend = ScreenReaderRetryBackend()
+    session = WeixinAccessibilitySession(backend).__enter__()
+
+    with pytest.raises(AccessibilitySafetyError, match="screen-reader"):
+        session.close()
+
+    assert backend.memory[session.gate_address] == 0
+    assert backend.screen_reader is True
+    assert session._original_screen_reader is False
+
+    backend.fail_restore = False
+    session.close()
+
+    assert backend.screen_reader is False
+    assert session._original_screen_reader is None
+
+
+def _window(*, visible: bool):
+    return win32_module.WindowRef(
+        hwnd=101,
+        pid=202,
+        process_path=r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+        window_class="Chrome_WidgetWin_0",
+        title="微信",
+        visible=visible,
+        bounds=(10, 20, 810, 620),
+    )
+
+
+def test_native_backend_window_inspection_is_read_only_and_json_compatible(
+    monkeypatch,
+):
+    hidden = _window(visible=False)
+    monkeypatch.setattr(NativeGateBackend, "_require_windows", lambda self: None)
+    monkeypatch.setattr(
+        "src.core.win32.find_wechat_window_ref", lambda: hidden
+    )
+    monkeypatch.setattr(
+        "src.core.win32.restore_wechat_window",
+        lambda *_args, **_kwargs: pytest.fail("read-only inspection must not restore"),
+    )
+
+    result = NativeGateBackend().window_inspection()
+
+    assert result == {
+        "hwnd": 101,
+        "pid": 202,
+        "processPath": r"C:\Program Files\Tencent\Weixin\Weixin.exe",
+        "windowClass": "Chrome_WidgetWin_0",
+        "title": "微信",
+        "visible": False,
+        "bounds": [10, 20, 810, 620],
+        "windowState": "hidden",
+        "restorable": True,
+    }
+
+
+def test_native_backend_missing_window_inspection_has_compatible_state_keys(
+    monkeypatch,
+):
+    monkeypatch.setattr(NativeGateBackend, "_require_windows", lambda self: None)
+    monkeypatch.setattr("src.core.win32.find_wechat_window_ref", lambda: None)
+
+    result = NativeGateBackend().window_inspection()
+
+    assert result["windowState"] == "missing"
+    assert result["restorable"] is False
+    assert result["hwnd"] == 0
+    assert result["pid"] == 0
+
+
+def test_native_backend_does_not_restore_after_discovery_reports_missing(
+    monkeypatch,
+):
+    backend = NativeGateBackend()
+    monkeypatch.setattr(backend, "discover_main_window", lambda: None)
+    monkeypatch.setattr(
+        "src.core.win32.restore_wechat_window",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a missing snapshot must not be reinterpreted as rediscovery"
+        ),
+    )
+
+    result = backend.prepare_main_window()
+
+    assert result.window_state == "missing"
+    assert result.stages == ()
+
+
+def test_accessibility_session_prepares_window_before_touching_gate_state():
+    class PreparingBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def prepare_main_window(self):
+            self.events.append("prepare")
+            hidden = _window(visible=False)
+            visible = _window(visible=True)
+            return win32_module.WindowRestoreResult(
+                initial=hidden,
+                window=visible,
+                restored=True,
+                stages=(
+                    win32_module.WindowRestoreStage(
+                        stage="direct",
+                        attempted=True,
+                        succeeded=True,
+                        detail="same PID visible",
+                    ),
+                ),
+            )
+
+        def find_main_window(self):
+            pytest.fail("prepare_main_window supplies the verified window")
+
+        def get_window_pid(self, hwnd):
+            pytest.fail("prepare_main_window supplies the verified PID")
+
+        def find_module(self, pid, name):
+            self.events.append("find_module")
+            return super().find_module(pid, name)
+
+        def open_process(self, pid):
+            self.events.append("open_process")
+            return super().open_process(pid)
+
+        def write_byte(self, handle, address, value):
+            self.events.append("write_gate")
+            return super().write_byte(handle, address, value)
+
+    backend = PreparingBackend()
+
+    with WeixinAccessibilitySession(backend) as session:
+        assert session.window_restore.restored is True
+
+    assert backend.events[:4] == [
+        "prepare",
+        "find_module",
+        "open_process",
+        "write_gate",
+    ]
+
+
+def test_accessibility_session_refuses_gate_access_when_restore_fails():
+    class HiddenBackend(FakeGateBackend):
+        def prepare_main_window(self):
+            hidden = _window(visible=False)
+            return win32_module.WindowRestoreResult(
+                initial=hidden,
+                window=hidden,
+                restored=False,
+                stages=(
+                    win32_module.WindowRestoreStage(
+                        stage="direct",
+                        attempted=True,
+                        succeeded=False,
+                        detail="same PID remained hidden",
+                    ),
+                    win32_module.WindowRestoreStage(
+                        stage="tray",
+                        attempted=True,
+                        succeeded=False,
+                        detail="same PID remained hidden",
+                    ),
+                    win32_module.WindowRestoreStage(
+                        stage="hotkey",
+                        attempted=True,
+                        succeeded=False,
+                        detail="same PID remained hidden",
+                    ),
+                ),
+            )
+
+        def find_module(self, pid, name):
+            pytest.fail("gate discovery must wait until the window is visible")
+
+    backend = HiddenBackend()
+
+    with pytest.raises(RuntimeError, match="direct.*tray.*hotkey"):
+        WeixinAccessibilitySession(backend).__enter__()
+
+    assert backend.opened is False
+    assert backend.writes == []
