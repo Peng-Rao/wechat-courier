@@ -170,6 +170,7 @@ class FriendImportModel(QAbstractListModel):
         return True
 
     @Slot(int, str, object, result=bool)
+    @Slot(int, str, str, result=bool)
     def setCell(self, row: int, field: str, value: Any) -> bool:
         if not 0 <= row < len(self._records):
             return False

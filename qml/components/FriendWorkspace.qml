@@ -249,6 +249,7 @@ Item {
                                 TextField {
                                     objectName: "friendAccountField"
                                     Layout.preferredWidth: 220
+                                    readonly property int modelRow: parent.parent.row
                                     text: account
                                     enabled: !root.interactionLocked
                                     color: WxTheme.clTextPrimary
@@ -256,7 +257,7 @@ Item {
                                     font.pixelSize: WxTheme.fontSizeSmall
                                     onEditingFinished: {
                                         if (!root.interactionLocked && root.friendBackend)
-                                            root.friendBackend.model.setCell(row, "account", text)
+                                            root.friendBackend.model.setCell(modelRow, "account", text)
                                     }
                                     background: Rectangle {
                                         color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"

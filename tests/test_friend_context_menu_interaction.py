@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, QPoint, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Property, QPoint, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQuick import QQuickItem, QQuickView
 from PySide6.QtTest import QTest
@@ -136,6 +136,11 @@ def _activate(view: QQuickView, action: QQuickItem) -> None:
     _click(view, action, QPoint(10, int(action.height() / 2)), Qt.LeftButton)
 
 
+def _type(view: QQuickView, text: str) -> None:
+    for character in text:
+        QTest.keyClick(view, getattr(Qt, f"Key_{character.upper()}"))
+
+
 def _exercise_context_menu() -> None:
     app = QGuiApplication([])
     model = FriendImportModel()
@@ -164,8 +169,15 @@ def _exercise_context_menu() -> None:
     assert table.height() > 46
     account_field = _find_item(table.property("contentItem"), "friendAccountField")
     assert account_field is not None
+    assert account_field.property("modelRow") == 0, account_field.property("modelRow")
     _click(view, account_field, QPoint(20, int(account_field.height() / 2)), Qt.LeftButton)
     assert account_field.property("activeFocus") is True
+    QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
+    _type(view, "wxidedited")
+    QTest.keyClick(view, Qt.Key_Return)
+    QTest.qWait(100)
+    assert account_field.property("text") == "wxidedited", account_field.property("text")
+    assert model.record_at(0).account == "wxidedited"
 
     _click(view, table, QPoint(30, 20), Qt.RightButton)
     assert menu.property("visible") is True
@@ -189,18 +201,46 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     assert model.count == 2
 
-    _click(view, table, QPoint(30, int(table.height()) - 20), Qt.RightButton)
+    _click(view, table, QPoint(30, 20), Qt.RightButton)
     assert menu.property("visible") is True
+    assert root.property("contextRow") == 0
     task.set_active(True)
     QTest.qWait(50)
     assert add_action.property("enabled") is False
+    assert remove_action.property("enabled") is False
     _activate(view, add_action)
+    _activate(view, remove_action)
     QTest.qWait(100)
+    assert model.count == 2
+    assert QMetaObject.invokeMethod(root, "appendManualRecord")
+    assert QMetaObject.invokeMethod(root, "removeContextRecord")
     assert model.count == 2
     menu.close()
     QTest.qWait(50)
     _click(view, table, QPoint(30, int(table.height()) - 20), Qt.RightButton)
     assert menu.property("visible") is False
+
+    task.set_active(False)
+    for row in range(model.count, 20):
+        model.appendEmptyRecord()
+        assert model.setCell(row, "account", f"wxid_scroll{row}")
+    QTest.qWait(100)
+    target_row = 10
+    target_account = model.record_at(target_row).account
+    table.setProperty("contentY", target_row * 46)
+    QTest.qWait(100)
+    _click(view, table, QPoint(30, 23), Qt.RightButton)
+    assert root.property("contextRow") == target_row
+    assert remove_action.property("visible") is True
+    _activate(view, remove_action)
+    QTest.qWait(100)
+    assert all(model.record_at(row).account != target_account for row in range(model.count))
+    assert QMetaObject.invokeMethod(root, "appendManualRecord")
+    QTest.qWait(100)
+    last_row = model.count - 1
+    content_y = float(table.property("contentY"))
+    assert content_y <= last_row * 46
+    assert content_y + table.height() >= (last_row + 1) * 46
 
     view.hide()
     view.setSource(QUrl())

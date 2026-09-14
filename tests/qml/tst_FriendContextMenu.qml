@@ -67,11 +67,10 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
-    function accountField() { return findChild(workspace, "friendAccountField") }
-
     function init() {
         workspaceWindow.requestActivate()
         taskBackend.active = false
+        menu().close()
         friendModel.clear()
         friendModel.append({ account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
@@ -111,12 +110,19 @@ TestCase {
 
     function test_active_task_blocks_open_menu_actions_and_callbacks() {
         verify(contextOverlay() !== null)
-        mouseClick(contextOverlay(), 30, Math.floor(contextOverlay().height - 20), Qt.RightButton)
+        mouseClick(contextOverlay(), 30, 20, Qt.RightButton)
         tryCompare(menu(), "visible", true)
+        compare(workspace.contextRow, 0)
+        compare(removeAction().visible, true)
         taskBackend.active = true
         tryCompare(addAction(), "enabled", false)
+        tryCompare(removeAction(), "enabled", false)
         mouseClick(addAction(), 10, Math.floor(addAction().height / 2), Qt.LeftButton)
+        mouseClick(removeAction(), 10, Math.floor(removeAction().height / 2), Qt.LeftButton)
         wait(50)
+        compare(friendModel.count, 1)
+        compare(workspace.appendManualRecord(), -1)
+        compare(workspace.removeContextRecord(), false)
         compare(friendModel.count, 1)
         menu().close()
         tryCompare(menu(), "visible", false)
@@ -125,14 +131,32 @@ TestCase {
         compare(menu().visible, false)
     }
 
-    function test_left_click_still_edits_account_cell() {
-        var field = accountField()
-        verify(field !== null)
-        verify(field.width > 0 && field.height > 0)
-        mouseClick(field, 20, Math.floor(field.height / 2), Qt.LeftButton)
-        field.forceActiveFocus()
-        tryCompare(field, "activeFocus", true)
-        field.text = "wxidedited"
-        compare(field.text, "wxidedited")
+    function test_scrolled_row_menu_deletes_correct_record_and_append_is_visible() {
+        verify(contextOverlay() !== null)
+        verify(table().height > 46)
+        for (var row = friendModel.count; row < 30; ++row) {
+            friendModel.append({ account: "wxid_scroll" + row, greeting: "", remark: "",
+                                 valid: true, error: "", status: "pending", selected: false })
+        }
+        wait(100)
+        var targetRow = 10
+        var targetAccount = friendModel.get(targetRow).account
+        table().contentY = targetRow * 46
+        wait(100)
+        mouseClick(contextOverlay(), 30, 23, Qt.RightButton)
+        tryCompare(menu(), "visible", true)
+        compare(workspace.contextRow, targetRow)
+        compare(removeAction().visible, true)
+        compare(workspace.removeContextRecord(), true)
+        compare(workspace.contextRow, -1)
+        tryCompare(friendModel, "count", 29)
+        for (var index = 0; index < friendModel.count; ++index)
+            compare(friendModel.get(index).account === targetAccount, false)
+
+        compare(workspace.appendManualRecord(), 29)
+        wait(100)
+        var lastRow = friendModel.count - 1
+        verify(table().contentY <= lastRow * 46)
+        verify(table().contentY + table().height >= (lastRow + 1) * 46)
     }
 }
