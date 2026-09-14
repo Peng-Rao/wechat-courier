@@ -4,6 +4,17 @@ import ctypes
 import threading
 from typing import Any
 
+from .retry import AutomationRetryError
+from .waiters import check_action_deadline
+
+
+class EventCleanupError(AutomationRetryError):
+    code = "EVENT_CLEANUP_FAILED"
+
+    def __init__(self, subscription, cause):
+        super().__init__(f"UIA event retirement failed: {cause}")
+        self.subscription = subscription
+
 
 class UIAEventSubscription:
     """Owns UIA event handlers and removes exactly those handlers on close."""
@@ -25,12 +36,20 @@ class UIAEventSubscription:
         self._focus_handler = focus_handler
         self._property_handler = property_handler
         self._closed = False
+        self._structure_registered = False
+        self._focus_registered = False
+        self._property_registered = False
         property_array = (ctypes.c_int * len(property_ids))(*property_ids)
         try:
+            check_action_deadline()
             api.AddStructureChangedEventHandler(
                 element, scope, None, structure_handler
             )
+            self._structure_registered = True
+            check_action_deadline()
             api.AddFocusChangedEventHandler(None, focus_handler)
+            self._focus_registered = True
+            check_action_deadline()
             api.AddPropertyChangedEventHandlerNativeArray(
                 element,
                 scope,
@@ -39,30 +58,55 @@ class UIAEventSubscription:
                 property_array,
                 len(property_ids),
             )
+            self._property_registered = True
+            check_action_deadline()
         except Exception:
-            self.close()
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                raise EventCleanupError(self, cleanup_error) from cleanup_error
             raise
 
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         removals = (
             (
+                "_property_registered",
                 self._api.RemovePropertyChangedEventHandler,
                 (self._element, self._property_handler),
             ),
             (
+                "_structure_registered",
                 self._api.RemoveStructureChangedEventHandler,
                 (self._element, self._structure_handler),
             ),
-            (self._api.RemoveFocusChangedEventHandler, (self._focus_handler,)),
+            (
+                "_focus_registered",
+                self._api.RemoveFocusChangedEventHandler,
+                (self._focus_handler,),
+            ),
         )
-        for remove, arguments in removals:
+        errors = []
+        for flag_name, remove, arguments in removals:
+            if not getattr(self, flag_name):
+                continue
             try:
+                check_action_deadline()
                 remove(*arguments)
-            except Exception:
-                pass
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                setattr(self, flag_name, False)
+        self._closed = not any(
+            (
+                self._property_registered,
+                self._structure_registered,
+                self._focus_registered,
+            )
+        )
+        if errors:
+            raise EventCleanupError(self, errors[0]) from errors[0]
 
 
 def subscribe_uia_events(uia_module, root, wake_event: threading.Event):
@@ -108,4 +152,4 @@ def subscribe_uia_events(uia_module, root, wake_event: threading.Event):
     )
 
 
-__all__ = ["UIAEventSubscription", "subscribe_uia_events"]
+__all__ = ["EventCleanupError", "UIAEventSubscription", "subscribe_uia_events"]

@@ -69,8 +69,8 @@ Rectangle {
         }
 
         RowLayout {
-            visible: root.width >= 980 && root.titleBackend && root.titleBackend.agent
-            spacing: 14
+            visible: root.width >= 900 && root.titleBackend && root.titleBackend.agent
+            spacing: 10
 
             RowLayout {
                 spacing: 6
@@ -96,12 +96,50 @@ Rectangle {
                     width: 8
                     height: 8
                     radius: 4
-                    color: root.titleBackend && root.titleBackend.agent.wechatSupported
-                        ? WxTheme.clPrimary : WxTheme.clWarningText
+                    color: root.titleBackend && root.titleBackend.agent.versionSupported
+                        ? WxTheme.clPrimary
+                        : (root.titleBackend && root.titleBackend.agent.processDetected
+                            ? WxTheme.clWarningText : WxTheme.clTextHint)
                 }
                 Text {
-                    text: root.titleBackend && root.titleBackend.agent.wechatConnected
-                        ? "微信 " + root.titleBackend.agent.wechatVersion : "微信未连接"
+                    text: !root.titleBackend || !root.titleBackend.agent.processDetected
+                        ? "未检测到微信"
+                        : root.titleBackend.agent.versionSupported
+                            ? "微信 " + root.titleBackend.agent.wechatVersion + " 版本受支持"
+                            : "微信 " + root.titleBackend.agent.wechatVersion + " 不受支持"
+                    color: WxTheme.clTextSecondary
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeTiny
+                }
+            }
+
+            RowLayout {
+                spacing: 6
+                Rectangle {
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: root.titleBackend && root.titleBackend.agent.automationReady
+                        ? WxTheme.clPrimary
+                        : (root.titleBackend && root.titleBackend.agent.processDetected
+                            && !root.titleBackend.agent.windowResponsive
+                            ? WxTheme.clDangerNew : WxTheme.clTextHint)
+                }
+                Text {
+                    objectName: "titleAutomationHealth"
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: text
+                    text: root.titleBackend && root.titleBackend.agent.automationReady
+                        ? "自动化已就绪"
+                        : root.titleBackend && root.titleBackend.agent.processDetected
+                            && !root.titleBackend.agent.windowResponsive
+                            ? "微信窗口无响应"
+                            : root.titleBackend && root.titleBackend.agent.processDetected
+                                && (!root.titleBackend.agent.windowEnabled || root.titleBackend.agent.blockingWindow)
+                                ? "微信窗口被阻挡"
+                                : root.titleBackend && root.titleBackend.agent.canStartTask
+                                    && !root.titleBackend.agent.sessionReady
+                                    ? "会话待恢复" : "自动化未就绪"
                     color: WxTheme.clTextSecondary
                     font.family: WxTheme.fontFamily
                     font.pixelSize: WxTheme.fontSizeTiny
@@ -111,6 +149,11 @@ Rectangle {
 
         Rectangle {
             id: settingsButton
+            objectName: "settingsButton"
+            Accessible.role: Accessible.Button
+            Accessible.name: root.titleBackend && root.titleBackend.task.acceptanceEnabled
+                ? "settingsButton" : "设置"
+            Accessible.onPressAction: root.requestSettings()
             Layout.preferredWidth: 30
             Layout.preferredHeight: 28
             radius: WxTheme.radiusSmall

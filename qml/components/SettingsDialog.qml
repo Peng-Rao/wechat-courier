@@ -68,6 +68,8 @@ Popup {
             }
             Button {
                 id: closeButton
+                Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                    ? "settingsCloseButton" : "关闭设置"
                 anchors.right: parent.right
                 anchors.rightMargin: 8
                 anchors.verticalCenter: parent.verticalCenter
@@ -109,6 +111,9 @@ Popup {
                         Button {
                             required property int index
                             required property string modelData
+                            objectName: "settingsSection" + index
+                            Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                                ? objectName : modelData
                             Layout.fillWidth: true
                             implicitHeight: 38
                             onClicked: root.sectionIndex = index
@@ -182,6 +187,8 @@ Popup {
                             RowLayout {
                                 TextField {
                                     objectName: "settingsMessageIntervalMin"
+                                    Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                                        ? objectName : "最小发送间隔"
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.message.intervalMin : "2"
                                     validator: DoubleValidator { bottom: 0; top: 300 }
@@ -191,6 +198,9 @@ Popup {
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
                                 TextField {
+                                    objectName: "settingsMessageIntervalMax"
+                                    Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                                        ? objectName : "最大发送间隔"
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.message.intervalMax : "3"
                                     validator: DoubleValidator { bottom: 0; top: 300 }

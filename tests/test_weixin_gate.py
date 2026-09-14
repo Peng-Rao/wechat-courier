@@ -13,6 +13,7 @@ from app.agent.gate import (
     ProcessModule,
     WeixinAccessibilitySession,
 )
+from app.agent.journal import GateLeaseJournal
 from app.agent.profile import UnsupportedWeixinVersion
 
 
@@ -124,7 +125,7 @@ def test_accessibility_session_writes_gate_before_notifying_screen_reader():
         ]
 
 
-def test_accessibility_session_notifies_even_when_screen_reader_is_already_on():
+def test_accessibility_session_does_not_rebroadcast_when_screen_reader_is_already_on():
     class NotifyingBackend(FakeGateBackend):
         def __init__(self):
             super().__init__()
@@ -138,9 +139,32 @@ def test_accessibility_session_notifies_even_when_screen_reader_is_already_on():
     backend = NotifyingBackend()
 
     with WeixinAccessibilitySession(backend):
-        assert backend.notifications == [True]
+        assert backend.notifications == []
 
     assert backend.screen_reader is True
+
+
+def test_native_window_responsiveness_uses_bounded_wm_null(monkeypatch):
+    calls = []
+
+    def send_message_timeout(*args):
+        calls.append(args)
+        return 1
+
+    user32 = SimpleNamespace(SendMessageTimeoutW=send_message_timeout)
+    monkeypatch.setattr(
+        gate_module.ctypes, "windll", SimpleNamespace(user32=user32)
+    )
+
+    assert NativeGateBackend.window_responsive(101, timeout_ms=250) is True
+    assert calls[0][0:5] == (
+        101,
+        gate_module.WM_NULL,
+        0,
+        0,
+        gate_module.SMTO_ABORTIFHUNG | gate_module.SMTO_BLOCK,
+    )
+    assert calls[0][5] == 250
 
 
 def test_native_screen_reader_notification_broadcasts_the_change(monkeypatch):
@@ -155,6 +179,61 @@ def test_native_screen_reader_notification_broadcasts_the_change(monkeypatch):
     assert NativeGateBackend.set_screen_reader(True) is True
 
     assert calls == [(gate_module.SPI_SETSCREENREADER, 1, None, 0x02)]
+
+
+def test_native_backend_terminates_the_verified_weixin_process_tree(monkeypatch):
+    calls = []
+    backend = NativeGateBackend()
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "process_exists", lambda _pid: False)
+    monkeypatch.setattr(
+        gate_module.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    backend.terminate_process_tree(202)
+
+    assert calls[0][0] == ["taskkill", "/PID", "202", "/T", "/F"]
+    assert calls[0][1]["timeout"] == 8
+    assert calls[0][1]["check"] is False
+
+
+def test_native_backend_waits_for_the_terminating_tree_to_fully_exit(monkeypatch):
+    states = iter((True, True, False))
+    backend = NativeGateBackend()
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "process_exists", lambda _pid: next(states))
+    monkeypatch.setattr(
+        gate_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    backend.terminate_process_tree(202, wait_seconds=0.5)
+
+
+def test_native_backend_rejects_a_process_tree_that_remains_alive(monkeypatch):
+    backend = NativeGateBackend()
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "process_exists", lambda _pid: True)
+    monkeypatch.setattr(
+        gate_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="process tree is still running"):
+        backend.terminate_process_tree(202, wait_seconds=0)
 
 
 def test_accessibility_session_does_not_guess_an_unknown_version():
@@ -289,6 +368,87 @@ def test_cleanup_retries_screen_reader_restore_after_a_transient_failure():
 
     assert backend.screen_reader is False
     assert session._original_screen_reader is None
+
+
+def test_cleanup_treats_an_exited_process_gate_as_already_gone(tmp_path):
+    class ExitedProcessBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.alive = True
+            self.started = "original-process"
+
+        def process_exists(self, _pid):
+            return self.alive
+
+        def process_start_time(self, _pid):
+            return self.started
+
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    backend = ExitedProcessBackend()
+    session = WeixinAccessibilitySession(
+        backend,
+        lease_journal=journal,
+    ).__enter__()
+    backend.writes.clear()
+    backend.alive = False
+
+    session.close()
+
+    assert backend.writes == []
+    assert backend.closed is True
+    assert backend.screen_reader is False
+    assert journal.load() is None
+
+
+def test_cleanup_never_writes_to_a_reused_pid(tmp_path):
+    class ReusedPidBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.started = "original-process"
+
+        def process_exists(self, _pid):
+            return True
+
+        def process_start_time(self, _pid):
+            return self.started
+
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    backend = ReusedPidBackend()
+    session = WeixinAccessibilitySession(
+        backend,
+        lease_journal=journal,
+    ).__enter__()
+    backend.writes.clear()
+    backend.started = "replacement-process"
+
+    session.close()
+
+    assert backend.writes == []
+    assert backend.closed is True
+    assert backend.screen_reader is False
+    assert journal.load() is None
+
+
+def test_cleanup_fails_closed_when_process_identity_cannot_be_verified(tmp_path):
+    class UnknownProcessBackend(FakeGateBackend):
+        def process_exists(self, _pid):
+            raise RuntimeError("access denied")
+
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    backend = UnknownProcessBackend()
+    session = WeixinAccessibilitySession(
+        backend,
+        lease_journal=journal,
+    ).__enter__()
+    backend.writes.clear()
+
+    with pytest.raises(AccessibilitySafetyError, match="identity"):
+        session.close()
+
+    assert backend.writes == []
+    assert backend.closed is False
+    assert backend.screen_reader is True
+    assert journal.load() is not None
 
 
 def _window(*, visible: bool):

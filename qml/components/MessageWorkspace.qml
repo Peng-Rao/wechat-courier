@@ -65,6 +65,8 @@ Item {
                         TextArea {
                             id: recipients
                             objectName: "messageRecipientsInput"
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "messageRecipientsInput" : "接收人"
                             Layout.fillWidth: true
                             Layout.preferredHeight: 126
                             Layout.leftMargin: 16
@@ -141,6 +143,8 @@ Item {
                         TextArea {
                             id: template
                             objectName: "messageTemplateInput"
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "messageTemplateInput" : "消息内容"
                             Layout.fillWidth: true
                             Layout.preferredHeight: 150
                             Layout.leftMargin: 16
@@ -182,6 +186,9 @@ Item {
                             }
                             Item { Layout.fillWidth: true }
                             Button {
+                                objectName: "messageAddFileButton"
+                                Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                    ? "messageAddFileButton" : "选择附件"
                                 text: "＋ 选择文件"
                                 onClicked: {
                                     if (!root.interactionLocked) messageFileDialog.open()
@@ -242,6 +249,9 @@ Item {
                                         }
                                         Button {
                                             implicitWidth: 30
+                                            objectName: "messageRemoveFileButton-" + index
+                                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                                ? "messageRemoveFileButton-" + index : "移除附件"
                                             implicitHeight: 30
                                             onClicked: {
                                                 if (!root.interactionLocked && root.messageBackend)
@@ -514,6 +524,8 @@ Item {
 
                     Switch {
                         objectName: "messageUseForwardSwitch"
+                        Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                            ? "messageUseForwardSwitch" : "合并转发附件"
                         checked: root.messageBackend ? root.messageBackend.useForward : false
                         enabled: !root.interactionLocked
                         onToggled: {
@@ -548,7 +560,9 @@ Item {
                         }
                         Text {
                             text: root.appBackend && root.appBackend.agent.automationReady
-                                ? "微信 4.1.13.65 与 UIA 已就绪" : "请先连接受支持的微信"
+                                ? "微信 4.1.13.65 与 UIA 已就绪"
+                                : root.appBackend && root.appBackend.agent.canStartTask
+                                    ? "会话待恢复，开始时恢复窗口" : "请先连接受支持的微信"
                             color: WxTheme.clTextHint
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeTiny
@@ -556,8 +570,10 @@ Item {
                     }
                     Button {
                         objectName: "startMessageButton"
+                        Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                            ? "startMessageButton" : text
                         text: "开始发送 " + (root.messageBackend ? root.messageBackend.recipientCount : 0) + " 人"
-                        enabled: root.appBackend && root.appBackend.agent.automationReady
+                        enabled: root.appBackend && root.appBackend.agent.canStartTask
                             && !root.interactionLocked
                             && root.messageBackend && root.messageBackend.recipientCount > 0
                         onClicked: root.startTask()

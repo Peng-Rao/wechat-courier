@@ -7,7 +7,10 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
+from .._version import __version__
+from ..build_info import build_info
 from .contracts import TaskRequest
+from .diagnostics import UiaDiagnostics, gui_instance_id_from_environment
 from .journal import SafetyJournal
 from .profile import SUPPORTED_WEIXIN_VERSION
 
@@ -26,6 +29,11 @@ class TaskControl:
     def stop_requested(self) -> bool:
         with self._condition:
             return self._stop_requested
+
+    @property
+    def paused(self) -> bool:
+        with self._condition:
+            return self._paused
 
     def pause(self) -> None:
         with self._condition:
@@ -72,8 +80,15 @@ class _UnavailableEngine:
     def inspect(self) -> dict[str, Any]:
         return {
             "connected": False,
+            "processDetected": False,
             "version": "",
             "supported": False,
+            "versionSupported": False,
+            "uiaReady": False,
+            "sessionReady": False,
+            "windowResponsive": False,
+            "sessionGeneration": 0,
+            "degradedReason": "UIA_NOT_INITIALIZED",
             "detail": "UIA engine is not initialized",
         }
 
@@ -85,6 +100,7 @@ class _AutomationRunner(QObject):
     notice = Signal(str, object)
     finished = Signal(str, object)
     recoveryFinished = Signal(object)
+    inspectionStarted = Signal(object)
     inspectionFinished = Signal(object)
 
     def __init__(self, engine_factory: Callable[[], Any]):
@@ -99,6 +115,7 @@ class _AutomationRunner(QObject):
 
     @Slot(object)
     def inspect(self, envelope: dict[str, Any]) -> None:
+        self.inspectionStarted.emit(envelope)
         try:
             envelope["result"] = self._get_engine().inspect()
         except Exception as exc:
@@ -137,6 +154,19 @@ class _AutomationRunner(QObject):
             envelope["error"] = str(exc)
         self.recoveryFinished.emit(envelope)
 
+    @Slot(object)
+    def close(self, envelope: dict[str, Any]) -> None:
+        try:
+            engine = self._engine
+            close = getattr(engine, "close", None)
+            if close is not None:
+                close()
+            self._engine = None
+        except Exception as exc:
+            envelope["error"] = exc
+        finally:
+            envelope["event"].set()
+
 
 class AgentRuntime(QObject):
     """Owns the COM/UIA thread while keeping the pipe service responsive."""
@@ -144,6 +174,7 @@ class AgentRuntime(QObject):
     inspectRequested = Signal(object)
     taskRequested = Signal(object)
     recoveryRequested = Signal(object)
+    closeRequested = Signal(object)
     shutdownRequested = Signal()
 
     def __init__(
@@ -151,21 +182,36 @@ class AgentRuntime(QObject):
         *,
         engine_factory: Callable[[], Any] | None = None,
         inspect_timeout_ms: int = 5_000,
-        action_timeout_ms: int = 30_000,
+        action_timeout_ms: int = 15_000,
         journal: SafetyJournal | None = None,
+        diagnostics: UiaDiagnostics | None = None,
         fatal_exit: Callable[[int], Any] = os._exit,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
         self._journal = journal or SafetyJournal.from_environment()
+        self._diagnostics = diagnostics
+        self._gui_instance_id = gui_instance_id_from_environment()
         if engine_factory is None:
             from .workflows import WeixinWorkflowEngine
 
-            engine_factory = lambda: WeixinWorkflowEngine(journal=self._journal)
+            if self._diagnostics is None:
+                self._diagnostics = UiaDiagnostics()
+            engine_factory = lambda: WeixinWorkflowEngine(
+                journal=self._journal,
+                diagnostics=self._diagnostics,
+            )
         self._notification_sink: Callable[[str, dict[str, Any]], Any] | None = None
         self._inspect_timeout = inspect_timeout_ms / 1000.0
         self._active_task_id = ""
+        self._watch_action_id = ""
+        self._last_health = {}
+        self._cleanup_failed = False
         self._inspection_pending = False
+        self._inspection_envelope: dict[str, Any] | None = None
+        self._inspection_callbacks: list[
+            Callable[[dict[str, Any] | None, Exception | None], Any]
+        ] = []
         self._shutdown_pending = False
         self._control: TaskControl | None = None
         self._fatal_exit = fatal_exit
@@ -173,6 +219,10 @@ class AgentRuntime(QObject):
         self._action_watchdog.setSingleShot(True)
         self._action_watchdog.setInterval(max(1_000, int(action_timeout_ms)))
         self._action_watchdog.timeout.connect(self._on_action_timeout)
+        self._inspection_watchdog = QTimer(self)
+        self._inspection_watchdog.setSingleShot(True)
+        self._inspection_watchdog.setInterval(max(1, int(inspect_timeout_ms)))
+        self._inspection_watchdog.timeout.connect(self._on_action_timeout)
         self._shutdown_deadline = QTimer(self)
         self._shutdown_deadline.setSingleShot(True)
         self._shutdown_deadline.setInterval(2_500)
@@ -184,9 +234,11 @@ class AgentRuntime(QObject):
         self.inspectRequested.connect(self._runner.inspect)
         self.taskRequested.connect(self._runner.run_task)
         self.recoveryRequested.connect(self._runner.recover_wechat)
+        self.closeRequested.connect(self._runner.close)
         self._runner.notice.connect(self._forward_notice)
         self._runner.finished.connect(self._task_finished)
         self._runner.recoveryFinished.connect(self._recovery_finished)
+        self._runner.inspectionStarted.connect(self._inspection_started)
         self._runner.inspectionFinished.connect(self._inspection_finished)
         self._thread.start()
 
@@ -201,10 +253,13 @@ class AgentRuntime(QObject):
 
     def hello(self) -> dict[str, Any]:
         return {
-            "agentVersion": "0.3.0",
+            "agentVersion": __version__,
+            "guiInstanceId": self._gui_instance_id,
+            "build": build_info(),
             "protocolVersion": 1,
             "pid": os.getpid(),
             "supportedWeixinVersions": [SUPPORTED_WEIXIN_VERSION],
+            "capabilities": {"friendSubmitEnabled": False},
             "recovery": self._journal.load(),
         }
 
@@ -221,13 +276,18 @@ class AgentRuntime(QObject):
         self,
         callback: Callable[[dict[str, Any] | None, Exception | None], Any],
     ) -> None:
+        self._inspection_callbacks.append(callback)
+        if self._inspection_pending:
+            return
         self._inspection_pending = True
-        self._action_watchdog.start()
-        self.inspectRequested.emit({"callback": callback})
+        self._inspection_envelope = {}
+        self.inspectRequested.emit(self._inspection_envelope)
 
     def start_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._active_task_id:
             raise ValueError(f"task {self._active_task_id} is already active")
+        if self._cleanup_failed:
+            raise ValueError("previous task cleanup failed; inspect recovery before starting")
         if self._journal.load() is not None:
             raise ValueError("recovery acknowledgement is required before task start")
         request = TaskRequest.from_payload(payload)
@@ -247,18 +307,24 @@ class AgentRuntime(QObject):
         if self._control is None:
             return {"accepted": False, "reason": "no active task"}
         self._control.pause()
+        if not self._watch_action_id:
+            self._action_watchdog.stop()
         return {"accepted": True, "pendingSafePoint": True}
 
     def resume_task(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._control is None:
             return {"accepted": False, "reason": "no active task"}
         self._control.resume()
+        if not self._watch_action_id:
+            self._action_watchdog.start()
         return {"accepted": True}
 
     def stop_task(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._control is None:
             return {"accepted": False, "reason": "no active task"}
         self._control.request_stop()
+        if not self._watch_action_id:
+            self._action_watchdog.start()
         return {"accepted": True, "pendingSafePoint": True}
 
     def approve_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -298,8 +364,31 @@ class AgentRuntime(QObject):
 
     @Slot(str, object)
     def _forward_notice(self, method: str, params: dict[str, Any]) -> None:
-        if self._active_task_id:
+        status = str(params.get("status", ""))
+        if method == "agent.status" and status == "uia_action_started":
+            self._watch_action_id = str(params.get("actionId") or params.get("action") or "action")
             self._action_watchdog.start()
+        elif method == "agent.status" and status == "uia_action_completed":
+            self._watch_action_id = ""
+            self._action_watchdog.stop()
+        elif method == "agent.status" and status in {"waiting", "paused", "health"}:
+            if not self._watch_action_id:
+                self._action_watchdog.stop()
+        health = params.get("health")
+        if isinstance(health, dict):
+            self._last_health = dict(health)
+        if self._diagnostics is not None and method != "task.event":
+            try:
+                self._diagnostics.record(
+                    stage="runtime",
+                    action=method,
+                    outcome=str(params.get("outcome") or params.get("status") or "event"),
+                    task_id=str(params.get("taskId", self._active_task_id)),
+                    item_id=str(params.get("itemId", "")),
+                    action_id=str(params.get("actionId", "")),
+                )
+            except Exception:
+                pass
         if self._notification_sink is not None:
             self._notification_sink(method, params)
 
@@ -307,13 +396,17 @@ class AgentRuntime(QObject):
     def _task_finished(self, task_id: str, result: dict[str, Any]) -> None:
         if task_id != self._active_task_id:
             return
+        self._cleanup_failed = result.get("cleanup", {}).get("success") is False
+        if isinstance(result.get("health"), dict):
+            self._forward_notice("agent.status", {"status": "health", "health": result["health"]})
         self._active_task_id = ""
+        self._watch_action_id = ""
         self._control = None
         self._action_watchdog.stop()
         payload = dict(result)
         payload["taskId"] = task_id
         self._forward_notice("task.finished", payload)
-        self._forward_notice("agent.status", {"status": "ready", "taskId": ""})
+        self._forward_notice("agent.status", {"status": "idle", "taskId": ""})
         if self._shutdown_pending:
             self._shutdown_pending = False
             self._shutdown_deadline.stop()
@@ -332,16 +425,44 @@ class AgentRuntime(QObject):
         self._forward_notice("agent.status", payload)
 
     @Slot(object)
+    def _inspection_started(self, envelope: dict[str, Any]) -> None:
+        # Queue time may include an intentional task pause; bound execution only.
+        if envelope is self._inspection_envelope:
+            self._inspection_watchdog.start()
+
+    @Slot(object)
     def _inspection_finished(self, envelope: dict[str, Any]) -> None:
-        callback = envelope.get("callback")
-        if callback is None:
+        if self._inspection_envelope is not None and envelope is not self._inspection_envelope:
             return
+        self._inspection_watchdog.stop()
+        self._inspection_envelope = None
+        callbacks = self._inspection_callbacks
+        self._inspection_callbacks = []
         self._inspection_pending = False
-        if not self._active_task_id:
-            self._action_watchdog.stop()
+        fallback_callback = envelope.get("callback")
+        if fallback_callback is not None and not callbacks:
+            callbacks = [fallback_callback]
+        if not callbacks:
+            return
         error = envelope.get("error")
         result = None if error is not None else dict(envelope.get("result") or {})
-        callback(result, error)
+        if result is not None:
+            self._last_health = dict(result)
+            cleanup_complete = result.get("cleanupComplete")
+            if cleanup_complete is False:
+                self._cleanup_failed = True
+            elif cleanup_complete is True or (
+                cleanup_complete is None and result.get("sessionReady")
+                and result.get("windowEnabled", True)
+            ):
+                self._cleanup_failed = False
+        for callback in callbacks:
+            try:
+                callback(result, error)
+            except Exception:
+                # A socket/request can disappear while one coalesced inspection
+                # is running. Remaining callbacks still own the same result.
+                continue
 
     @Slot()
     def _on_action_timeout(self) -> None:
@@ -357,13 +478,28 @@ class AgentRuntime(QObject):
 
     def close(self, timeout_ms: int = 2_000) -> None:
         self._action_watchdog.stop()
+        self._inspection_watchdog.stop()
+        self._inspection_envelope = None
+        self._inspection_pending = False
         self._shutdown_deadline.stop()
+        if not self._thread.isRunning():
+            return
         if self._control is not None:
             self._control.request_stop()
+        envelope = {"event": threading.Event()}
+        self.closeRequested.emit(envelope)
+        completed = envelope["event"].wait(max(0, timeout_ms) / 1000.0)
         self._thread.quit()
         if not self._thread.wait(timeout_ms):
             self._thread.terminate()
             self._thread.wait(500)
+        if self._diagnostics is not None:
+            self._diagnostics.close()
+            self._diagnostics = None
+        if not completed:
+            raise TimeoutError("Agent cleanup timed out; gate recovery is required")
+        if "error" in envelope:
+            raise RuntimeError("Agent cleanup failed; gate recovery is required") from envelope["error"]
 
 
 __all__ = ["AgentRuntime", "TaskControl"]

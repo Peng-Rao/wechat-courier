@@ -103,6 +103,8 @@ Item {
                         }
                         Button {
                             objectName: "importFriendsButton"
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "importFriendsButton" : text
                             text: "＋ 导入 Excel / CSV"
                             enabled: !root.interactionLocked
                             onClicked: {
@@ -248,6 +250,8 @@ Item {
                                 }
                                 TextField {
                                     objectName: "friendAccountField"
+                                    Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                        ? "friendAccountField" : "好友账号"
                                     Layout.preferredWidth: 220
                                     readonly property int modelRow: parent.parent.row
                                     text: account
@@ -321,7 +325,7 @@ Item {
                                             anchors.centerIn: parent
                                             text: !valid ? error
                                                 : status === "working" ? "执行中"
-                                                : status === "success" ? "已提交"
+                                                : status === "success" ? "预检完成"
                                                 : status === "error" ? "执行异常"
                                                 : status === "unknown" ? "结果未知" : "预检通过"
                                             elide: Text.ElideRight
@@ -359,7 +363,7 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 76
+                    Layout.preferredHeight: 88
                     color: WxTheme.clToolbarFill
                     border.color: WxTheme.clSurfaceBorder
                     RowLayout {
@@ -433,10 +437,32 @@ Item {
                                 font.pixelSize: WxTheme.fontSizeTiny
                             }
                         }
+                        ColumnLayout {
+                            spacing: 1
+                            Text {
+                                text: "仅填写并核对表单"
+                                color: WxTheme.clWarningText
+                                font.family: WxTheme.fontFamily
+                                font.pixelSize: WxTheme.fontSizeSmall
+                                font.bold: true
+                                Layout.alignment: Qt.AlignRight
+                            }
+                            Text {
+                                text: root.appBackend && root.appBackend.agent.canStartTask
+                                    && !root.appBackend.agent.automationReady
+                                    ? "会话待恢复 · 最终提交当前未开放" : "最终提交当前未开放"
+                                color: WxTheme.clTextHint
+                                font.family: WxTheme.fontFamily
+                                font.pixelSize: WxTheme.fontSizeTiny
+                                Layout.alignment: Qt.AlignRight
+                            }
+                        }
                         Button {
                             objectName: "startFriendsButton"
-                            text: "开始添加 " + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
-                            enabled: root.appBackend && root.appBackend.agent.automationReady
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "startFriendsButton" : text
+                            text: "开始表单预检 " + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
+                            enabled: root.appBackend && root.appBackend.agent.canStartTask
                                 && !root.interactionLocked
                                 && root.friendBackend && root.friendBackend.model.selectedCount > 0
                             onClicked: root.startTask()

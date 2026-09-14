@@ -10,7 +10,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, Signal
 from .friend_import import FriendRecord, load_friend_records, validate_records
 
 
-_TERMINAL_STEPS = {"send_verified", "submit_verified"}
+_TERMINAL_STEPS = {"send_verified", "preflight_completed", "submit_verified"}
 _TERMINAL_OUTCOMES = {"error", "unknown", "stopped"}
 
 

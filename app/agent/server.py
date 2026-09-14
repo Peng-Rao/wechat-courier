@@ -78,6 +78,9 @@ class AgentServer(QObject):
             self._socket.deleteLater()
             self._socket = None
         self._router.authenticated = False
+        stop = getattr(self.runtime, "stop_task", None)
+        if callable(stop):
+            stop()
 
     def _read_available(self) -> None:
         if self._socket is None:
@@ -106,7 +109,10 @@ class AgentServer(QObject):
             )
 
     def _start_inspection(self, request_id) -> None:
+        request_socket = self._socket
         def complete(result, error) -> None:
+            if self._socket is not request_socket:
+                return
             if error is not None:
                 self._write(
                     {

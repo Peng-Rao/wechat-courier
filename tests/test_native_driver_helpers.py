@@ -22,6 +22,7 @@ from app.agent.native_driver import (
     raise_for_risk_controls,
     resolve_friend_form_fields,
 )
+from app.agent.retry import StaleElementError, WeixinUnresponsiveError
 from app.agent.profile import UnsupportedWeixinVersion
 
 
@@ -436,6 +437,52 @@ def test_open_exact_chat_supports_repeated_file_transfer_helper_searches():
     driver._open_exact_chat("文件传输助手")
 
     assert selected == [candidate, candidate]
+
+
+def test_search_ready_refreshes_a_stale_main_root_before_using_keyboard():
+    search_edit = FakeControl(
+        "搜索",
+        "EditControl",
+        "mmui::XValidatorTextEdit",
+    )
+    stale_root = FakeControl("微信", "WindowControl", "mmui::MainWindow")
+    fresh_root = FakeControl("微信", "WindowControl", "mmui::MainWindow")
+    sent_keys = []
+    stale_root.SendKeys = lambda keys, **_kwargs: sent_keys.append(keys)
+
+    class Uia:
+        @staticmethod
+        def ControlFromHandle(hwnd):
+            assert hwnd == 101
+            return fresh_root
+
+    profile = type(
+        "Profile",
+        (),
+        {
+            "search_edit_name": "搜索",
+            "search_edit_class": "mmui::XValidatorTextEdit",
+        },
+    )()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 101, "profile": profile})()
+    driver._root = stale_root
+    driver._uia = Uia()
+    driver._ensure_session = lambda: None
+    driver.ensure_window_responsive = lambda _hwnd=None: True
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    queried_roots = []
+
+    def find_scoped_controls(**_selector):
+        queried_roots.append(driver._root)
+        return [search_edit] if driver._root is fresh_root else []
+
+    driver._find_scoped_controls = find_scoped_controls
+
+    assert driver.ensure_search_ready() is True
+    assert queried_roots == [stale_root, fresh_root]
+    assert driver._search_edit is search_edit
+    assert sent_keys == []
 
 
 def test_search_candidate_click_uses_valid_descendant_when_row_has_no_bounds():
@@ -934,7 +981,53 @@ def test_select_accepts_remark_chat_title_for_nickname_query():
     assert driver.current_chat_title() == "Alice 备注"
 
 
-def test_bind_window_rebinds_once_when_first_root_is_invisible(monkeypatch):
+def test_walk_refuses_to_call_uia_when_weixin_is_unresponsive():
+    class Backend:
+        @staticmethod
+        def window_responsive(hwnd, timeout_ms=250):
+            assert hwnd == 101
+            assert timeout_ms == 250
+            return False
+
+    class Uia:
+        @staticmethod
+        def ControlFromHandle(_hwnd):
+            raise AssertionError("UIA must not be called for an unresponsive window")
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+    driver._session = type("Session", (), {"hwnd": 101})()
+    driver._uia = Uia()
+
+    with pytest.raises(WeixinUnresponsiveError):
+        driver._walk(101)
+
+
+def test_hot_path_locators_do_not_walk_the_entire_uia_tree():
+    for method in (
+        NativeWeixinDriver._tree_materialized,
+        NativeWeixinDriver._visible_root_bounds,
+        NativeWeixinDriver.ensure_search_ready,
+        NativeWeixinDriver._search_rows,
+        NativeWeixinDriver._find_composer,
+        NativeWeixinDriver.current_chat_title,
+        NativeWeixinDriver._message_controls,
+        NativeWeixinDriver._invoke_once_or_key,
+        NativeWeixinDriver._wait_control,
+        NativeWeixinDriver._activate_navigation,
+        NativeWeixinDriver.set_friend_account,
+        NativeWeixinDriver.search_friend,
+        NativeWeixinDriver.open_friend_request,
+        NativeWeixinDriver.set_friend_fields,
+    ):
+        source = inspect.getsource(method)
+        assert "WalkControl" not in source
+        assert "_all_nodes" not in source
+        assert "_walk(" not in source
+
+
+def test_bind_window_does_not_recreate_the_gate_session_for_an_invisible_root(
+    monkeypatch,
+):
     class Session:
         def __init__(self, hwnd, root):
             self.hwnd = hwnd
@@ -963,12 +1056,12 @@ def test_bind_window_rebinds_once_when_first_root_is_invisible(monkeypatch):
     driver._waiter = type(
         "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
     )()
-    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+    monkeypatch.setattr(driver, "_activate_bound_main_window", lambda _hwnd: True)
 
-    result = driver.bind_window()
+    with pytest.raises(RuntimeError, match="可见根边界"):
+        driver.bind_window()
 
-    assert result["hwnd"] == 2
-    assert first.closed is True
+    assert first.closed is False
 
 
 def test_bind_window_restores_an_existing_session_before_reusing_its_uia_root(
@@ -1011,7 +1104,8 @@ def test_bind_window_restores_an_existing_session_before_reusing_its_uia_root(
     driver._waiter = type(
         "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
     )()
-    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+    monkeypatch.setattr(driver, "_activate_bound_main_window", lambda _hwnd: True)
+    monkeypatch.setattr(driver, "_bound_main_window_ready", lambda _hwnd: True)
 
     result = driver.bind_window()
 
@@ -1019,7 +1113,7 @@ def test_bind_window_restores_an_existing_session_before_reusing_its_uia_root(
     assert result["windowRestore"]["restored"] is True
 
 
-def test_bind_window_retries_initialization_exception_with_one_cleanup(monkeypatch):
+def test_bind_window_leaves_transient_initialization_retry_to_the_workflow(monkeypatch):
     root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
     session = type(
         "Session",
@@ -1043,13 +1137,13 @@ def test_bind_window_retries_initialization_exception_with_one_cleanup(monkeypat
     driver._waiter = type(
         "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
     )()
-    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+    monkeypatch.setattr(driver, "_activate_bound_main_window", lambda _hwnd: True)
 
-    result = driver.bind_window()
+    with pytest.raises(RuntimeError, match="temporarily failed"):
+        driver.bind_window()
 
-    assert result["hwnd"] == 2
-    assert attempts == [1, 2]
-    assert cleanups == ["close"]
+    assert attempts == [1]
+    assert cleanups == []
 
 
 def test_bind_window_does_not_retry_unsupported_version(monkeypatch):
@@ -1064,7 +1158,7 @@ def test_bind_window_does_not_retry_unsupported_version(monkeypatch):
     driver._ensure_session = ensure
     driver.close = lambda: cleanups.append("close")
     monkeypatch.setattr(
-        "src.core.win32.bring_window_to_front",
+        driver, "_activate_bound_main_window",
         lambda _hwnd: pytest.fail("activation must not run"),
     )
 
@@ -1085,7 +1179,7 @@ def test_bind_window_does_not_retry_accessibility_gate_safety_error(monkeypatch)
 
     driver._ensure_session = ensure
     monkeypatch.setattr(
-        "src.core.win32.bring_window_to_front",
+        driver, "_activate_bound_main_window",
         lambda _hwnd: pytest.fail("activation must not run"),
     )
 
@@ -1095,7 +1189,7 @@ def test_bind_window_does_not_retry_accessibility_gate_safety_error(monkeypatch)
     assert attempts == [1]
 
 
-def test_bind_window_retries_transient_error_even_when_message_mentions_restore(
+def test_bind_window_never_closes_the_session_for_a_transient_restore_error(
     monkeypatch,
 ):
     root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
@@ -1121,13 +1215,13 @@ def test_bind_window_retries_transient_error_even_when_message_mentions_restore(
     driver._waiter = type(
         "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
     )()
-    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+    monkeypatch.setattr(driver, "_activate_bound_main_window", lambda _hwnd: True)
 
-    result = driver.bind_window()
+    with pytest.raises(RuntimeError, match="restore race"):
+        driver.bind_window()
 
-    assert result["hwnd"] == 2
-    assert attempts == [1, 2]
-    assert cleanups == ["close"]
+    assert attempts == [1]
+    assert cleanups == []
 
 
 def test_bind_window_final_activation_error_includes_root_state(monkeypatch):
@@ -1151,7 +1245,7 @@ def test_bind_window_final_activation_error_includes_root_state(monkeypatch):
     driver._ensure_session = ensure
     driver.close = lambda: setattr(driver, "_session", None)
     monkeypatch.setattr(
-        "src.core.win32.bring_window_to_front",
+        driver, "_activate_bound_main_window",
         lambda _hwnd: (_ for _ in ()).throw(RuntimeError("foreground denied")),
     )
 
@@ -1159,11 +1253,143 @@ def test_bind_window_final_activation_error_includes_root_state(monkeypatch):
         driver.bind_window()
 
     detail = str(raised.value)
-    assert attempts == [1, 1]
+    assert attempts == [1]
     assert "action=bind_window.activate" in detail
     assert "ControlType='WindowControl'" in detail
     assert "ClassName='mmui::MainWindow'" in detail
     assert "bounds=(0,0,200,200)" in detail
+
+
+def test_soft_refresh_releases_controls_without_closing_gate_or_com(monkeypatch):
+    root = FakeControl(
+        "微信",
+        "WindowControl",
+        "mmui::MainWindow",
+        "main",
+        BoundingRectangle=FakeRect(0, 0, 200, 200),
+    )
+
+    class Session:
+        hwnd = 101
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class Subscription:
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class Uia:
+        uninitialize_calls = 0
+
+        @staticmethod
+        def ControlFromHandle(hwnd):
+            assert hwnd == 101
+            return root
+
+        @classmethod
+        def UninitializeUIAutomationInCurrentThread(cls):
+            cls.uninitialize_calls += 1
+
+    session = Session()
+    subscription = Subscription()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = session
+    driver._uia = Uia()
+    driver._uia_initialized = True
+    driver._root = object()
+    driver._search_edit = object()
+    driver._composer = object()
+    driver._event_subscription = subscription
+    driver._tree_materialized = lambda: True
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args: predicate())}
+    )()
+    monkeypatch.setattr(
+        "app.agent.native_driver.subscribe_uia_events", lambda *_args: None
+    )
+
+    generation = driver.soft_refresh_session()
+
+    assert generation == 1
+    assert subscription.close_calls == 1
+    assert session.close_calls == 0
+    assert Uia.uninitialize_calls == 0
+    assert driver._root is root
+    assert driver._search_edit is None
+    assert driver._composer is None
+
+
+def test_existing_session_rejects_recycled_process_identity():
+    session = type(
+        "Session",
+        (),
+        {
+            "hwnd": 101,
+            "pid": 202,
+            "version": "4.1.13.65",
+            "process_start_time": "1000",
+        },
+    )()
+    window = type("Window", (), {"hwnd": 101, "pid": 202, "visible": True})()
+    prepared = type("Prepared", (), {"window": window})()
+
+    class Backend:
+        @staticmethod
+        def prepare_main_window():
+            return prepared
+
+        @staticmethod
+        def process_start_time(_pid):
+            return "2000"
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+    driver._session = session
+
+    with pytest.raises(StaleElementError, match="进程实例"):
+        driver._prepare_existing_session()
+
+
+def test_existing_session_rejects_changed_weixin_version():
+    session = type(
+        "Session",
+        (),
+        {
+            "hwnd": 101,
+            "pid": 202,
+            "version": "4.1.13.65",
+            "process_start_time": "1000",
+        },
+    )()
+    window = type("Window", (), {"hwnd": 101, "pid": 202, "visible": True})()
+    prepared = type("Prepared", (), {"window": window})()
+    module = type("Module", (), {"path": "Weixin.dll"})()
+
+    class Backend:
+        @staticmethod
+        def prepare_main_window():
+            return prepared
+
+        @staticmethod
+        def process_start_time(_pid):
+            return "1000"
+
+        @staticmethod
+        def find_module(_pid, _name):
+            return module
+
+        @staticmethod
+        def file_version(_path):
+            return "4.1.14.1"
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+    driver._session = session
+
+    with pytest.raises(StaleElementError, match="版本已变化"):
+        driver._prepare_existing_session()
 
 
 def test_chat_title_ignores_matching_text_inside_search_popup_and_requires_composer():
@@ -1241,6 +1467,61 @@ def test_message_verification_requires_a_new_matching_tail_and_empty_composer():
 
     driver._message_controls = lambda: [old, new, FakeControl("other", "TextControl", "mmui::ChatTextItemView")]
     assert driver.verify_sent((((1, 1), "old"),), "hello", timeout=0.1) is None
+
+
+def test_send_reuses_the_legacy_single_enter_path_without_button_actions():
+    keys = []
+    composer = {"text": "hello"}
+
+    class Composer:
+        def SendKeys(self, value, **_kwargs):
+            keys.append(value)
+            composer["text"] = ""
+
+    control = Composer()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver._composer = control
+    driver._find_composer = lambda: control
+    driver._send_keys = lambda item, keys, **kwargs: item.SendKeys(keys) or item
+    driver._find_scoped_controls = lambda **_kwargs: pytest.fail(
+        "message sending must not query or activate a send button"
+    )
+    driver._click_bounds = lambda _control: pytest.fail(
+        "message sending must not use coordinates"
+    )
+    driver.read_composer_text = lambda: composer["text"]
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+
+    method = driver.trigger_send()
+
+    assert method == "keyboard_enter"
+    assert keys == ["{Enter}"]
+
+
+def test_destructive_enter_is_never_replayed_when_unverified():
+    keys = []
+
+    class Composer:
+        def SendKeys(self, value, **_kwargs):
+            keys.append(value)
+
+    control = Composer()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver._composer = control
+    driver._find_composer = lambda: control
+    driver._send_keys = lambda item, keys, **kwargs: item.SendKeys(keys) or item
+    driver._click_bounds = lambda _control: pytest.fail(
+        "an unverified destructive key must never be replayed with a click"
+    )
+    driver.read_composer_text = lambda: "hello"
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+
+    with pytest.raises(ActionVerificationError, match="Enter"):
+        driver.trigger_send()
+
+    assert keys == ["{Enter}"]
 
 
 def test_message_verification_does_not_reclassify_an_existing_message_as_new_tail():
@@ -1582,6 +1863,11 @@ def test_confirmed_wechat_restart_waits_for_supported_logged_in_window():
         ]
     )
     driver.inspect = lambda: next(inspections)
+    session_closes = []
+    driver._prepare_for_weixin_restart = lambda: session_closes.append("session")
+    driver.close = lambda: pytest.fail(
+        "restarting Weixin must retain the automation thread COM apartment"
+    )
     notices = []
 
     result = driver.restart_wechat(
@@ -1591,8 +1877,162 @@ def test_confirmed_wechat_restart_waits_for_supported_logged_in_window():
 
     assert backend.terminated == [123]
     assert backend.started == [r"C:\Program Files\Tencent\Weixin\Weixin.exe"]
+    assert session_closes == ["session"]
     assert result["version"] == "4.1.13.65"
     assert any(params["status"] == "waiting_login" for _method, params in notices)
+
+
+def test_wechat_restart_terminates_the_old_process_tree_before_starting():
+    events = []
+
+    class RecoveryBackend:
+        @staticmethod
+        def process_path(_pid):
+            return r"C:\Program Files\Tencent\Weixin\Weixin.exe"
+
+        @staticmethod
+        def terminate_process_tree(pid):
+            events.append(("terminate-tree", pid))
+
+        @staticmethod
+        def start_process(path):
+            events.append(("start", path))
+
+    driver = NativeWeixinDriver(
+        gate_backend=RecoveryBackend(),
+        sleep=lambda seconds: events.append(("sleep", seconds)),
+    )
+    inspections = iter(
+        [
+            {"connected": True, "supported": True, "pid": 123},
+            {
+                "connected": True,
+                "supported": True,
+                "pid": 456,
+                "version": "4.1.13.65",
+                "uiaReady": True,
+            },
+        ]
+    )
+    driver.inspect = lambda: next(inspections)
+    driver._prepare_for_weixin_restart = lambda: None
+
+    driver.restart_wechat(timeout=90, emit=lambda *_args: None)
+
+    assert events[:3] == [
+        ("terminate-tree", 123),
+        ("sleep", 1.0),
+        ("start", r"C:\Program Files\Tencent\Weixin\Weixin.exe"),
+    ]
+
+
+def test_restart_handoff_preserves_screen_reader_until_the_new_session_takes_it():
+    calls = []
+
+    class Session:
+        screen_reader_restore_value = False
+
+        @staticmethod
+        def close(*, preserve_screen_reader=False):
+            calls.append(preserve_screen_reader)
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._lease_checked = True
+    driver._session = Session()
+
+    driver._prepare_for_weixin_restart()
+
+    assert calls == [True]
+    assert driver._session is None
+    assert driver._screen_reader_restore_value is False
+
+
+def test_new_weixin_session_adopts_the_restart_screen_reader_lease(monkeypatch):
+    captured = []
+
+    class Session:
+        hwnd = 101
+
+        def __init__(self, *_args, screen_reader_restore_value=None, **_kwargs):
+            captured.append(screen_reader_restore_value)
+
+        def __enter__(self):
+            return self
+
+    class Uia:
+        @staticmethod
+        def ControlFromHandle(hwnd):
+            assert hwnd == 101
+            return object()
+
+    monkeypatch.setattr(
+        "app.agent.native_driver.WeixinAccessibilitySession", Session
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._lease_checked = True
+    driver._uia_initialized = True
+    driver._uia = Uia()
+    driver._screen_reader_restore_value = False
+    driver._wait_for = lambda *_args, **_kwargs: True
+
+    driver._ensure_session()
+
+    assert captured == [False]
+    assert driver._screen_reader_restore_value is None
+    assert driver._session_generation == 1
+
+
+def test_wechat_restart_discovers_the_old_process_without_opening_uia():
+    class Module:
+        path = "Weixin.dll"
+
+    class RecoveryBackend:
+        def __init__(self):
+            self.terminated = []
+
+        @staticmethod
+        def window_inspection():
+            return {"hwnd": 100, "pid": 123, "windowState": "visible"}
+
+        @staticmethod
+        def find_module(pid, name):
+            assert (pid, name) == (123, "Weixin.dll")
+            return Module()
+
+        @staticmethod
+        def file_version(_path):
+            return "4.1.13.65"
+
+        @staticmethod
+        def process_path(pid):
+            assert pid == 123
+            return r"C:\Program Files\Tencent\Weixin\Weixin.exe"
+
+        def terminate_process(self, pid):
+            self.terminated.append(pid)
+
+        @staticmethod
+        def start_process(_path):
+            pass
+
+    backend = RecoveryBackend()
+    driver = NativeWeixinDriver(
+        gate_backend=backend,
+        sleep=lambda _seconds: None,
+    )
+    driver.inspect = lambda: {
+        "connected": True,
+        "supported": True,
+        "pid": 456,
+        "version": "4.1.13.65",
+        "uiaReady": True,
+    }
+    driver._prepare_for_weixin_restart = lambda: None
+
+    result = driver.restart_wechat(timeout=90, emit=lambda *_args: None)
+
+    assert backend.terminated == [123]
+    assert result["pid"] == 456
 
 
 def test_wechat_restart_waits_until_supported_uia_tree_is_ready():
@@ -1628,9 +2068,57 @@ def test_wechat_restart_waits_until_supported_uia_tree_is_ready():
         ]
     )
     driver.inspect = lambda: next(inspections)
+    driver._prepare_for_weixin_restart = lambda: None
 
     result = driver.restart_wechat(timeout=90, emit=lambda *_args: None)
 
+    assert result["uiaReady"] is True
+
+
+def test_wechat_restart_restores_a_hidden_supported_window_before_waiting_again():
+    class RecoveryBackend:
+        def process_path(self, _pid):
+            return r"C:\Program Files\Tencent\Weixin\Weixin.exe"
+
+        def terminate_process(self, _pid):
+            pass
+
+        def start_process(self, _path):
+            pass
+
+    driver = NativeWeixinDriver(
+        gate_backend=RecoveryBackend(),
+        sleep=lambda _seconds: None,
+    )
+    inspections = iter(
+        [
+            {"connected": True, "supported": True, "pid": 123},
+            {
+                "connected": True,
+                "supported": True,
+                "version": "4.1.13.65",
+                "uiaReady": False,
+                "windowResponsive": True,
+                "restorable": True,
+            },
+            {
+                "connected": True,
+                "supported": True,
+                "version": "4.1.13.65",
+                "uiaReady": True,
+                "windowResponsive": True,
+                "restorable": False,
+            },
+        ]
+    )
+    driver.inspect = lambda: next(inspections)
+    driver._prepare_for_weixin_restart = lambda: None
+    binds = []
+    driver.bind_window = lambda: binds.append("bind") or {"connected": True}
+
+    result = driver.restart_wechat(timeout=90, emit=lambda *_args: None)
+
+    assert binds == ["bind"]
     assert result["uiaReady"] is True
 
 
@@ -1662,7 +2150,123 @@ def test_inspection_distinguishes_supported_version_from_uia_readiness(monkeypat
 
     assert inspection["supported"] is True
     assert inspection["uiaReady"] is False
+    assert inspection["processDetected"] is True
+    assert inspection["versionSupported"] is True
+    assert inspection["sessionReady"] is False
+    assert inspection["windowResponsive"] is True
+    assert inspection["degradedReason"] == "UIA_NOT_READY"
     assert "2 nodes" in inspection["detail"]
+
+
+def test_inspection_reports_stable_gate_safety_error_code(monkeypatch):
+    class Module:
+        path = "Weixin.dll"
+
+    class InspectBackend:
+        @staticmethod
+        def find_main_window():
+            return 100
+
+        @staticmethod
+        def get_window_pid(_hwnd):
+            return 123
+
+        @staticmethod
+        def find_module(_pid, _name):
+            return Module()
+
+        @staticmethod
+        def file_version(_path):
+            return "4.1.13.65"
+
+    driver = NativeWeixinDriver(gate_backend=InspectBackend())
+    monkeypatch.setattr(
+        driver,
+        "_ensure_session",
+        lambda: (_ for _ in ()).throw(
+            AccessibilitySafetyError("gate byte changed")
+        ),
+    )
+
+    inspection = driver.inspect()
+
+    assert inspection["processDetected"] is True
+    assert inspection["versionSupported"] is True
+    assert inspection["sessionReady"] is False
+    assert inspection["degradedReason"] == "GATE_SAFETY"
+    assert "gate byte changed" in inspection["detail"]
+
+
+def test_inspection_rebinds_when_process_generation_changed_without_resetting_com():
+    class Module:
+        path = "Weixin.dll"
+
+    class InspectBackend:
+        @staticmethod
+        def window_inspection():
+            return {
+                "hwnd": 100,
+                "pid": 123,
+                "windowState": "visible",
+                "restorable": False,
+            }
+
+        @staticmethod
+        def find_module(_pid, _name):
+            return Module()
+
+        @staticmethod
+        def file_version(_path):
+            return "4.1.13.65"
+
+        @staticmethod
+        def process_start_time(_pid):
+            return "new-generation"
+
+        @staticmethod
+        def window_responsive(_hwnd, timeout_ms=250):
+            return timeout_ms == 250
+
+    old_session = type(
+        "Session",
+        (),
+        {
+            "hwnd": 100,
+            "pid": 123,
+            "version": "4.1.13.65",
+            "process_start_time": "old-generation",
+        },
+    )()
+    driver = NativeWeixinDriver(gate_backend=InspectBackend())
+    driver._session = old_session
+    driver._uia_initialized = True
+    calls = []
+
+    def close_session():
+        calls.append("close-session")
+        driver._session = None
+
+    def ensure_session():
+        calls.append("ensure-session")
+        driver._session = type(
+            "Session",
+            (),
+            {
+                "hwnd": 100,
+                "pid": 123,
+                "version": "4.1.13.65",
+                "process_start_time": "new-generation",
+            },
+        )()
+
+    driver._close_session_resources = close_session
+    driver._ensure_session = ensure_session
+
+    inspection = driver.inspect()
+
+    assert inspection["sessionReady"] is True
+    assert calls == ["close-session", "ensure-session"]
+    assert driver._uia_initialized is True
 
 
 def test_inspection_reports_hidden_supported_window_as_restorable_without_uia_init():
@@ -1697,8 +2301,53 @@ def test_inspection_reports_hidden_supported_window_as_restorable_without_uia_in
     assert inspection["connected"] is True
     assert inspection["supported"] is True
     assert inspection["uiaReady"] is False
+    assert inspection["processDetected"] is True
+    assert inspection["versionSupported"] is True
+    assert inspection["sessionReady"] is False
     assert inspection["windowState"] == "hidden"
     assert inspection["restorable"] is True
+
+
+def test_inspection_stops_before_uia_when_weixin_window_is_unresponsive():
+    class Module:
+        path = "Weixin.dll"
+
+    class InspectBackend:
+        @staticmethod
+        def window_inspection():
+            return {
+                "hwnd": 100,
+                "pid": 123,
+                "windowState": "visible",
+                "restorable": False,
+                "visible": True,
+            }
+
+        @staticmethod
+        def find_module(_pid, _name):
+            return Module()
+
+        @staticmethod
+        def file_version(_path):
+            return "4.1.13.65"
+
+        @staticmethod
+        def window_responsive(_hwnd, timeout_ms=250):
+            assert timeout_ms == 250
+            return False
+
+    driver = NativeWeixinDriver(gate_backend=InspectBackend())
+    driver._ensure_session = lambda: pytest.fail(
+        "UIA session must not start for an unresponsive window"
+    )
+
+    inspection = driver.inspect()
+
+    assert inspection["processDetected"] is True
+    assert inspection["versionSupported"] is True
+    assert inspection["windowResponsive"] is False
+    assert inspection["sessionReady"] is False
+    assert inspection["degradedReason"] == "WECHAT_UNRESPONSIVE"
 
 
 def test_friend_search_does_not_treat_the_search_box_as_profile_identity():
@@ -2067,6 +2716,46 @@ def test_open_add_friend_activates_an_existing_visible_window_before_clicks():
     assert calls == [(321, ("mmui::AddFriendWindow",))]
 
 
+def test_open_add_friend_safely_closes_one_leftover_verify_form_first():
+    driver = NativeWeixinDriver(gate_backend=object())
+    profile = type(
+        "Profile",
+        (),
+        {
+            "add_friend_root_class": "mmui::AddFriendWindow",
+            "verify_friend_root_class": "mmui::VerifyFriendWindow",
+        },
+    )()
+    driver._session = type(
+        "Session", (), {"profile": profile, "hwnd": 100, "pid": 202}
+    )()
+    driver._ensure_session = lambda: None
+    calls = []
+
+    def process_windows(classes, *, visible=True, strict=False):
+        if classes == ("mmui::VerifyFriendWindow",):
+            calls.append(("scan-verify", visible, strict))
+            return [444]
+        return [321] if visible is True else []
+
+    driver._process_windows = process_windows
+
+    def cancel():
+        calls.append(("cancel", driver._verify_hwnd))
+        driver._verify_hwnd = 0
+        return True
+
+    driver.cancel_friend_request = cancel
+    driver._restore_owned_process_window = lambda _hwnd, _classes: True
+
+    assert driver.open_add_friend() is True
+    assert calls[:2] == [
+        ("scan-verify", None, True),
+        ("cancel", 444),
+    ]
+    assert driver._add_hwnd == 321
+
+
 def test_driver_close_retains_gate_session_when_cleanup_needs_retry():
     class RetrySession:
         def __init__(self):
@@ -2098,7 +2787,7 @@ def test_session_enter_failure_keeps_the_gate_session_available_for_cleanup(
     instances = []
 
     class EnterCleanupRetrySession:
-        def __init__(self, _backend):
+        def __init__(self, _backend, **_kwargs):
             self.close_calls = 0
             instances.append(self)
 
@@ -2156,6 +2845,154 @@ def test_driver_close_attempts_gate_cleanup_when_subscription_close_fails():
     assert driver._session is None
 
 
+def test_transient_tree_materialization_failure_keeps_one_gate_session(
+    monkeypatch,
+):
+    instances = []
+    initialization_calls = []
+
+    class LongLivedSession:
+        hwnd = 101
+        pid = 202
+        version = "4.1.13.65"
+
+        def __init__(self, _backend, **_kwargs):
+            self.enter_calls = 0
+            self.close_calls = 0
+            instances.append(self)
+
+        def __enter__(self):
+            self.enter_calls += 1
+            return self
+
+        def close(self):
+            self.close_calls += 1
+
+    root = FakeControl(
+        "微信",
+        "WindowControl",
+        "mmui::MainWindow",
+        "main",
+        BoundingRectangle=FakeRect(0, 0, 200, 200),
+    )
+    monkeypatch.setattr(
+        "app.agent.native_driver.WeixinAccessibilitySession",
+        LongLivedSession,
+    )
+    monkeypatch.setattr(
+        "app.agent.native_driver.restore_gate_lease",
+        lambda *_args: {"restored": False},
+    )
+    monkeypatch.setattr(
+        "src.core.uiautomation.InitializeUIAutomationInCurrentThread",
+        lambda: initialization_calls.append("com"),
+    )
+    monkeypatch.setattr(
+        "src.core.uiautomation.ControlFromHandle",
+        lambda _hwnd: root,
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    readiness = iter((False, True))
+    driver._wait_for = lambda *_args, **_kwargs: next(readiness)
+
+    with pytest.raises(RuntimeError, match="UIA 控件树未就绪"):
+        driver._ensure_session()
+
+    assert len(instances) == 1
+    assert instances[0].enter_calls == 1
+    assert instances[0].close_calls == 0
+    assert driver._session is instances[0]
+    assert driver._root is None
+
+    driver._ensure_session()
+
+    assert len(instances) == 1
+    assert instances[0].enter_calls == 1
+    assert initialization_calls == ["com"]
+    assert driver._root is root
+
+
+def test_driver_keeps_com_alive_until_failed_event_cleanup_can_retry():
+    events = []
+
+    class RetrySubscription:
+        def __init__(self):
+            self.calls = 0
+
+        def close(self):
+            self.calls += 1
+            events.append(f"subscription-{self.calls}")
+            if self.calls == 1:
+                raise RuntimeError("subscription cleanup failed")
+
+    class Uia:
+        @staticmethod
+        def ResetUIAutomationClientInCurrentThread():
+            events.append("release-uia")
+
+        @staticmethod
+        def UninitializeUIAutomationInCurrentThread():
+            events.append("uninitialize-com")
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._event_subscription = RetrySubscription()
+    driver._uia = Uia()
+    driver._uia_initialized = True
+
+    with pytest.raises(RuntimeError, match="subscription cleanup failed"):
+        driver.close()
+
+    assert driver._uia_initialized is True
+    assert events == ["subscription-1"]
+
+    driver.close()
+
+    assert events == [
+        "subscription-1",
+        "subscription-2",
+        "release-uia",
+        "uninitialize-com",
+    ]
+
+
+def test_driver_cleanup_order_releases_proxies_before_gate_and_com():
+    events = []
+
+    class Subscription:
+        def close(self):
+            events.append("cancel-events")
+
+    class Session:
+        def close(self):
+            events.append("restore-gate")
+
+    class Uia:
+        @staticmethod
+        def ResetUIAutomationClientInCurrentThread():
+            events.append("release-uia")
+
+        @staticmethod
+        def UninitializeUIAutomationInCurrentThread():
+            events.append("uninitialize-com")
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._event_subscription = Subscription()
+    driver._session = Session()
+    driver._uia = Uia()
+    driver._uia_initialized = True
+    driver._release_control_proxies = lambda: events.append("release-proxies")
+
+    driver.close()
+
+    assert events == [
+        "cancel-events",
+        "release-proxies",
+        "restore-gate",
+        "release-uia",
+        "uninitialize-com",
+    ]
+
+
 def test_friend_submit_requires_an_explicit_success_status(monkeypatch):
     class ImmediateWaiter:
         def wait(self, predicate, *_args, **_kwargs):
@@ -2172,6 +3009,81 @@ def test_friend_submit_requires_an_explicit_success_status(monkeypatch):
     )
 
     assert driver.verify_friend_request(timeout=0.1) is None
+
+
+def test_friend_preflight_closes_the_request_form_with_invoke_pattern(monkeypatch):
+    state = {"visible": True}
+
+    class Pattern:
+        @staticmethod
+        def Invoke(**_kwargs):
+            state["visible"] = False
+            return True
+
+    cancel = FakeControl("取消", "ButtonControl")
+    cancel.GetInvokePattern = lambda: Pattern()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._verify_hwnd = 303
+    driver._wait_control = lambda **_selector: cancel
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args: predicate())}
+    )()
+    monkeypatch.setattr("win32gui.IsWindow", lambda _hwnd: state["visible"])
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda _hwnd: state["visible"])
+
+    assert driver.cancel_friend_request() is True
+    assert driver._verify_hwnd == 0
+
+
+def test_friend_preflight_falls_back_to_window_close_after_false_invoke(
+    monkeypatch,
+):
+    state = {"visible": True}
+    actions = []
+
+    class CancelPattern:
+        @staticmethod
+        def Invoke(**_kwargs):
+            actions.append("cancel-invoke")
+            return True
+
+    class WindowPattern:
+        @staticmethod
+        def Close():
+            actions.append("window-close")
+            state["visible"] = False
+            return True
+
+    cancel = FakeControl("取消", "ButtonControl", "mmui::XOutlineButton")
+    cancel.GetInvokePattern = lambda: CancelPattern()
+    root = FakeControl("发送添加朋友申请", "WindowControl")
+    root.GetWindowPattern = lambda: WindowPattern()
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._verify_hwnd = 303
+    driver._wait_control = lambda **_selector: cancel
+    driver._uia = type(
+        "Uia", (), {"ControlFromHandle": staticmethod(lambda _hwnd: root)}
+    )()
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    monkeypatch.setattr("win32gui.IsWindow", lambda _hwnd: state["visible"])
+    monkeypatch.setattr(
+        "win32gui.IsWindowVisible", lambda _hwnd: state["visible"]
+    )
+
+    assert driver.cancel_friend_request() is True
+    assert actions == ["cancel-invoke", "window-close"]
+    assert driver._verify_hwnd == 0
+
+
+def test_waiter_accepts_a_completed_window_close_before_response_probe():
+    class Backend:
+        @staticmethod
+        def window_responsive(*_args, **_kwargs):
+            pytest.fail("a destroyed success handle must not be probed")
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+
+    assert driver._wait_for(lambda: True, 0.1, hwnd=303) is True
 
 
 def test_friend_submit_checks_risk_controls_even_after_form_closes():

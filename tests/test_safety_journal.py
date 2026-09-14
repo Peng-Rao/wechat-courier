@@ -13,6 +13,7 @@ def test_safety_journal_survives_agent_restart_and_clears_atomically(tmp_path):
         item_id="item-2",
         boundary="send_triggered",
         item_index=1,
+        session_generation=4,
     )
 
     restored = SafetyJournal(path).load()
@@ -21,6 +22,7 @@ def test_safety_journal_survives_agent_restart_and_clears_atomically(tmp_path):
     assert restored["itemId"] == "item-2"
     assert restored["boundary"] == "send_triggered"
     assert restored["itemIndex"] == 1
+    assert restored["sessionGeneration"] == 4
 
     assert SafetyJournal(path).clear(task_id="another-task") is False
     assert SafetyJournal(path).load() == record

@@ -18,6 +18,29 @@ REQUIRED_FIELDS = {
     "timestamp",
 }
 
+GATE_LEASE_FIELDS = {
+    "pid",
+    "processStartTime",
+    "version",
+    "gateRva",
+    "originalGate",
+    "originalScreenReader",
+    "gateOwned",
+    "screenReaderOwned",
+    "sessionGeneration",
+    "timestamp",
+}
+
+
+def _write_atomic(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
 
 class SafetyJournal:
     """Tiny durable record guarding destructive Weixin actions from replay."""
@@ -48,6 +71,9 @@ class SafetyJournal:
                 return None
             try:
                 payload["itemIndex"] = int(payload["itemIndex"])
+                payload["sessionGeneration"] = int(
+                    payload.get("sessionGeneration", 0)
+                )
             except (TypeError, ValueError):
                 return None
             return payload
@@ -60,6 +86,7 @@ class SafetyJournal:
         item_id: str,
         boundary: str,
         item_index: int,
+        session_generation: int = 0,
     ) -> dict[str, Any]:
         record = {
             "taskId": str(task_id),
@@ -67,16 +94,11 @@ class SafetyJournal:
             "itemId": str(item_id),
             "boundary": str(boundary),
             "itemIndex": int(item_index),
+            "sessionGeneration": int(session_generation),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(self.path.name + ".tmp")
-            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-                json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            _write_atomic(self.path, record)
         return record
 
     def clear(
@@ -100,4 +122,90 @@ class SafetyJournal:
             return True
 
 
-__all__ = ["SafetyJournal"]
+class GateLeaseJournal:
+    """Durable ownership record for the reversible Weixin UIA gate."""
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = Path(path)
+        self._lock = threading.RLock()
+
+    @classmethod
+    def from_environment(cls) -> "GateLeaseJournal":
+        configured = os.environ.get("WECHAT_AGENT_GATE_LEASE", "").strip()
+        if configured:
+            return cls(configured)
+        safety_path = os.environ.get("WECHAT_AGENT_JOURNAL", "").strip()
+        if safety_path:
+            return cls(safety_path + ".gate")
+        return cls(
+            Path(tempfile.gettempdir())
+            / f"wuge-wechat-agent-{os.getppid()}-gate.json"
+        )
+
+    def load(self) -> dict[str, Any] | None:
+        with self._lock:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            if not isinstance(payload, dict) or not GATE_LEASE_FIELDS <= payload.keys():
+                return None
+            try:
+                payload["pid"] = int(payload["pid"])
+                payload["gateRva"] = int(payload["gateRva"])
+                payload["originalGate"] = int(payload["originalGate"])
+                payload["sessionGeneration"] = int(payload["sessionGeneration"])
+                payload["processStartTime"] = str(payload["processStartTime"])
+                payload["version"] = str(payload["version"])
+                payload["originalScreenReader"] = bool(
+                    payload["originalScreenReader"]
+                )
+                payload["gateOwned"] = bool(payload["gateOwned"])
+                payload["screenReaderOwned"] = bool(
+                    payload["screenReaderOwned"]
+                )
+            except (TypeError, ValueError):
+                return None
+            if payload["originalGate"] not in (0, 1):
+                return None
+            return payload
+
+    def mark(
+        self,
+        *,
+        pid: int,
+        process_start_time: str | int,
+        version: str,
+        gate_rva: int,
+        original_gate: int,
+        original_screen_reader: bool,
+        gate_owned: bool,
+        screen_reader_owned: bool,
+        session_generation: int,
+    ) -> dict[str, Any]:
+        record = {
+            "pid": int(pid),
+            "processStartTime": str(process_start_time),
+            "version": str(version),
+            "gateRva": int(gate_rva),
+            "originalGate": int(original_gate),
+            "originalScreenReader": bool(original_screen_reader),
+            "gateOwned": bool(gate_owned),
+            "screenReaderOwned": bool(screen_reader_owned),
+            "sessionGeneration": int(session_generation),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            _write_atomic(self.path, record)
+        return record
+
+    def clear(self) -> bool:
+        with self._lock:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                return False
+            return True
+
+
+__all__ = ["GateLeaseJournal", "SafetyJournal"]

@@ -14,6 +14,27 @@ Rectangle {
     )
     color: "transparent"
 
+    // Read-only UIA evidence is exposed only for explicitly opted-in acceptance runs.
+    Item {
+        width: 1
+        height: 1
+        visible: !!(root.appBackend && root.appBackend.task.acceptanceEnabled)
+        Accessible.role: Accessible.StaticText
+        Accessible.name: "acceptanceEditorState"
+        Accessible.description: visible ? (root.workspaceIndex === 0
+            ? root.appBackend.task.acceptanceMessageStateJson
+            : root.appBackend.task.acceptanceFriendStateJson) : ""
+    }
+    Item {
+        width: 1
+        height: 1
+        visible: !!(root.appBackend && root.appBackend.task.acceptanceEnabled)
+        Accessible.role: Accessible.StaticText
+        Accessible.name: "acceptanceTaskState"
+        Accessible.description: visible
+            ? root.appBackend.task.acceptanceTaskStateJson : ""
+    }
+
     function openSettings(section) {
         if (root.interactionLocked) return
         settingsDialog.sectionIndex = section === undefined ? 0 : section
@@ -42,6 +63,8 @@ Rectangle {
                         required property int index
                         required property string modelData
                         objectName: index === 0 ? "messageWorkspaceTab" : "friendWorkspaceTab"
+                        Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                            ? objectName : modelData
                         Layout.preferredWidth: index === 0 ? 92 : 116
                         Layout.fillHeight: true
                         enabled: !root.interactionLocked
@@ -73,30 +96,7 @@ Rectangle {
                         }
                     }
                 }
-
                 Item { Layout.fillWidth: true }
-
-                Rectangle {
-                    Layout.preferredHeight: 28
-                    Layout.preferredWidth: versionText.implicitWidth + 20
-                    radius: WxTheme.radiusSmall
-                    color: root.appBackend && root.appBackend.agent.wechatSupported
-                        ? WxTheme.clSuccessSoft : WxTheme.clWarningSoft
-                    border.color: root.appBackend && root.appBackend.agent.wechatSupported
-                        ? WxTheme.clSuccessBorder : WxTheme.clWarningBorder
-                    Text {
-                        id: versionText
-                        anchors.centerIn: parent
-                        text: root.appBackend && root.appBackend.agent.wechatVersion
-                            ? "微信 " + root.appBackend.agent.wechatVersion
-                                + (root.appBackend.agent.wechatSupported ? " 已验证" : " 不受支持")
-                            : "等待检测微信"
-                        color: root.appBackend && root.appBackend.agent.wechatSupported
-                            ? WxTheme.clSuccessText : WxTheme.clWarningText
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeTiny
-                    }
-                }
             }
         }
 

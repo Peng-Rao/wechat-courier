@@ -21,3 +21,5 @@ scratch/
 /dist/
 /comtypes_gen/
 /artifacts/
+/.artifacts/
+/.tmp-test.xml

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import zipfile
+
 from PySide6.QtCore import QObject, QSettings, Signal
 
 from app.backend import BackendController
@@ -23,6 +26,7 @@ class FakeAgentClient(QObject):
         self.started = False
         self.restart_count = 0
         self.shutdown_count = 0
+        self.safety_record = None
 
     def start(self):
         self.started = True
@@ -33,6 +37,9 @@ class FakeAgentClient(QObject):
         self.calls.append((request_id, method, params or {}))
         return request_id
 
+    def grant_foreground_permission(self):
+        return True
+
     def close(self):
         pass
 
@@ -41,6 +48,9 @@ class FakeAgentClient(QObject):
 
     def shutdown(self):
         self.shutdown_count += 1
+
+    def recovery_snapshot(self):
+        return self.safety_record
 
 
 def settings(tmp_path):
@@ -64,6 +74,11 @@ def make_backend(tmp_path):
         }
     )
     return backend, client
+
+
+def fire_scheduled_agent_restart(backend):
+    backend.task._agent_restart_timer.stop()
+    backend.task._perform_agent_restart()
 
 
 def test_backend_exposes_five_stable_qobject_facades(tmp_path, qapp):
@@ -164,6 +179,31 @@ def test_supported_version_with_unavailable_uia_still_blocks_start(tmp_path, qap
     assert not any(method == "task.start" for _id, method, _payload in client.calls)
 
 
+def test_agent_controller_exposes_distinct_process_version_and_session_health(
+    tmp_path, qapp
+):
+    backend, _client = make_backend(tmp_path)
+    backend.agent.applyInspection(
+        {
+            "processDetected": True,
+            "versionSupported": True,
+            "sessionReady": False,
+            "windowResponsive": False,
+            "sessionGeneration": 3,
+            "degradedReason": "WECHAT_UNRESPONSIVE",
+            "version": "4.1.13.65",
+        }
+    )
+
+    assert backend.agent.processDetected is True
+    assert backend.agent.versionSupported is True
+    assert backend.agent.sessionReady is False
+    assert backend.agent.windowResponsive is False
+    assert backend.agent.sessionGeneration == 3
+    assert backend.agent.degradedReason == "WECHAT_UNRESPONSIVE"
+    assert backend.agent.automationReady is False
+
+
 def test_hidden_verified_weixin_is_task_ready_when_backend_can_restore_it(
     tmp_path, qapp
 ):
@@ -181,7 +221,8 @@ def test_hidden_verified_weixin_is_task_ready_when_backend_can_restore_it(
     )
 
     assert backend.agent.uiaReady is False
-    assert backend.agent.automationReady is True
+    assert backend.agent.automationReady is False
+    assert backend.agent.canStartTask is True
 
 
 def test_supported_version_without_explicit_uia_readiness_still_blocks_start(
@@ -280,7 +321,7 @@ def test_task_events_update_monitor_and_release_global_lock(tmp_path, qapp):
     assert backend.task.phase == "done"
 
 
-def test_agent_recovery_marks_boundary_item_unknown_and_resumes_remaining(
+def test_agent_recovery_marks_boundary_item_unknown_and_stops_batch(
     tmp_path, qapp
 ):
     backend, client = make_backend(tmp_path)
@@ -308,6 +349,9 @@ def test_agent_recovery_marks_boundary_item_unknown_and_resumes_remaining(
     client.connected = False
     client.connectedChanged.emit(False)
     assert backend.task.phase == "recovering"
+    assert client.restart_count == 0
+    assert backend.task._agent_restart_timer.interval() == 2_000
+    fire_scheduled_agent_restart(backend)
     assert client.restart_count == 1
 
     client.connected = True
@@ -336,27 +380,14 @@ def test_agent_recovery_marks_boundary_item_unknown_and_resumes_remaining(
 
     recovery_calls = [(method, payload) for _id, method, payload in client.calls]
     assert ("recovery.approve", {"decision": "mark_unknown"}) in recovery_calls
-    resumed = [payload for _id, method, payload in client.calls if method == "task.start"][-1]
-    assert [item["itemId"] for item in resumed["items"]] == [third["itemId"]]
+    starts = [payload for _id, method, payload in client.calls if method == "task.start"]
+    assert len(starts) == 1
     assert backend.task.done == 2
-    assert backend.task.phase == "running"
+    assert backend.task.phase == "error"
+    assert backend.task.active is False
     assert backend.task.items._items[1].result == "unknown"
-
-    client.notificationReceived.emit(
-        "task.event",
-        {
-            "taskId": task_id,
-            "itemId": third["itemId"],
-            "step": "send_verified",
-            "outcome": "success",
-            "detail": "发送结果已确认",
-            "done": 1,
-            "total": 1,
-            "timestamp": "2026-09-13T00:00:02+00:00",
-        },
-    )
-    assert backend.task.done == 3
-    assert backend.task.total == 3
+    assert backend.task.items._items[2].result == "pending"
+    assert "不会自动恢复" in backend.task.error
 
 
 def test_agent_restart_limit_stops_active_task_safely(tmp_path, qapp):
@@ -388,6 +419,7 @@ def test_merged_forward_task_is_not_resumed_after_agent_disconnect(tmp_path, qap
     assert backend.task.active is False
     assert backend.task.phase == "error"
     assert "不会自动恢复" in backend.task.error
+    fire_scheduled_agent_restart(backend)
     assert client.restart_count == 1
 
 
@@ -399,6 +431,7 @@ def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):
 
     client.connected = False
     client.connectedChanged.emit(False)
+    fire_scheduled_agent_restart(backend)
     client.connected = True
     client.connectedChanged.emit(True)
     client.helloReceived.emit({"recovery": None})
@@ -420,3 +453,196 @@ def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):
     ]
     assert backend.task.recoveryRequired is False
     assert backend.task.phase == "waiting_login"
+
+
+def test_agent_restarts_use_two_and_five_second_backoff(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    assert backend.task._agent_restart_timer.isActive()
+    assert backend.task._agent_restart_timer.interval() == 2_000
+    fire_scheduled_agent_restart(backend)
+
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.connected = False
+    client.connectedChanged.emit(False)
+    assert backend.task._agent_restart_timer.isActive()
+    assert backend.task._agent_restart_timer.interval() == 5_000
+    fire_scheduled_agent_restart(backend)
+
+    assert client.restart_count == 2
+
+
+def test_boundary_record_marks_unknown_and_never_resumes_batch(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice\nBob"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+    payload = client.calls[-1][2]
+    client.safety_record = {
+        "taskId": payload["taskId"],
+        "kind": "message_send",
+        "itemId": payload["items"][0]["itemId"],
+        "boundary": "send_triggered",
+        "itemIndex": 0,
+        "timestamp": "2026-09-14T00:00:00+00:00",
+    }
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert backend.task.items._items[0].result == "unknown"
+    assert backend.task.destructiveBoundaryCrossed is True
+    assert backend.task.safeRetryAvailable is False
+    assert "不会自动重发" in backend.task.recoveryHint
+    fire_scheduled_agent_restart(backend)
+    assert client.restart_count == 1
+
+
+def test_failed_event_exposes_counts_and_safe_retry_permissions(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+    payload = client.calls[-1][2]
+
+    client.notificationReceived.emit(
+        "task.event",
+        {
+            "taskId": payload["taskId"],
+            "itemId": payload["items"][0]["itemId"],
+            "step": "window_bound",
+            "outcome": "error",
+            "detail": "bind_window failed",
+            "done": 1,
+            "total": 1,
+            "timestamp": "2026-09-14T00:00:00+00:00",
+            "attempt": 3,
+            "maxAttempts": 3,
+            "retryLevel": "same_session",
+            "recoverable": True,
+            "destructiveBoundaryCrossed": False,
+            "wechatResponsive": True,
+            "errorCode": "TRANSIENT_UI",
+        },
+    )
+    client.notificationReceived.emit(
+        "task.finished",
+        {
+            "taskId": payload["taskId"],
+            "outcome": "error",
+            "done": 1,
+            "total": 1,
+            "success": 0,
+            "error": 1,
+            "unknown": 0,
+        },
+    )
+
+    assert backend.task.successCount == 0
+    assert backend.task.failureCount == 1
+    assert backend.task.unknownCount == 0
+    assert backend.task.currentOutcome == "error"
+    assert backend.task.currentErrorCode == "TRANSIENT_UI"
+    assert backend.task.retryAttempt == 3
+    assert backend.task.retryMaxAttempts == 3
+    assert backend.task.safeRetryAvailable is True
+
+    previous_starts = len([call for call in client.calls if call[1] == "task.start"])
+    assert backend.task.retryFailedItem() is True
+    starts = [call for call in client.calls if call[1] == "task.start"]
+    assert len(starts) == previous_starts + 1
+    assert len(starts[-1][2]["items"]) == 1
+
+
+def test_diagnostics_export_bundles_rotating_logs_and_safe_summary(
+    tmp_path, qapp, monkeypatch
+):
+    local_app_data = tmp_path / "local"
+    log_dir = local_app_data / "WxAuto" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "uia-diagnostics.jsonl").write_text(
+        '{"stage":"window_bound","outcome":"error"}\n', encoding="utf-8"
+    )
+    (log_dir / "uia-diagnostics.jsonl.1").write_text(
+        '{"stage":"inspect","outcome":"success"}\n', encoding="utf-8"
+    )
+    (log_dir / "agent-stderr.log").write_text("agent error\n", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    backend, _client = make_backend(tmp_path)
+
+    destination = tmp_path / "wechat-diagnostics.zip"
+    assert backend.task.exportDiagnostics(str(destination)) is True
+
+    with zipfile.ZipFile(destination) as archive:
+        names = set(archive.namelist())
+        assert "diagnostic-summary.json" in names
+        assert "logs/uia-diagnostics.jsonl" in names
+        assert "logs/uia-diagnostics.jsonl.1" in names
+        assert "logs/agent-stderr.log" in names
+        summary = json.loads(archive.read("diagnostic-summary.json"))
+    assert summary["schemaVersion"] == 1
+    assert summary["wechatVersion"] == "4.1.13.65"
+    assert summary["sessionReady"] is True
+
+
+def test_unresponsive_failure_offers_detection_and_one_explicit_restart(
+    tmp_path, qapp
+):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+    payload = client.calls[-1][2]
+
+    client.notificationReceived.emit(
+        "task.event",
+        {
+            "taskId": payload["taskId"],
+            "itemId": payload["items"][0]["itemId"],
+            "step": "window_bound",
+            "outcome": "error",
+            "detail": "微信窗口无响应",
+            "done": 1,
+            "total": 1,
+            "timestamp": "2026-09-14T00:00:00+00:00",
+            "recoverable": False,
+            "destructiveBoundaryCrossed": False,
+            "wechatResponsive": False,
+            "errorCode": "WECHAT_UNRESPONSIVE",
+        },
+    )
+    client.notificationReceived.emit(
+        "task.finished",
+        {
+            "taskId": payload["taskId"],
+            "outcome": "error",
+            "done": 1,
+            "total": 1,
+        },
+    )
+
+    assert backend.task.wechatResponsive is False
+    assert backend.task.safeRetryAvailable is False
+    assert backend.task.wechatRestartAvailable is True
+
+    before_inspect = len([call for call in client.calls if call[1] == "wechat.inspect"])
+    backend.task.detectWechatRecovery()
+    after_inspect = len([call for call in client.calls if call[1] == "wechat.inspect"])
+    assert after_inspect == before_inspect + 1
+
+    assert backend.task.restartWechatAfterFailure() is True
+    assert backend.task.restartWechatAfterFailure() is False
+    restart_calls = [
+        call for call in client.calls
+        if call[1] == "recovery.approve"
+        and call[2].get("decision") == "restart_wechat"
+    ]
+    assert len(restart_calls) == 1

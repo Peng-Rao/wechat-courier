@@ -8,9 +8,14 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from build.pyinstaller_filters import filter_qt_artifacts
+from app.build_info import MANIFEST_FILENAME, write_build_manifest
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+
+# One immutable source identity for both executables; no user log files included.
+manifest_path = write_build_manifest(os.path.join(workpath, MANIFEST_FILENAME), ROOT)
+build_datas = [(str(manifest_path), ".")]
 
 # ═══════════════════════════════════════
 #  comtypes 预生成目录
@@ -28,7 +33,7 @@ if os.path.isdir(comtypes_gen_dir):
 # ═══════════════════════════════════════
 #  QML 文件与图标资源
 # ═══════════════════════════════════════
-datas = list(comtypes_datas)
+datas = list(comtypes_datas) + build_datas
 qml_dir = os.path.join(ROOT, "qml")
 for dirpath, dirnames, filenames in os.walk(qml_dir):
     for f in filenames:
@@ -75,6 +80,7 @@ if not binaries:
         pass
 
 hiddenimports = [
+    "app.build_info",
     # PySide6 shared by the GUI and local Named Pipe agent
     "PySide6.QtCore", "PySide6.QtGui",
     "PySide6.QtQuick", "PySide6.QtQml", "PySide6.QtQuickControls2",
@@ -116,7 +122,7 @@ agent_analysis = Analysis(
     [os.path.join(ROOT, "agent_main.py")],
     pathex=[ROOT],
     binaries=binaries,
-    datas=comtypes_datas,
+    datas=list(comtypes_datas) + build_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

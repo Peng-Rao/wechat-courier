@@ -63,3 +63,23 @@ def test_friend_import_status_stays_working_until_submit_is_verified(qapp):
         )
     )
     assert model.record_at(0).status == "success"
+
+
+def test_friend_preflight_completed_is_a_terminal_success(qapp):
+    model = FriendImportModel()
+    model.replace_records(
+        load_friend_records(
+            [["账号", "打招呼语", "备注"], ["18896904196", "你好", "测试"]]
+        )
+    )
+
+    model.apply_event(
+        _event(
+            "preflight_completed",
+            "success",
+            "2026-09-14T00:00:01+00:00",
+            "row-2",
+        )
+    )
+
+    assert model.record_at(0).status == "success"

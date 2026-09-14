@@ -3,9 +3,11 @@
 
 import dis
 import importlib.util
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -173,7 +175,48 @@ def test_build_outputs_gui_and_isolated_agent_in_one_directory():
     assert '*collect_submodules("openpyxl")' in spec_text
 
 
-def test_product_versions_and_installer_upgrade_contract_are_v030():
+def test_build_spec_packages_one_generated_manifest_for_gui_and_agent(tmp_path, monkeypatch):
+    analyses = []
+
+    def analysis(scripts, **kwargs):
+        result = SimpleNamespace(
+            scripts=scripts, binaries=kwargs["binaries"], datas=kwargs["datas"],
+            pure=[], zipped_data=[], zipfiles=[],
+        )
+        analyses.append(result)
+        return result
+
+    # Execute the real spec, replacing only PyInstaller and native DLL discovery.
+    package = ModuleType("PyInstaller")
+    utils = ModuleType("PyInstaller.utils")
+    hooks = ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_submodules = lambda name: []
+    hooks.get_pywin32_dll_dir = lambda: None
+    package.utils = utils
+    utils.hooks = hooks
+    for module in (package, utils, hooks):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setitem(sys.modules, "pywintypes", SimpleNamespace(__file__=str(tmp_path / "stub.py")))
+    runpy.run_path(str(ROOT / "build" / "build.spec"), init_globals={
+        "SPECPATH": str(ROOT / "build"), "workpath": str(tmp_path),
+        "Analysis": analysis, "PYZ": lambda *args, **kwargs: None,
+        "EXE": lambda *args, **kwargs: None, "COLLECT": lambda *args, **kwargs: None,
+    })
+
+    assert len(analyses) == 2
+    manifest_sources = []
+    for result in analyses:
+        manifests = [entry for entry in result.datas if Path(entry[0]).name == "build-info.json"]
+        assert len(manifests) == 1
+        source, destination = manifests[0]
+        assert destination == "."
+        assert Path(source).is_file()
+        manifest_sources.append(source)
+        assert not any(Path(entry[0]).suffix in {".jsonl", ".log", ".zip"} for entry in result.datas)
+    assert manifest_sources[0] == manifest_sources[1]
+
+
+def test_product_versions_and_installer_upgrade_contract_are_v032():
     app_version = (ROOT / "app" / "_version.py").read_text(encoding="utf-8")
     library_version = (ROOT / "src" / "_version.py").read_text(encoding="utf-8")
     backend = (ROOT / "app" / "backend.py").read_text(encoding="utf-8")
@@ -182,10 +225,10 @@ def test_product_versions_and_installer_upgrade_contract_are_v030():
     )
     installer = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
 
-    assert '__version__ = "0.3.0"' in app_version
-    assert '__version__ = "0.3.0"' in library_version
+    assert '__version__ = "0.3.2"' in app_version
+    assert '__version__ = "0.3.2"' in library_version
     assert '!define PRODUCT_NAME "五阿哥微信助手"' in installer
-    assert '!define PRODUCT_VERSION "0.3.0"' in installer
+    assert '!define PRODUCT_VERSION "0.3.2"' in installer
     assert '!define OLD_PRODUCT_NAME "五阿哥群发助手"' in installer
     assert "taskkill" in installer
     assert "OLD_PRODUCT_NAME" in installer

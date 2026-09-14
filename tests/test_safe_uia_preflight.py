@@ -195,6 +195,40 @@ def test_message_open_snapshots_search_control_before_selection_invalidates_it(
     assert resolved[0]["control"]["class"] == "mmui::SearchContentCellView"
     assert resolved[0]["control"]["bounds"] == [30, 40, 330, 90]
     assert resolved[0]["control"]["visible"] is True
+    assert entries[-1]["control"] == resolved[0]["control"]
+
+
+def test_preflight_passes_only_primitive_snapshots_to_logger(tmp_path):
+    driver = ExpiringControlMessageDriver()
+
+    class SnapshotDiagnostics(UiaDiagnostics):
+        def record(self, **entry):
+            assert type(entry.get("control")) is dict
+            json.dumps(entry)
+            return super().record(**entry)
+
+    run_preflight(
+        "message-open", target="Alice",
+        driver_factory=lambda **_kwargs: driver,
+        diagnostics_factory=lambda: SnapshotDiagnostics(log_dir=tmp_path),
+    )
+
+
+def test_preflight_error_window_bounds_are_copied_before_logging(tmp_path):
+    driver = RichMessageDriver()
+    driver.search_contacts = lambda _target: []
+
+    class SnapshotDiagnostics(UiaDiagnostics):
+        def record(self, **entry):
+            json.dumps(entry)
+            return super().record(**entry)
+
+    with pytest.raises(PreflightError, match="one exact contact"):
+        run_preflight(
+            "message-open", target="Alice",
+            driver_factory=lambda **_kwargs: driver,
+            diagnostics_factory=lambda: SnapshotDiagnostics(log_dir=tmp_path),
+        )
 
 
 def test_message_open_records_live_window_root_and_search_control_metadata(tmp_path):

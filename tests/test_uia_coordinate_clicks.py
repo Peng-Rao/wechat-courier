@@ -18,9 +18,11 @@ def test_coordinate_clicks_do_not_reinterpret_negative_virtual_screen_positions(
 ):
     events = []
     monkeypatch.setattr(
-        uia, "SetCursorPos", lambda x, y: events.append(("move", x, y)) or True
+        uia,
+        "SetPhysicalCursorPos",
+        lambda x, y: events.append(("move", x, y)) or True,
     )
-    monkeypatch.setattr(uia, "GetCursorPos", lambda: (-684, 220))
+    monkeypatch.setattr(uia, "GetPhysicalCursorPos", lambda: (-684, 220))
     monkeypatch.setattr(
         uia,
         "mouse_event",
@@ -41,7 +43,7 @@ def test_coordinate_clicks_do_not_reinterpret_negative_virtual_screen_positions(
 
 def test_coordinate_click_refuses_to_press_when_cursor_move_fails(monkeypatch):
     events = []
-    monkeypatch.setattr(uia, "SetCursorPos", lambda _x, _y: False)
+    monkeypatch.setattr(uia, "SetPhysicalCursorPos", lambda _x, _y: False)
     monkeypatch.setattr(
         uia,
         "mouse_event",
@@ -52,3 +54,19 @@ def test_coordinate_click_refuses_to_press_when_cursor_move_fails(monkeypatch):
         uia.Click(-684, 220, waitTime=0)
 
     assert events == []
+
+
+def test_coordinate_click_reports_the_actual_physical_cursor_position(monkeypatch):
+    monkeypatch.setattr(uia, "SetPhysicalCursorPos", lambda _x, _y: True)
+    monkeypatch.setattr(uia, "GetPhysicalCursorPos", lambda: (1919, 844))
+    monkeypatch.setattr(
+        uia,
+        "mouse_event",
+        lambda *_args: pytest.fail("a mismatched point must never be clicked"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"expected=\(2022, 844\).*actual=\(1919, 844\)",
+    ):
+        uia.Click(2022, 844, waitTime=0)

@@ -54,7 +54,21 @@ def test_task_event_serializes_the_stable_rpc_shape():
         "done": 1,
         "total": 3,
         "timestamp": "2026-09-13T08:30:00+00:00",
+        "attempt": 1,
+        "maxAttempts": 1,
+        "retryLevel": "none",
+        "retryInMs": 0,
+        "recoverable": False,
+        "destructiveBoundaryCrossed": False,
+        "wechatResponsive": True,
+        "errorCode": "",
     }
+
+
+def test_friend_contract_includes_the_preflight_terminal_step():
+    from app.agent.contracts import FRIEND_STEPS
+
+    assert "preflight_completed" in FRIEND_STEPS
 
 
 def test_task_request_rejects_an_unknown_kind():

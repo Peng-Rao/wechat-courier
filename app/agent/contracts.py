@@ -27,6 +27,7 @@ FRIEND_STEPS = (
     "profile_verified",
     "request_form_ready",
     "fields_verified",
+    "preflight_completed",
     "submit_verified",
 )
 
@@ -134,6 +135,14 @@ class TaskEvent:
     done: int
     total: int
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    attempt: int = 1
+    max_attempts: int = 1
+    retry_level: str = "none"
+    retry_in_ms: int = 0
+    recoverable: bool = False
+    destructive_boundary_crossed: bool = False
+    wechat_responsive: bool = True
+    error_code: str = ""
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -145,4 +154,12 @@ class TaskEvent:
             "done": self.done,
             "total": self.total,
             "timestamp": self.timestamp.isoformat(),
+            "attempt": self.attempt,
+            "maxAttempts": self.max_attempts,
+            "retryLevel": self.retry_level,
+            "retryInMs": self.retry_in_ms,
+            "recoverable": self.recoverable,
+            "destructiveBoundaryCrossed": self.destructive_boundary_crossed,
+            "wechatResponsive": self.wechat_responsive,
+            "errorCode": self.error_code,
         }

@@ -5,11 +5,22 @@ import sys
 
 from PySide6.QtCore import QCoreApplication
 
+from .gate import restore_gate_lease
 from .runtime import AgentRuntime
 from .server import AgentServer
 
 
 def main() -> int:
+    try:
+        recovery = restore_gate_lease()
+    except Exception as exc:
+        print(f"wechat-agent gate recovery failed: {exc}", file=sys.stderr)
+        return 4
+    if "--recover-gate" in sys.argv:
+        if recovery.get("restored"):
+            print(recovery.get("reason", "restored"))
+        return 0
+
     pipe_name = os.environ.get("WECHAT_AGENT_PIPE", "")
     token = os.environ.get("WECHAT_AGENT_TOKEN", "")
     if not pipe_name or not token:

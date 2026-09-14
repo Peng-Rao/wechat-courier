@@ -21,7 +21,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.agent.diagnostics import (
     UiaDiagnostics,
-    control_metadata,
     payload_fingerprint,
     redact_identifier,
 )
@@ -165,6 +164,48 @@ def _root_control(driver: Any) -> Any:
     return getattr(driver, "_root", None)
 
 
+def _probe_attr(control: Any, name: str, default: Any = None) -> Any:
+    try:
+        value = getattr(control, name)
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+def _snapshot_control(control: Any) -> dict[str, Any]:
+    """Explicit probe-time UIA reads; the logger receives only copied primitives."""
+    rectangle = _probe_attr(control, "BoundingRectangle")
+    bounds = None
+    if rectangle is not None:
+        try:
+            parts = rectangle if isinstance(rectangle, (tuple, list)) else (
+                rectangle.left, rectangle.top, rectangle.right, rectangle.bottom,
+            )
+            if len(parts) == 4:
+                bounds = [int(part) for part in parts]
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            pass
+    runtime_id = []
+    try:
+        getter = _probe_attr(control, "GetRuntimeId")
+        value = getter() if callable(getter) else _probe_attr(control, "RuntimeId", ())
+        runtime_id = [int(part) for part in value]
+    except Exception:
+        pass
+    offscreen = _probe_attr(control, "IsOffscreen")
+    hwnd = _probe_attr(control, "NativeWindowHandle")
+    return {
+        "name": str(_probe_attr(control, "Name", "")),
+        "type": str(_probe_attr(control, "ControlTypeName", "")),
+        "class": str(_probe_attr(control, "ClassName", "")),
+        "automationId": str(_probe_attr(control, "AutomationId", "")),
+        "runtimeId": runtime_id,
+        "bounds": bounds,
+        "visible": None if offscreen is None else not bool(offscreen),
+        "ownerWindow": hwnd if type(hwnd) is int else None,
+    }
+
+
 def _diagnostic_window(driver: Any, binding: Any) -> Any:
     if isinstance(binding, Mapping):
         restore = binding.get("windowRestore")
@@ -186,15 +227,16 @@ def _diagnostic_window(driver: Any, binding: Any) -> Any:
         return binding
     binding_hwnd = binding.get("hwnd") if isinstance(binding, Mapping) else None
     binding_pid = binding.get("pid") if isinstance(binding, Mapping) else None
+    snapshot = _snapshot_control(root)
     return {
-        "hwnd": binding_hwnd or getattr(root, "NativeWindowHandle", None),
+        "hwnd": binding_hwnd or snapshot["ownerWindow"],
         "pid": binding_pid or getattr(
             getattr(driver, "_session", None), "pid", None
         ),
-        "title": getattr(root, "Name", ""),
-        "class": getattr(root, "ClassName", ""),
-        "bounds": getattr(root, "BoundingRectangle", None),
-        "visible": not bool(getattr(root, "IsOffscreen", True)),
+        "title": snapshot["name"],
+        "class": snapshot["class"],
+        "bounds": snapshot["bounds"],
+        "visible": snapshot["visible"],
     }
 
 
@@ -206,7 +248,7 @@ def _diagnostic_candidate_control(driver: Any, candidate: Any) -> Any:
         except Exception:
             resolved = None
         if resolved is not None:
-            return resolved
+            return _snapshot_control(resolved)
     return _candidate_metadata(candidate)
 
 
@@ -220,7 +262,7 @@ def _run_message_open(driver: Any, diagnostics: UiaDiagnostics, target: str):
         action="bind_window",
         outcome="success",
         window=window,
-        control=_root_control(driver),
+        control=_snapshot_control(_root_control(driver)),
         owner_window=window,
         contact=target,
     )
@@ -277,7 +319,7 @@ def _run_restore_only(driver: Any, diagnostics: UiaDiagnostics):
         action="bind_window",
         outcome="success",
         window=window,
-        control=_root_control(driver),
+        control=_snapshot_control(_root_control(driver)),
         owner_window=window,
     )
     return {
@@ -305,7 +347,7 @@ def _run_friend_pre_submit(
         action="bind_window",
         outcome="success",
         window=window,
-        control=_root_control(driver),
+        control=_snapshot_control(_root_control(driver)),
         owner_window=window,
         account=account,
     )
@@ -353,14 +395,15 @@ def _run_friend_pre_submit(
         name="确定",
         control_type="ButtonControl",
     )
-    if control_metadata(confirm)["visible"] is not True:
+    confirm_snapshot = _snapshot_control(confirm)
+    if confirm_snapshot["visible"] is not True:
         raise PreflightError("the exact Confirm control is not visible")
     diagnostics.record(
         stage="friend_pre_submit",
         action="confirm_present",
         outcome="ready",
         window={"hwnd": verify_hwnd},
-        control=confirm,
+        control=confirm_snapshot,
         owner_window={"hwnd": verify_hwnd},
         account=account,
     )
@@ -415,7 +458,7 @@ def run_preflight(
             action="preflight",
             outcome="error",
             window=error_window,
-            control=_root_control(driver),
+            control=_snapshot_control(_root_control(driver)),
             owner_window=error_window,
             account=account,
             contact=target,
@@ -433,7 +476,7 @@ def run_preflight(
                     action=action,
                     outcome=outcome,
                     window=cleanup_window,
-                    control=_root_control(driver),
+                    control=_snapshot_control(_root_control(driver)),
                     owner_window=cleanup_window,
                     account=account,
                 )

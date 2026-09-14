@@ -4,10 +4,12 @@ import ctypes
 import os
 import subprocess
 import struct
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .journal import GateLeaseJournal
 from .profile import WeixinProfile, get_weixin_profile
 
 if TYPE_CHECKING:
@@ -21,6 +23,9 @@ PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
 SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0x00000000
+WAIT_TIMEOUT = 0x00000102
+ERROR_INVALID_PARAMETER = 87
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
 IMAGE_SCN_MEM_WRITE = 0x80000000
@@ -28,6 +33,9 @@ MAX_MODULE_NAME32 = 255
 MAX_PATH = 260
 SPI_GETSCREENREADER = 0x0046
 SPI_SETSCREENREADER = 0x0047
+WM_NULL = 0x0000
+SMTO_BLOCK = 0x0001
+SMTO_ABORTIFHUNG = 0x0002
 
 
 class AccessibilitySafetyError(RuntimeError):
@@ -98,6 +106,23 @@ class NativeGateBackend:
             }
         )
         return result
+
+    @staticmethod
+    def window_responsive(hwnd: int, timeout_ms: int = 250) -> bool:
+        if not hwnd:
+            return False
+        result = ctypes.c_size_t()
+        return bool(
+            ctypes.windll.user32.SendMessageTimeoutW(
+                int(hwnd),
+                WM_NULL,
+                0,
+                0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                max(1, int(timeout_ms)),
+                ctypes.byref(result),
+            )
+        )
 
     def prepare_main_window(self) -> WindowRestoreResult:
         """Discover and, only when hidden, restore the main window."""
@@ -222,6 +247,60 @@ class NativeGateBackend:
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
 
+    def process_start_time(self, pid: int) -> str:
+        """Return the immutable Windows creation FILETIME for PID reuse checks."""
+
+        self._require_windows()
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            raise RuntimeError(f"cannot open Weixin PID {pid} to read start time")
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel_time = wintypes.FILETIME()
+            user_time = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                raise RuntimeError("cannot read Weixin process start time")
+            value = (int(creation.dwHighDateTime) << 32) | int(
+                creation.dwLowDateTime
+            )
+            return str(value)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def process_exists(self, pid: int) -> bool:
+        """Distinguish an exited PID from an identity check failure."""
+
+        self._require_windows()
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            error = int(kernel32.GetLastError())
+            if error == ERROR_INVALID_PARAMETER:
+                return False
+            raise RuntimeError(
+                f"cannot verify whether Weixin PID {pid} is still running "
+                f"(Win32 error {error})"
+            )
+        try:
+            wait_result = int(kernel32.WaitForSingleObject(handle, 0))
+            if wait_result == WAIT_TIMEOUT:
+                return True
+            if wait_result == WAIT_OBJECT_0:
+                return False
+            raise RuntimeError(
+                f"cannot query Weixin PID {pid} state (wait result {wait_result})"
+            )
+        finally:
+            kernel32.CloseHandle(handle)
+
     def terminate_process(self, pid: int) -> None:
         self._require_windows()
         handle = ctypes.windll.kernel32.OpenProcess(
@@ -235,6 +314,34 @@ class NativeGateBackend:
             ctypes.windll.kernel32.WaitForSingleObject(handle, 5_000)
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
+
+    def terminate_process_tree(
+        self, pid: int, *, wait_seconds: float = 5.0
+    ) -> None:
+        """Terminate the verified Weixin process and all of its children."""
+
+        self._require_windows()
+        result = subprocess.run(
+            ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        process_alive = self.process_exists(pid)
+        while process_alive:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.1, remaining))
+            process_alive = self.process_exists(pid)
+        if process_alive:
+            detail = (result.stderr or result.stdout or "").strip()
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"Weixin process tree is still running after taskkill{suffix}"
+            )
 
     @staticmethod
     def start_process(path: str) -> None:
@@ -283,11 +390,132 @@ class NativeGateBackend:
         )
 
 
+def _process_start_time(backend: Any, pid: int) -> str:
+    reader = getattr(backend, "process_start_time", None)
+    return str(reader(pid)) if callable(reader) else f"pid:{pid}"
+
+
+def restore_gate_lease(
+    backend: Any | None = None,
+    journal: GateLeaseJournal | None = None,
+) -> dict[str, object]:
+    """Restore an abandoned gate lease without creating any UIA objects."""
+
+    backend = backend or NativeGateBackend()
+    journal = journal or GateLeaseJournal.from_environment()
+    record = journal.load()
+    if record is None:
+        return {"restored": False, "reason": "no_lease"}
+
+    same_process = False
+    gate_restored = not bool(record["gateOwned"])
+    handle = None
+    try:
+        pid = int(record["pid"])
+        process_exists = getattr(backend, "process_exists", None)
+        try:
+            process_alive = (
+                bool(process_exists(pid)) if callable(process_exists) else True
+            )
+        except Exception as exc:
+            raise AccessibilitySafetyError(
+                f"cannot verify stale gate lease process identity: {exc}"
+            ) from exc
+        if process_alive:
+            try:
+                current_start_time = _process_start_time(backend, pid)
+            except Exception as exc:
+                raise AccessibilitySafetyError(
+                    f"cannot verify stale gate lease process identity: {exc}"
+                ) from exc
+            same_process = current_start_time == str(record["processStartTime"])
+        if same_process:
+            module = backend.find_module(pid, "Weixin.dll")
+            version = str(backend.file_version(module.path))
+            if version != str(record["version"]):
+                raise AccessibilitySafetyError(
+                    "stale gate lease version no longer matches the live process"
+                )
+            profile = get_weixin_profile(version)
+            if int(profile.gate_rva) != int(record["gateRva"]):
+                raise AccessibilitySafetyError(
+                    "stale gate lease does not match the verified profile"
+                )
+            if profile.gate_rva >= module.size:
+                raise AccessibilitySafetyError(
+                    "stale gate lease RVA exceeds the loaded module size"
+                )
+            _section, flags = backend.pe_section_for_rva(
+                module.path, profile.gate_rva
+            )
+            if not flags & IMAGE_SCN_MEM_WRITE:
+                raise AccessibilitySafetyError(
+                    "stale gate lease points to a non-writable section"
+                )
+            handle = backend.open_process(pid)
+            address = module.base + profile.gate_rva
+            current = backend.read_byte(handle, address)
+            if current not in (0, 1):
+                raise AccessibilitySafetyError(
+                    f"unexpected gate value {current!r} during lease recovery"
+                )
+            original = int(record["originalGate"])
+            if bool(record["gateOwned"]) and current != original:
+                if not backend.write_byte(handle, address, original):
+                    raise AccessibilitySafetyError(
+                        "failed to restore gate from stale lease"
+                    )
+                if backend.read_byte(handle, address) != original:
+                    raise AccessibilitySafetyError(
+                        "stale gate lease restore verification failed"
+                    )
+            gate_restored = True
+
+        # A replaced or exited process no longer owns its memory gate. The
+        # session-wide screen-reader flag still belongs to this lease.
+        if not same_process:
+            gate_restored = True
+        if gate_restored and bool(record["screenReaderOwned"]):
+            original_screen_reader = bool(record["originalScreenReader"])
+            if bool(backend.get_screen_reader()) != original_screen_reader:
+                if not backend.set_screen_reader(original_screen_reader):
+                    raise AccessibilitySafetyError(
+                        "failed to restore screen-reader flag from stale lease"
+                    )
+                if bool(backend.get_screen_reader()) != original_screen_reader:
+                    raise AccessibilitySafetyError(
+                        "stale screen-reader restore verification failed"
+                    )
+        journal.clear()
+        return {
+            "restored": True,
+            "reason": "stale_lease_recovered" if same_process else "process_changed",
+        }
+    except AccessibilitySafetyError:
+        raise
+    except Exception as exc:
+        raise AccessibilitySafetyError(
+            f"gate lease recovery failed: {exc}"
+        ) from exc
+    finally:
+        if handle is not None:
+            backend.close_process(handle)
+
+
 class WeixinAccessibilitySession:
     """Validated, reversible activation of Weixin's UIA accessibility tree."""
 
-    def __init__(self, backend: Any | None = None):
+    def __init__(
+        self,
+        backend: Any | None = None,
+        *,
+        lease_journal: GateLeaseJournal | None = None,
+        session_generation: int = 0,
+        screen_reader_restore_value: bool | None = None,
+    ):
         self.backend = backend or NativeGateBackend()
+        self.lease_journal = lease_journal
+        self.session_generation = int(session_generation)
         self.hwnd = 0
         self.pid = 0
         self.module: ProcessModule | None = None
@@ -298,7 +526,31 @@ class WeixinAccessibilitySession:
         self._handle = None
         self._original_gate: int | None = None
         self._original_screen_reader: bool | None = None
+        self._screen_reader_restore_value = screen_reader_restore_value
+        self._process_start_time = ""
         self.window_restore: WindowRestoreResult | None = None
+
+    @property
+    def process_start_time(self) -> str:
+        return self._process_start_time
+
+    @property
+    def screen_reader_restore_value(self) -> bool | None:
+        return self._original_screen_reader
+
+    def _same_process_instance(self) -> bool:
+        process_exists = getattr(self.backend, "process_exists", None)
+        if not callable(process_exists):
+            return True
+        try:
+            if not bool(process_exists(self.pid)):
+                return False
+            current_start_time = _process_start_time(self.backend, self.pid)
+        except Exception as exc:
+            raise AccessibilitySafetyError(
+                f"cannot verify live gate process identity: {exc}"
+            ) from exc
+        return current_start_time == self._process_start_time
 
     def __enter__(self) -> "WeixinAccessibilitySession":
         prepare = getattr(self.backend, "prepare_main_window", None)
@@ -325,6 +577,7 @@ class WeixinAccessibilitySession:
                 raise RuntimeError("Weixin main window was not found")
             self.pid = int(self.backend.get_window_pid(self.hwnd))
         self.module = self.backend.find_module(self.pid, "Weixin.dll")
+        self._process_start_time = _process_start_time(self.backend, self.pid)
         self.version = str(self.backend.file_version(self.module.path))
         self.profile = get_weixin_profile(self.version)
         if self.profile.gate_rva >= self.module.size:
@@ -350,7 +603,24 @@ class WeixinAccessibilitySession:
                 raise AccessibilitySafetyError(
                     f"unexpected gate value {self._original_gate!r}; refusing to write"
                 )
-            self._original_screen_reader = bool(self.backend.get_screen_reader())
+            current_screen_reader = bool(self.backend.get_screen_reader())
+            self._original_screen_reader = (
+                current_screen_reader
+                if self._screen_reader_restore_value is None
+                else bool(self._screen_reader_restore_value)
+            )
+            if self.lease_journal is not None:
+                self.lease_journal.mark(
+                    pid=self.pid,
+                    process_start_time=self._process_start_time,
+                    version=self.version,
+                    gate_rva=self.profile.gate_rva,
+                    original_gate=self._original_gate,
+                    original_screen_reader=self._original_screen_reader,
+                    gate_owned=self._original_gate == 0,
+                    screen_reader_owned=not self._original_screen_reader,
+                    session_generation=self.session_generation,
+                )
             if self._original_gate == 0:
                 if not self.backend.write_byte(self._handle, self.gate_address, 1):
                     raise AccessibilitySafetyError(
@@ -360,14 +630,11 @@ class WeixinAccessibilitySession:
                     raise AccessibilitySafetyError(
                         "Weixin accessibility gate write-back failed"
                     )
-            # Weixin 4.1.13.65 materializes its MMUI tree only when this
-            # notification arrives after the runtime gate is active.  Notify
-            # even when the flag was already true; setting the value is also
-            # the broadcast used by the verified live probe.
-            if not self.backend.set_screen_reader(True):
-                raise AccessibilitySafetyError(
-                    "failed to notify the screen-reader session flag"
-                )
+            if not current_screen_reader:
+                if not self.backend.set_screen_reader(True):
+                    raise AccessibilitySafetyError(
+                        "failed to notify the screen-reader session flag"
+                    )
             if not self.backend.get_screen_reader():
                 raise AccessibilitySafetyError(
                     "screen-reader session flag notification did not persist"
@@ -384,7 +651,7 @@ class WeixinAccessibilitySession:
                 raise AccessibilitySafetyError(str(exc)) from exc
             raise
 
-    def close(self) -> None:
+    def close(self, *, preserve_screen_reader: bool = False) -> None:
         cleanup_error: Exception | None = None
         gate_was_restored = True
 
@@ -393,7 +660,8 @@ class WeixinAccessibilitySession:
         # leaving Weixin in the inconsistent gate=1/screen-reader=False state.
         if self._handle is not None:
             try:
-                if (
+                same_process = self._same_process_instance()
+                if same_process and (
                     self._original_gate is not None
                     and self.backend.read_byte(self._handle, self.gate_address)
                     != self._original_gate
@@ -425,7 +693,7 @@ class WeixinAccessibilitySession:
                     finally:
                         self._handle = None
                         self._original_gate = None
-        if self._original_screen_reader is not None:
+        if self._original_screen_reader is not None and not preserve_screen_reader:
             screen_reader_was_restored = False
             try:
                 if gate_was_restored:
@@ -457,6 +725,13 @@ class WeixinAccessibilitySession:
             if isinstance(cleanup_error, AccessibilitySafetyError):
                 raise cleanup_error
             raise AccessibilitySafetyError(str(cleanup_error)) from cleanup_error
+        if (
+            self.lease_journal is not None
+            and self._handle is None
+            and self._original_gate is None
+            and self._original_screen_reader is None
+        ):
+            self.lease_journal.clear()
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
@@ -465,7 +740,11 @@ class WeixinAccessibilitySession:
 __all__ = [
     "AccessibilitySafetyError",
     "IMAGE_SCN_MEM_WRITE",
+    "SMTO_ABORTIFHUNG",
+    "SMTO_BLOCK",
+    "WM_NULL",
     "NativeGateBackend",
     "ProcessModule",
     "WeixinAccessibilitySession",
+    "restore_gate_lease",
 ]

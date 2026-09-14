@@ -54,6 +54,18 @@ class _AutomationClient:
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def reset(cls) -> None:
+        instance = cls._instance
+        cls._instance = None
+        if instance is None:
+            return
+        for name in ("ViewWalker", "IUIAutomation", "UIAutomationCore"):
+            try:
+                setattr(instance, name, None)
+            except (AttributeError, TypeError):
+                pass
+
     def __init__(self):
         tryCount = 3
         for retry in range(tryCount):
@@ -1811,6 +1823,25 @@ def SetCursorPos(x: int, y: int) -> bool:
     return bool(ctypes.windll.user32.SetCursorPos(x, y))
 
 
+def GetPhysicalCursorPos() -> Tuple[int, int]:
+    """Return the cursor in physical screen coordinates used by UIA bounds."""
+    function = getattr(ctypes.windll.user32, "GetPhysicalCursorPos", None)
+    if function is None:
+        return GetCursorPos()
+    point = ctypes.wintypes.POINT(0, 0)
+    if not function(ctypes.byref(point)):
+        raise RuntimeError("failed to read the physical cursor position")
+    return point.x, point.y
+
+
+def SetPhysicalCursorPos(x: int, y: int) -> bool:
+    """Move the cursor using UIA's physical screen coordinate space."""
+    function = getattr(ctypes.windll.user32, "SetPhysicalCursorPos", None)
+    if function is None:
+        return SetCursorPos(x, y)
+    return bool(function(x, y))
+
+
 def GetDoubleClickTime() -> int:
     """
     GetDoubleClickTime from Win32.
@@ -1825,17 +1856,21 @@ def mouse_event(dwFlags: int, dx: int, dy: int, dwData: int, dwExtraInfo: int) -
 
 
 def _ClickAtCursor(x: int, y: int, downFlag: int, upFlag: int, waitTime: float) -> None:
-    """Move to a virtual-screen point and press without re-normalizing it.
+    """Move to a physical virtual-screen point without re-normalizing it.
 
-    ``SetCursorPos`` accepts negative coordinates on monitors to the left of the
-    primary display.  Passing those coordinates through ``MOUSEEVENTF_ABSOLUTE``
-    a second time interprets them relative to the primary screen and can move the
-    pointer elsewhere.  Button-only events keep the verified cursor position.
+    UI Automation bounding rectangles are physical coordinates. The explicit
+    physical cursor APIs prevent DPI virtualization from translating them when
+    the host process or another UI toolkit changes thread awareness. Button-only
+    events also preserve negative coordinates on monitors left of the primary.
     """
-    if not SetCursorPos(x, y):
+    if not SetPhysicalCursorPos(x, y):
         raise RuntimeError(f"cursor move failed: ({x}, {y})")
-    if GetCursorPos() != (x, y):
-        raise RuntimeError(f"cursor position mismatch: expected=({x}, {y})")
+    actual = GetPhysicalCursorPos()
+    if actual != (x, y):
+        raise RuntimeError(
+            "cursor position mismatch: "
+            f"expected=({x}, {y}), actual=({actual[0]}, {actual[1]})"
+        )
     mouse_event(downFlag, 0, 0, 0, 0)
     try:
         time.sleep(0.05)
@@ -2096,7 +2131,7 @@ def SetDpiAwareness(dpiAwarenessPerMonitor: bool = True) -> int:
         # https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddpiawarenesscontext
         # Windows 10 1607+
         ctypes.windll.user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
-        context = DpiAwarenessContext.DpiAwarenessContextPerMonitorAware if dpiAwarenessPerMonitor else DpiAwarenessContext.DpiAwarenessContextUnaware 
+        context = DpiAwarenessContext.DpiAwarenessContextPerMonitorAwareV2 if dpiAwarenessPerMonitor else DpiAwarenessContext.DpiAwarenessContextUnaware
         oldContext = ctypes.windll.user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(context))
         return oldContext
     except Exception as ex:
@@ -7585,6 +7620,11 @@ def UninitializeUIAutomationInCurrentThread() -> None:
     You must call this function when the new thread exits if you have called InitializeUIAutomationInCurrentThread in the same thread.
     """
     comtypes.CoUninitialize()
+
+
+def ResetUIAutomationClientInCurrentThread() -> None:
+    """Release UIA COM proxies before the owning thread uninitializes COM."""
+    _AutomationClient.reset()
 
 
 def SetGlobalSearchTimeout(seconds: float) -> None:

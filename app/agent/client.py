@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -12,6 +13,8 @@ from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signa
 from PySide6.QtNetwork import QLocalSocket
 
 from .rpc import JsonLineDecoder, encode_frame
+from .diagnostics import default_log_dir
+from .journal import SafetyJournal
 
 
 class AgentClient(QObject):
@@ -28,9 +31,12 @@ class AgentClient(QObject):
         *,
         heartbeat_timeout_ms: int = 3_500,
         journal_path: str | None = None,
+        diagnostics_log_dir: str | os.PathLike[str] | None = None,
+        stderr_max_bytes: int = 2 * 1024 * 1024,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
+        self._gui_instance_id = uuid.uuid4().hex
         self._socket = QLocalSocket(self)
         self._socket.connected.connect(self._on_socket_connected)
         self._socket.disconnected.connect(self._on_socket_disconnected)
@@ -38,6 +44,8 @@ class AgentClient(QObject):
         self._socket.errorOccurred.connect(self._on_socket_error)
         self._decoder = JsonLineDecoder()
         self._process: QProcess | None = None
+        self._recovery_process: QProcess | None = None
+        self._pending_start_after_recovery = False
         self._executable: str | None = None
         self._pipe_name = ""
         self._token = ""
@@ -45,6 +53,15 @@ class AgentClient(QObject):
             Path(tempfile.gettempdir())
             / f"wuge-wechat-agent-{os.getpid()}-{uuid.uuid4().hex}-safety.json"
         )
+        self._gate_lease_path = self._journal_path + ".gate"
+        log_dir = (
+            Path(diagnostics_log_dir)
+            if diagnostics_log_dir is not None
+            else default_log_dir()
+        )
+        self._stderr_path = log_dir / "agent-stderr.log"
+        self._stderr_max_bytes = max(1, int(stderr_max_bytes))
+        self._stderr_backup_count = 2
         self._state = "stopped"
         self._connected = False
         self._next_id = 1
@@ -54,10 +71,21 @@ class AgentClient(QObject):
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(max(100, heartbeat_timeout_ms // 3))
         self._watchdog.timeout.connect(self._check_heartbeat)
+        self._gate_recovery_timeout = QTimer(self)
+        self._gate_recovery_timeout.setSingleShot(True)
+        self._gate_recovery_timeout.setInterval(3_500)
+        self._gate_recovery_timeout.timeout.connect(
+            self._on_gate_recovery_timeout
+        )
         self._retry = QTimer(self)
         self._retry.setInterval(100)
         self._retry.timeout.connect(self._retry_connection)
         self._connect_attempts = 0
+        self._shutdown_requested = False
+
+    @property
+    def gui_instance_id(self) -> str:
+        return self._gui_instance_id
 
     @property
     def state(self) -> str:
@@ -88,6 +116,12 @@ class AgentClient(QObject):
             return
         if executable is not None:
             self._executable = executable
+        if self._recovery_process is not None:
+            self._pending_start_after_recovery = True
+            self._shutdown_requested = False
+            self._set_state("recovering_gate")
+            return
+        self._shutdown_requested = False
         self._pipe_name = "wuge-wechat-agent-" + uuid.uuid4().hex
         self._token = secrets.token_hex(32)
         process = QProcess(self)
@@ -95,11 +129,14 @@ class AgentClient(QObject):
         environment.insert("WECHAT_AGENT_PIPE", self._pipe_name)
         environment.insert("WECHAT_AGENT_TOKEN", self._token)
         environment.insert("WECHAT_AGENT_JOURNAL", self._journal_path)
+        environment.insert("WECHAT_AGENT_GATE_LEASE", self._gate_lease_path)
+        environment.insert("WECHAT_GUI_INSTANCE_ID", self._gui_instance_id)
         process.setProcessEnvironment(environment)
         process.errorOccurred.connect(
             lambda error: self.processError.emit(process.errorString())
         )
         process.finished.connect(self._on_process_finished)
+        process.readyReadStandardError.connect(self._capture_process_stderr)
         if self._executable:
             process.setProgram(self._executable)
         elif getattr(sys, "frozen", False):
@@ -112,6 +149,16 @@ class AgentClient(QObject):
         process.start()
         self._connect_attempts = 0
         self._retry.start()
+
+    def grant_foreground_permission(self) -> bool:
+        if os.name != "nt" or self._process is None:
+            return False
+        pid = int(self._process.processId())
+        if not pid:
+            return False
+        import ctypes
+
+        return bool(ctypes.windll.user32.AllowSetForegroundWindow(pid))
 
     def connect_to_server(self, pipe_name: str, token: str) -> None:
         self._pipe_name = pipe_name
@@ -147,10 +194,70 @@ class AgentClient(QObject):
             self._set_state("error")
 
     def _on_process_finished(self, _exit_code: int, _exit_status) -> None:
+        unexpected = self._state != "stopped" and not self._shutdown_requested
+        shutdown_recovery = (
+            self._shutdown_requested and self._state != "stopped"
+            and (
+                _exit_code != 0 or _exit_status == QProcess.ExitStatus.CrashExit
+                or Path(self._gate_lease_path).is_file()
+            )
+        )
+        self._capture_process_stderr()
         self._process = None
         if self._state != "stopped":
             self._set_state("disconnected")
             self._set_connected(False)
+        if shutdown_recovery:
+            # The GUI may exit immediately after waitForFinished returns.
+            self._run_gate_recovery()
+        elif unexpected:
+            self._start_gate_recovery_async()
+
+    def _capture_process_stderr(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        raw = bytes(process.readAllStandardError())
+        if raw:
+            self._write_agent_stderr(raw)
+
+    def _write_agent_stderr(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", errors="replace")
+        text = re.sub(
+            r"(?i)\b[0-9a-f]{32,}\b",
+            "[redacted-token]",
+            text,
+        )
+        text = re.sub(
+            r"(?<!\d)\d{7,20}(?!\d)",
+            "[redacted-number]",
+            text,
+        )
+        encoded = text.encode("utf-8")
+        self._stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        current_size = (
+            self._stderr_path.stat().st_size
+            if self._stderr_path.exists()
+            else 0
+        )
+        if current_size and current_size + len(encoded) > self._stderr_max_bytes:
+            for index in range(self._stderr_backup_count, 0, -1):
+                source = (
+                    self._stderr_path
+                    if index == 1
+                    else self._stderr_path.with_name(
+                        f"{self._stderr_path.name}.{index - 1}"
+                    )
+                )
+                destination = self._stderr_path.with_name(
+                    f"{self._stderr_path.name}.{index}"
+                )
+                if destination.exists():
+                    destination.unlink()
+                if source.exists():
+                    source.replace(destination)
+        with self._stderr_path.open("ab") as stream:
+            stream.write(encoded)
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> int:
         request_id = self._next_id
@@ -226,6 +333,7 @@ class AgentClient(QObject):
         self._set_state("disconnected")
 
     def close(self) -> None:
+        self._pending_start_after_recovery = False
         self._retry.stop()
         self._watchdog.stop()
         self._set_state("stopped")
@@ -235,17 +343,152 @@ class AgentClient(QObject):
             socket.abort()
         process = self._process
         self._process = None
+        forced = process is not None
         if process is not None:
             process.terminate()
             if not process.waitForFinished(1_500):
                 process.kill()
                 process.waitForFinished(500)
+            self._process = process
+            self._capture_process_stderr()
+            self._process = None
+        if forced:
+            self._run_gate_recovery()
+
+    def _run_gate_recovery(self) -> bool:
+        """Best-effort cleanup after an Agent that could not exit normally."""
+
+        process = QProcess()
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("WECHAT_AGENT_GATE_LEASE", self._gate_lease_path)
+        environment.insert("WECHAT_GUI_INSTANCE_ID", self._gui_instance_id)
+        process.setProcessEnvironment(environment)
+        if self._executable:
+            process.setProgram(self._executable)
+            process.setArguments(["--recover-gate"])
+        elif getattr(sys, "frozen", False):
+            process.setProgram(str(Path(sys.executable).with_name("wechat-agent.exe")))
+            process.setArguments(["--recover-gate"])
+        else:
+            process.setProgram(sys.executable)
+            process.setArguments(["-m", "app.agent.main", "--recover-gate"])
+        process.start()
+        if not process.waitForFinished(3_000):
+            process.kill()
+            process.waitForFinished(500)
+            self.processError.emit("wechat-agent gate recovery timed out")
+            return False
+        if process.exitCode() != 0:
+            detail = bytes(process.readAllStandardError()).decode(
+                "utf-8", errors="replace"
+            ).strip()
+            self.processError.emit(detail or "wechat-agent gate recovery failed")
+            return False
+        return True
+
+    def _start_gate_recovery_async(self) -> None:
+        if self._recovery_process is not None:
+            return
+        process = QProcess(self)
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("WECHAT_AGENT_GATE_LEASE", self._gate_lease_path)
+        environment.insert("WECHAT_GUI_INSTANCE_ID", self._gui_instance_id)
+        process.setProcessEnvironment(environment)
+        if self._executable:
+            process.setProgram(self._executable)
+            process.setArguments(["--recover-gate"])
+        elif getattr(sys, "frozen", False):
+            process.setProgram(
+                str(Path(sys.executable).with_name("wechat-agent.exe"))
+            )
+            process.setArguments(["--recover-gate"])
+        else:
+            process.setProgram(sys.executable)
+            process.setArguments(
+                ["-m", "app.agent.main", "--recover-gate"]
+            )
+
+        def finished(exit_code, _exit_status):
+            successful = int(exit_code) == 0
+            detail = ""
+            if not successful:
+                detail = bytes(process.readAllStandardError()).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+            self._finish_gate_recovery(
+                process,
+                successful=successful,
+                detail=detail or (
+                    "" if successful else "wechat-agent gate recovery failed"
+                ),
+            )
+
+        def failed(error):
+            if error != QProcess.ProcessError.FailedToStart:
+                return
+            self._finish_gate_recovery(
+                process,
+                successful=False,
+                detail=process.errorString()
+                or "wechat-agent gate recovery failed to start",
+            )
+
+        process.finished.connect(finished)
+        process.errorOccurred.connect(failed)
+        self._recovery_process = process
+        self._gate_recovery_timeout.start()
+        process.start()
+
+    def _finish_gate_recovery(
+        self,
+        process,
+        *,
+        successful: bool,
+        detail: str = "",
+    ) -> None:
+        if self._recovery_process is not process:
+            return
+        self._gate_recovery_timeout.stop()
+        self._recovery_process = None
+        should_start = bool(
+            successful
+            and self._pending_start_after_recovery
+            and self._state != "stopped"
+        )
+        self._pending_start_after_recovery = False
+        if not successful:
+            if self._state != "stopped":
+                self._set_state("error")
+            self.processError.emit(
+                detail or "wechat-agent gate recovery failed"
+            )
+        process.deleteLater()
+        if should_start:
+            QTimer.singleShot(0, self.start)
+
+    def _on_gate_recovery_timeout(self) -> None:
+        process = self._recovery_process
+        if process is None:
+            return
+        self._gate_recovery_timeout.stop()
+        self._recovery_process = None
+        self._pending_start_after_recovery = False
+        if self._state != "stopped":
+            self._set_state("error")
+        self.processError.emit("wechat-agent gate recovery timed out")
+        process.kill()
+        process.waitForFinished(500)
+        process.deleteLater()
 
     def restart(self) -> None:
         self.close()
         self.start(self._executable)
 
+    def recovery_snapshot(self) -> dict[str, Any] | None:
+        return SafetyJournal(self._journal_path).load()
+
     def shutdown(self, grace_ms: int = 2_500) -> None:
+        self._shutdown_requested = True
         if self._connected:
             try:
                 self.call("agent.shutdown")

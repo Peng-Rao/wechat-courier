@@ -34,6 +34,11 @@ def test_friend_workspace_has_editable_import_table_and_selection_limit():
     assert "/ 20" in source
     assert "startFriends" in source
     assert 'status === "working" ? "执行中"' in source
+    assert 'status === "success" ? "预检完成"' in source
+    assert "开始表单预检" in source
+    assert "最终提交当前未开放" in source
+    assert "开始添加" not in source
+    assert "已提交" not in source
 
 
 def test_friend_workspace_exposes_right_click_add_and_delete_actions():
@@ -70,12 +75,31 @@ def test_active_task_locks_navigation_settings_and_configuration_controls():
 def test_monitor_uses_chinese_state_machine_and_runtime_log():
     source = qml("TaskMonitor.qml")
     assert "消息发送状态" in source
-    assert "好友申请状态" in source
+    assert "好友表单预检状态" in source
     assert "currentStepCode" in source
     assert "runtimeLogs" in source
     assert "发送结果已确认" in source
-    assert "提交结果已确认" in source
+    assert "表单预检已完成" in source
+    assert "提交结果已确认" not in source
+    assert "好友表单预检状态" in source
     assert 'result === "working" ? "执行中"' in source
+
+
+def test_monitor_distinguishes_completion_from_results_and_gates_recovery():
+    source = qml("TaskMonitor.qml")
+
+    assert "处理进度" in source
+    assert "成功 " in source
+    assert "失败 " in source
+    assert "未知 " in source
+    assert "successCount" in source
+    assert "failureCount" in source
+    assert "unknownCount" in source
+    assert "safeRetryAvailable" in source
+    assert "安全重试本条" in source
+    assert "root.agentBackend.windowResponsive" in source
+    assert "检测微信恢复" in source
+    assert "exportDiagnostics" in source
 
 
 def test_settings_center_contains_task_recovery_and_appearance_sections():
@@ -131,8 +155,11 @@ def test_main_window_fits_available_geometry_before_first_show():
 
 def test_titlebar_displays_agent_and_weixin_health():
     source = qml("WxTitleBar.qml")
-    assert "Agent" in source
-    assert "微信" in source
+    assert "Agent 在线" in source
+    assert "版本受支持" in source
+    assert "自动化已就绪" in source
+    assert "windowResponsive" in source
+    assert "sessionReady" in source
     assert "wechatVersion" in source
     assert "openSettings" in source
 

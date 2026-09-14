@@ -67,15 +67,21 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
-    function accountField() { return findChild(workspace, "friendAccountField") }
+    function accountField() {
+        // TableView may retain pooled delegates with the same objectName.
+        var cell = table().itemAtCell(Qt.point(0, 0))
+        return cell ? findChild(cell, "friendAccountField") : null
+    }
     function init() {
-        workspaceWindow.requestActivate()
         taskBackend.active = false
         menu().close()
+        tryCompare(menu(), "visible", false)
         friendModel.clear()
         friendModel.append({ account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
         wait(100)
+        workspaceWindow.requestActivate()
+        tryCompare(workspaceWindow, "active", true)
     }
 
     function test_row_right_click_adds_a_row() {

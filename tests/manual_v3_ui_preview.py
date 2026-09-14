@@ -22,13 +22,18 @@ from app.friend_import import load_friend_records
 def render(output: Path, workspace: int = 0) -> int:
     application = QGuiApplication.instance() or QGuiApplication(sys.argv)
     settings = QSettings(str(output.with_suffix(".ini")), QSettings.IniFormat)
-    backend = BackendController(version="0.3.0", settings=settings)
+    backend = BackendController(version="0.3.1", settings=settings)
     backend.agent._connected = True
     backend.agent.applyInspection(
         {
             "connected": True,
             "version": "4.1.13.65",
             "supported": True,
+            "processDetected": True,
+            "versionSupported": True,
+            "sessionReady": True,
+            "sessionGeneration": 2,
+            "windowResponsive": True,
             "detail": "微信版本已验证",
         }
     )
