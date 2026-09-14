@@ -7,6 +7,7 @@ import pytest
 from app.agent.native_driver import (
     NativeWeixinDriver,
     RiskControlError,
+    SearchCandidate,
     extract_contact_results,
     extract_exact_forward_candidates,
     filter_recent_message_bubbles,
@@ -24,6 +25,22 @@ class FakeControl:
     ClassName: str = ""
     AutomationId: str = ""
     IsEnabled: bool = True
+    IsOffscreen: bool = False
+    BoundingRectangle: object | None = None
+
+
+@dataclass(frozen=True)
+class FakeRect:
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+    def width(self):
+        return self.right - self.left
+
+    def height(self):
+        return self.bottom - self.top
 
 
 def test_find_exact_control_requires_all_selector_fields():
@@ -40,18 +57,269 @@ def test_find_exact_control_requires_all_selector_fields():
     assert found is exact
 
 
-def test_contact_results_only_include_materialized_search_items():
+def test_contact_results_collect_exact_identities_within_each_row_boundary():
     section = FakeControl("联系人", "CustomControl", "mmui::XTableCell")
     alice = FakeControl(
-        "Alice", "ListItemControl", "mmui::SearchContentCellView", "search_item_1"
+        "Alice 备注", "ListItemControl", "mmui::SearchContentCellView", "search_item_1"
     )
-    function = FakeControl(
-        "搜索网络结果", "ListItemControl", "mmui::SearchContentCellView", "search_item_function_1"
+    nickname = FakeControl("Alice 昵称", "TextControl", "mmui::Label")
+    duplicate = FakeControl("Alice 备注", "TextControl", "mmui::Label")
+    bob = FakeControl(
+        "Bob", "ListItemControl", "mmui::SearchContentCellView", "search_item_2"
     )
 
-    assert extract_contact_results([(section, 1), (alice, 2), (function, 2)]) == [
-        ("Alice", alice)
-    ]
+    results = extract_contact_results(
+        [(section, 1), (alice, 2), (nickname, 3), (duplicate, 3), (bob, 2)]
+    )
+
+    assert len(results) == 2
+    assert results[0].display_name == "Alice 备注"
+    assert results[0].identities == frozenset({"Alice 备注", "Alice 昵称"})
+    assert results[0].automation_id == "search_item_1"
+    assert results[0].row_index == 0
+    assert results[0].result_type == "contact"
+
+
+def test_contact_results_only_whitelist_file_transfer_function_and_filter_network():
+    transfer = FakeControl(
+        "文件传输助手",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_function_1",
+    )
+    other_function = FakeControl(
+        "扫一扫",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_function_2",
+    )
+    network = FakeControl(
+        "搜索网络结果",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_web_1",
+    )
+
+    results = extract_contact_results(
+        [(transfer, 2), (other_function, 2), (network, 2)]
+    )
+
+    assert [candidate.display_name for candidate in results] == ["文件传输助手"]
+    assert results[0].result_type == "function"
+
+
+def test_search_waits_for_refreshed_results_instead_of_accepting_old_nonempty_list():
+    class SearchEdit(FakeControl):
+        value = "old"
+
+    class Actions:
+        @staticmethod
+        def set_text(control, value, **_kwargs):
+            control.value = value
+
+        @staticmethod
+        def read_text(control):
+            return control.value
+
+    class PollingWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            for _ in range(8):
+                if predicate():
+                    return True
+            return False
+
+    old = FakeControl(
+        "旧结果", "ListItemControl", "mmui::SearchContentCellView", "search_item_1"
+    )
+    new = FakeControl(
+        "新结果", "ListItemControl", "mmui::SearchContentCellView", "search_item_2"
+    )
+    search_list = FakeControl(AutomationId="search_list")
+    snapshots = iter(
+        [[(old, 1)], [(old, 1)], [(new, 1)], [(new, 1)]]
+    )
+
+    class Uia:
+        @staticmethod
+        def WalkControl(*_args, **_kwargs):
+            return next(snapshots, [(new, 1)])
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver.ensure_search_ready = lambda: True
+    driver._search_edit = SearchEdit()
+    driver._actions = Actions()
+    driver._waiter = PollingWaiter()
+    driver._session = type("Session", (), {"profile": type("P", (), {"search_list_automation_id": "search_list"})()})()
+    driver._uia = Uia()
+    driver._all_nodes = lambda: [(search_list, 1)]
+
+    results = driver.search_contacts("新结果")
+
+    assert [candidate.display_name for candidate in results] == ["新结果"]
+    assert driver._search_edit.value == "新结果"
+
+
+def test_search_candidate_click_uses_valid_descendant_when_row_has_no_bounds():
+    row = FakeControl(
+        "Alice", "ListItemControl", "mmui::SearchContentCellView", "search_item_1"
+    )
+    child = FakeControl(
+        "Alice", "TextControl", "mmui::Label", BoundingRectangle=FakeRect(20, 20, 80, 50)
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    driver._uia = type(
+        "Uia",
+        (),
+        {
+            "WalkControl": staticmethod(lambda *_args, **_kwargs: [(child, 1)]),
+            "Click": staticmethod(lambda x, y: clicks.append((x, y))),
+        },
+    )()
+    clicks = []
+
+    driver._click_search_candidate(row)
+
+    assert clicks == [(50, 35)]
+
+
+def test_click_prefers_the_uia_clickable_point_inside_the_row():
+    row = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(20, 20, 80, 50),
+    )
+    row.GetClickablePoint = lambda: (25, 25, True)
+    clicks = []
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    driver._uia = type(
+        "Uia", (), {"Click": staticmethod(lambda x, y: clicks.append((x, y)))}
+    )()
+
+    driver._click_bounds(row)
+
+    assert clicks == [(25, 25)]
+
+
+def test_select_search_result_re_resolves_row_after_pattern_failure():
+    stale = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(20, 20, 80, 50),
+    )
+    fresh = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(100, 100, 160, 140),
+    )
+    stale.GetSelectionItemPattern = lambda: type(
+        "Pattern", (), {"Select": staticmethod(lambda **_kwargs: False)}
+    )()
+    candidate = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_1", 0, 1
+    )
+    clicked = []
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    driver._search_query = "Alice"
+    resolved = iter((stale, fresh))
+    driver._resolve_search_candidate = lambda _candidate: next(resolved)
+    driver._uia = type(
+        "Uia", (), {"Click": staticmethod(lambda x, y: clicked.append((x, y)))}
+    )()
+    driver.composer_ready = lambda: bool(clicked)
+    driver.current_chat_title = lambda: "Alice" if clicked else ""
+
+    driver.select_search_result(candidate)
+
+    assert clicked == [(130, 120)]
+
+
+def test_bind_window_rebinds_once_when_first_root_is_invisible(monkeypatch):
+    class Session:
+        def __init__(self, hwnd, root):
+            self.hwnd = hwnd
+            self.pid = hwnd + 100
+            self.version = "4.1.13.65"
+            self.root = root
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    invisible = FakeControl(
+        IsOffscreen=True, BoundingRectangle=FakeRect(0, 0, 0, 0)
+    )
+    visible = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    first = Session(1, invisible)
+    second = Session(2, visible)
+    sessions = iter((first, second))
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._ensure_session = lambda: (
+        setattr(driver, "_session", next(sessions))
+        if driver._session is None
+        else None
+    )
+    driver._walk = lambda _hwnd: (driver._session.root, [])
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
+    )()
+    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+
+    result = driver.bind_window()
+
+    assert result["hwnd"] == 2
+    assert first.closed is True
+
+
+def test_chat_title_ignores_matching_text_inside_search_popup_and_requires_composer():
+    root = FakeControl(BoundingRectangle=FakeRect(0, 0, 1000, 800))
+    popup = FakeControl(ClassName="mmui::XPopover")
+    search_title = FakeControl(
+        "Alice", "TextControl", BoundingRectangle=FakeRect(600, 50, 800, 90)
+    )
+    chat_title = FakeControl(
+        "Alice", "TextControl", BoundingRectangle=FakeRect(600, 100, 800, 140)
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._selected_target = "Alice"
+    driver._root = root
+    driver._session = type(
+        "Session", (), {"hwnd": 1, "profile": type("P", (), {"search_popup_class": "mmui::XPopover", "search_list_automation_id": "search_list"})()}
+    )()
+    driver._walk = lambda _hwnd: (
+        root,
+        [(root, 0), (popup, 1), (search_title, 2), (chat_title, 1)],
+    )
+    driver._find_composer = lambda: object()
+
+    assert driver.current_chat_title() == "Alice"
+    driver._find_composer = lambda: None
+    assert driver.current_chat_title() == ""
+
+
+def test_message_verification_requires_a_new_matching_tail_and_empty_composer():
+    old = FakeControl("old", "TextControl", "mmui::ChatTextItemView")
+    new = FakeControl("hello", "TextControl", "mmui::ChatTextItemView")
+    old.GetRuntimeId = lambda: (1, 1)
+    new.GetRuntimeId = lambda: (1, 2)
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._waiter = type("W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())})()
+    driver._message_controls = lambda: [old, new]
+    driver.read_composer_text = lambda: ""
+    driver._all_nodes = lambda: []
+
+    assert driver.verify_sent((((1, 1), "old"),), "hello", timeout=0.1) is True
+
+    driver._message_controls = lambda: [old, new, FakeControl("other", "TextControl", "mmui::ChatTextItemView")]
+    assert driver.verify_sent((((1, 1), "old"),), "hello", timeout=0.1) is None
 
 
 def test_forward_candidates_require_one_exact_interactive_identity():

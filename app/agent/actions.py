@@ -32,6 +32,36 @@ def _call_pattern(pattern: Any, method_name: str, *args) -> bool:
     return result is not False
 
 
+def _safe_attr(control: Any, name: str, default: Any = "") -> Any:
+    try:
+        value = getattr(control, name)
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def describe_control(control: Any) -> str:
+    rectangle = _safe_attr(control, "BoundingRectangle", None)
+    if rectangle is None:
+        bounds = "missing"
+    else:
+        try:
+            bounds = (
+                f"({rectangle.left},{rectangle.top},"
+                f"{rectangle.right},{rectangle.bottom})"
+            )
+        except Exception:
+            bounds = "unreadable"
+    return (
+        f"ControlType={_safe_attr(control, 'ControlTypeName')!r}, "
+        f"ClassName={_safe_attr(control, 'ClassName')!r}, "
+        f"AutomationId={_safe_attr(control, 'AutomationId')!r}, "
+        f"enabled={bool(_safe_attr(control, 'IsEnabled', False))}, "
+        f"offscreen={bool(_safe_attr(control, 'IsOffscreen', True))}, "
+        f"bounds={bounds}"
+    )
+
+
 class VerifiedActions:
     """Pattern-first UIA actions with mandatory postcondition checks."""
 
@@ -56,8 +86,15 @@ class VerifiedActions:
         method: str,
         method_label: str,
         postcondition: Callable[[], bool],
+        resolve_control: Callable[[], Any] | None = None,
+        extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
+        def verified() -> bool:
+            return bool(postcondition()) and (
+                extra_postcondition is None or bool(extra_postcondition())
+            )
+
         pattern = _pattern(control, getter)
         if pattern is not None:
             try:
@@ -65,15 +102,41 @@ class VerifiedActions:
             except Exception:
                 invoked = False
             if invoked and self.waiter.wait(
-                postcondition, self.timeout, wake_event=wake_event
+                verified, self.timeout, wake_event=wake_event
             ):
                 return ActionResult(method_label)
 
-        self.click_fallback(control)
-        if self.waiter.wait(postcondition, self.timeout, wake_event=wake_event):
+        fallback_control = control
+        if resolve_control is not None:
+            try:
+                fallback_control = resolve_control()
+            except Exception as exc:
+                raise ActionVerificationError(
+                    f"action={method_label}; control re-resolution failed: {exc}; "
+                    f"{describe_control(control)}"
+                ) from exc
+            if fallback_control is None:
+                raise ActionVerificationError(
+                    f"action={method_label}; control re-resolution returned no control; "
+                    f"{describe_control(control)}"
+                )
+        try:
+            self.click_fallback(fallback_control)
+        except Exception as exc:
+            raise ActionVerificationError(
+                f"action={method_label}; click fallback failed: {exc}; "
+                f"{describe_control(fallback_control)}"
+            ) from exc
+        if self.waiter.wait(verified, self.timeout, wake_event=wake_event):
             return ActionResult("uia_bounds_click")
+        condition_label = (
+            "postcondition and extra postcondition"
+            if extra_postcondition
+            else "postcondition"
+        )
         raise ActionVerificationError(
-            f"{method_label} and UIA-bounds click did not satisfy the postcondition"
+            f"action={method_label}; pattern and click did not satisfy the "
+            f"{condition_label}; {describe_control(fallback_control)}"
         )
 
     def invoke(
@@ -81,6 +144,8 @@ class VerifiedActions:
         control: Any,
         postcondition: Callable[[], bool],
         *,
+        resolve_control: Callable[[], Any] | None = None,
+        extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
         return self._activate(
@@ -89,6 +154,8 @@ class VerifiedActions:
             method="Invoke",
             method_label="invoke_pattern",
             postcondition=postcondition,
+            resolve_control=resolve_control,
+            extra_postcondition=extra_postcondition,
             wake_event=wake_event,
         )
 
@@ -97,6 +164,8 @@ class VerifiedActions:
         control: Any,
         postcondition: Callable[[], bool],
         *,
+        resolve_control: Callable[[], Any] | None = None,
+        extra_postcondition: Callable[[], bool] | None = None,
         wake_event=None,
     ) -> ActionResult:
         return self._activate(
@@ -105,6 +174,8 @@ class VerifiedActions:
             method="Select",
             method_label="selection_item_pattern",
             postcondition=postcondition,
+            resolve_control=resolve_control,
+            extra_postcondition=extra_postcondition,
             wake_event=wake_event,
         )
 
@@ -144,14 +215,28 @@ class VerifiedActions:
                 ):
                     return ActionResult("value_pattern")
 
-        self.replace_text_fallback(control, value)
+        try:
+            self.replace_text_fallback(control, value)
+        except Exception as exc:
+            raise ActionVerificationError(
+                f"action=set_text; keyboard fallback failed: {exc}; "
+                f"{describe_control(control)}"
+            ) from exc
         if self.waiter.wait(
             lambda: self.read_text(control) == value,
             self.timeout,
             wake_event=wake_event,
         ):
             return ActionResult("keyboard_fallback")
-        raise ActionVerificationError("text input did not match after verified fallback")
+        raise ActionVerificationError(
+            "action=set_text; text input did not match after verified fallback; "
+            + describe_control(control)
+        )
 
 
-__all__ = ["ActionResult", "ActionVerificationError", "VerifiedActions"]
+__all__ = [
+    "ActionResult",
+    "ActionVerificationError",
+    "VerifiedActions",
+    "describe_control",
+]

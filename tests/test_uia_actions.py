@@ -34,10 +34,17 @@ class FakePattern:
 
 
 class FakeControl:
-    def __init__(self, *, invoke=None, selection=None, value=None):
+    def __init__(self, *, invoke=None, selection=None, value=None, name=""):
         self._invoke = invoke
         self._selection = selection
         self._value = value
+        self.Name = name
+        self.ControlTypeName = "ListItemControl"
+        self.ClassName = "mmui::SearchContentCellView"
+        self.AutomationId = "search_item_1"
+        self.IsEnabled = True
+        self.IsOffscreen = False
+        self.BoundingRectangle = None
 
     def GetInvokePattern(self):
         return self._invoke
@@ -82,6 +89,38 @@ def test_selection_falls_back_only_after_pattern_postcondition_fails():
     assert result.verified is True
 
 
+def test_selection_re_resolves_control_before_fallback_click():
+    stale = FakeControl(selection=FakePattern(), name="stale")
+    fresh = FakeControl(name="fresh")
+    clicked = []
+    actions = VerifiedActions(
+        waiter=ImmediateWaiter(),
+        click_fallback=lambda item: clicked.append(item.Name),
+        replace_text_fallback=lambda item, value: None,
+    )
+
+    result = actions.select(
+        stale,
+        lambda: bool(clicked),
+        resolve_control=lambda: fresh,
+    )
+
+    assert result.method == "uia_bounds_click"
+    assert clicked == ["fresh"]
+
+
+def test_action_requires_optional_extra_postcondition():
+    control = FakeControl(invoke=FakePattern())
+    actions = VerifiedActions(
+        waiter=ImmediateWaiter(),
+        click_fallback=lambda _item: None,
+        replace_text_fallback=lambda item, value: None,
+    )
+
+    with pytest.raises(ActionVerificationError, match="extra postcondition"):
+        actions.invoke(control, lambda: True, extra_postcondition=lambda: False)
+
+
 def test_set_text_uses_value_pattern_and_reads_it_back():
     pattern = FakePattern(value="old")
     actions = VerifiedActions(
@@ -113,12 +152,15 @@ def test_set_text_uses_keyboard_fallback_and_still_requires_readback():
     assert result.method == "keyboard_fallback"
 
     pattern.Value = "old"
-    with pytest.raises(ActionVerificationError):
+    with pytest.raises(ActionVerificationError) as raised:
         VerifiedActions(
             waiter=ImmediateWaiter(),
             click_fallback=lambda item: None,
             replace_text_fallback=lambda item, value: None,
         ).set_text(FakeControl(value=pattern), "never-applied")
+    assert "action=set_text" in str(raised.value)
+    assert "ControlType='ListItemControl'" in str(raised.value)
+    assert "AutomationId='search_item_1'" in str(raised.value)
 
 
 def test_deadline_waiter_can_be_woken_by_an_event():

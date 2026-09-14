@@ -26,6 +26,8 @@ class FakeDriver:
         self.sent_files = []
         self.forward_preparations = 0
         self.forward_targets = []
+        self.search_calls = 0
+        self.fail_search_once = False
 
     def inspect(self):
         return {"connected": True, "version": "4.1.13.65", "supported": True}
@@ -37,6 +39,9 @@ class FakeDriver:
         return True
 
     def search_contacts(self, target):
+        self.search_calls += 1
+        if self.fail_search_once and self.search_calls == 1:
+            raise RuntimeError("UIA provider disconnected")
         return self.search_results.get(target, [])
 
     def select_search_result(self, candidate):
@@ -182,6 +187,39 @@ def test_message_checks_title_and_composer_before_triggering_send():
     assert result["error"] == 1
     assert driver.sent == []
     assert events[-1]["step"] == "content_inserted"
+
+
+def test_message_retries_the_safe_location_chain_once_before_send():
+    driver = FakeDriver()
+    driver.search_results["Alice"] = ["Alice"]
+    driver.fail_search_once = True
+
+    result, events = run_engine(
+        driver,
+        request("message_send", [TaskItem("one", target="Alice", message="hello")]),
+    )
+
+    assert result["success"] == 1
+    assert driver.search_calls == 2
+    assert driver.sent == ["hello"]
+    assert len([event for event in events if event["step"] == "send_triggered"]) == 1
+
+
+def test_message_maps_repeated_search_exception_to_search_step():
+    driver = FakeDriver()
+    driver.search_contacts = lambda _target: (_ for _ in ()).throw(
+        RuntimeError("UIA provider disconnected")
+    )
+
+    result, events = run_engine(
+        driver,
+        request("message_send", [TaskItem("one", target="Alice", message="hello")]),
+    )
+
+    assert result["error"] == 1
+    assert events[-1]["step"] == "target_selected"
+    assert "search_contacts" in events[-1]["detail"]
+    assert driver.sent == []
 
 
 def test_unknown_send_is_never_retried_and_continues_by_default():
@@ -436,3 +474,29 @@ def test_risk_control_stops_the_entire_friend_batch():
     assert result["done"] == 1
     assert driver.friend_submit_count == 0
     assert "操作频繁" in events[-1]["detail"]
+
+
+def test_friend_bind_failure_is_the_only_error_reported_as_window_bound():
+    driver = FakeDriver()
+    driver.bind_window = lambda: (_ for _ in ()).throw(RuntimeError("hidden"))
+
+    result, events = run_engine(
+        driver, request("friend_add", [TaskItem("friend-1", account="18896904196")])
+    )
+
+    assert result["error"] == 1
+    assert events[-1]["step"] == "window_bound"
+    assert "bind_window" in events[-1]["detail"]
+
+
+def test_friend_navigation_exception_maps_to_its_actual_step():
+    driver = FakeDriver()
+    driver.open_add_friend = lambda: (_ for _ in ()).throw(RuntimeError("detached"))
+
+    result, events = run_engine(
+        driver, request("friend_add", [TaskItem("friend-1", account="18896904196")])
+    )
+
+    assert result["error"] == 1
+    assert events[-1]["step"] == "add_friend_window_ready"
+    assert "open_add_friend" in events[-1]["detail"]

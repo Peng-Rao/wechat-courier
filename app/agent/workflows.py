@@ -29,6 +29,13 @@ def normalize_identity(value: str) -> str:
     return " ".join(normalized.split()).casefold()
 
 
+def candidate_matches_identity(candidate: Any, expected: str) -> bool:
+    identities = getattr(candidate, "identities", None)
+    if identities is None:
+        identities = (str(candidate),)
+    return any(normalize_identity(str(value)) == expected for value in identities)
+
+
 class WeixinWorkflowEngine:
     """Verified, non-replaying workflows independent of a concrete UIA driver."""
 
@@ -170,10 +177,14 @@ class WeixinWorkflowEngine:
                     )
                 except RiskControlError as exc:
                     outcome = "error"
-                    step = (
-                        "add_friend_window_ready"
-                        if request.kind == "friend_add"
-                        else "window_bound"
+                    step = str(
+                        getattr(
+                            exc,
+                            "step",
+                            "add_friend_window_ready"
+                            if request.kind == "friend_add"
+                            else "target_selected",
+                        )
                     )
                     self._event(
                         emit,
@@ -191,7 +202,11 @@ class WeixinWorkflowEngine:
                         emit,
                         request,
                         item,
-                        "window_bound",
+                        (
+                            "send_verified"
+                            if request.kind == "message_send"
+                            else "submit_verified"
+                        ),
                         outcome,
                         f"自动化异常：{exc}",
                         index + 1,
@@ -368,61 +383,30 @@ class WeixinWorkflowEngine:
         emit,
         control,
     ) -> str:
-        driver.bind_window()
-        self._success_step(
-            emit, request, item, "window_bound", "已绑定微信窗口", index
-        )
-        self._safe_point(control)
+        last_error: WorkflowError | None = None
+        for _attempt in range(2):
+            try:
+                self._prepare_message_item(driver, item, control)
+                last_error = None
+                break
+            except WorkflowError as exc:
+                last_error = exc
+                self._safe_point(control)
+        if last_error is not None:
+            raise last_error
 
-        if not driver.ensure_search_ready():
-            raise WorkflowError("search_ready", "搜索入口不可用")
-        self._success_step(
-            emit, request, item, "search_ready", "搜索入口已就绪", index
-        )
-
-        candidates = list(driver.search_contacts(item.target))
-        expected = normalize_identity(item.target)
-        exact = [
-            candidate
-            for candidate in candidates
-            if normalize_identity(str(candidate)) == expected
-        ]
-        if not exact:
-            raise WorkflowError("target_selected", f"未找到精确目标：{item.target}")
-        if len(exact) != 1:
-            raise WorkflowError("target_selected", f"目标不唯一：{item.target}")
-        driver.select_search_result(exact[0])
-        self._success_step(
-            emit, request, item, "target_selected", "已选择唯一目标", index
-        )
-
-        title = driver.current_chat_title()
-        if normalize_identity(title) != expected:
-            raise WorkflowError(
-                "target_verified", f"聊天标题校验失败：{title or '<空>'}"
-            )
-        self._success_step(
-            emit, request, item, "target_verified", "目标校验通过", index
-        )
-
-        if not driver.composer_ready():
-            raise WorkflowError("composer_ready", "消息输入框不可用")
-        self._success_step(
-            emit, request, item, "composer_ready", "输入框已就绪", index
-        )
-
-        if item.message:
-            driver.set_composer_text(item.message)
-            if driver.read_composer_text() != item.message:
-                raise WorkflowError("content_inserted", "输入内容回读不一致")
-        self._success_step(
-            emit,
-            request,
-            item,
-            "content_inserted",
-            "内容已写入并核对" if item.message else "本项仅发送附件",
-            index,
-        )
+        for step, detail in (
+            ("window_bound", "已绑定微信窗口"),
+            ("search_ready", "搜索入口已就绪"),
+            ("target_selected", "已选择唯一目标"),
+            ("target_verified", "目标校验通过"),
+            ("composer_ready", "输入框已就绪"),
+            (
+                "content_inserted",
+                "内容已写入并核对" if item.message else "本项仅发送附件",
+            ),
+        ):
+            self._success_step(emit, request, item, step, detail, index)
 
         self._safe_point(control)
         boundary_marked = False
@@ -481,10 +465,15 @@ class WeixinWorkflowEngine:
             )
 
         if item.message:
+            try:
+                before = driver.message_snapshot()
+            except Exception as exc:
+                raise WorkflowError(
+                    "send_verified", f"message_snapshot 失败：{exc}"
+                ) from exc
             self._mark_boundary(request, item, "send_triggered", index)
             boundary_marked = True
             try:
-                before = driver.message_snapshot()
                 driver.trigger_send()
                 self._success_step(
                     emit, request, item, "send_triggered", "已触发发送", index
@@ -590,6 +579,80 @@ class WeixinWorkflowEngine:
             control,
         )
 
+    @staticmethod
+    def _driver_action(step: str, action: str, callback):
+        try:
+            return callback()
+        except WorkflowError:
+            raise
+        except RiskControlError as exc:
+            wrapped = RiskControlError(f"{action} 风控阻止：{exc}")
+            wrapped.step = step
+            raise wrapped from exc
+        except Exception as exc:
+            raise WorkflowError(step, f"{action} 失败：{exc}") from exc
+
+    def _prepare_message_item(self, driver, item: TaskItem, control) -> None:
+        self._driver_action("window_bound", "bind_window", driver.bind_window)
+        self._safe_point(control)
+
+        ready = self._driver_action(
+            "search_ready", "ensure_search_ready", driver.ensure_search_ready
+        )
+        if not ready:
+            raise WorkflowError("search_ready", "ensure_search_ready 失败：搜索入口不可用")
+
+        candidates = list(
+            self._driver_action(
+                "target_selected",
+                "search_contacts",
+                lambda: driver.search_contacts(item.target),
+            )
+        )
+        expected = normalize_identity(item.target)
+        exact = [
+            candidate
+            for candidate in candidates
+            if candidate_matches_identity(candidate, expected)
+        ]
+        if not exact:
+            raise WorkflowError("target_selected", f"未找到精确目标：{item.target}")
+        if len(exact) != 1:
+            raise WorkflowError("target_selected", f"目标不唯一：{item.target}")
+        self._driver_action(
+            "target_selected",
+            "select_search_result",
+            lambda: driver.select_search_result(exact[0]),
+        )
+
+        title = self._driver_action(
+            "target_verified", "current_chat_title", driver.current_chat_title
+        )
+        if normalize_identity(title) != expected:
+            raise WorkflowError(
+                "target_verified", f"聊天标题校验失败：{title or '<空>'}"
+            )
+
+        composer_ready = self._driver_action(
+            "composer_ready", "composer_ready", driver.composer_ready
+        )
+        if not composer_ready:
+            raise WorkflowError("composer_ready", "消息输入框不可用")
+
+        if item.message:
+            self._driver_action(
+                "content_inserted",
+                "set_composer_text",
+                lambda: driver.set_composer_text(item.message),
+            )
+            content = self._driver_action(
+                "content_inserted",
+                "read_composer_text",
+                driver.read_composer_text,
+            )
+            if content != item.message:
+                raise WorkflowError("content_inserted", "输入内容回读不一致")
+
     def _run_friend_item(
         self,
         driver,
@@ -599,13 +662,16 @@ class WeixinWorkflowEngine:
         emit,
         control,
     ) -> str:
-        driver.bind_window()
+        self._driver_action("window_bound", "bind_window", driver.bind_window)
         self._success_step(
             emit, request, item, "window_bound", "已绑定微信窗口", index
         )
         self._safe_point(control)
 
-        if not driver.open_add_friend():
+        add_friend_ready = self._driver_action(
+            "add_friend_window_ready", "open_add_friend", driver.open_add_friend
+        )
+        if not add_friend_ready:
             raise WorkflowError(
                 "add_friend_window_ready", "添加好友窗口不可用"
             )
@@ -618,19 +684,31 @@ class WeixinWorkflowEngine:
             index,
         )
 
-        driver.set_friend_account(item.account)
+        self._driver_action(
+            "account_inserted",
+            "set_friend_account",
+            lambda: driver.set_friend_account(item.account),
+        )
         self._success_step(
             emit, request, item, "account_inserted", "账号已写入并核对", index
         )
 
-        profile = driver.search_friend(item.account)
+        profile = self._driver_action(
+            "account_searched",
+            "search_friend",
+            lambda: driver.search_friend(item.account),
+        )
         if not profile:
             raise WorkflowError("account_searched", f"未找到账号：{item.account}")
         self._success_step(
             emit, request, item, "account_searched", "已搜索账号", index
         )
 
-        actual_account = driver.profile_account(profile)
+        actual_account = self._driver_action(
+            "profile_verified",
+            "profile_account",
+            lambda: driver.profile_account(profile),
+        )
         if normalize_identity(actual_account) != normalize_identity(item.account):
             raise WorkflowError(
                 "profile_verified", f"资料账号不匹配：{actual_account or '<空>'}"
@@ -639,13 +717,22 @@ class WeixinWorkflowEngine:
             emit, request, item, "profile_verified", "资料核对通过", index
         )
 
-        if not driver.open_friend_request(profile):
+        request_ready = self._driver_action(
+            "request_form_ready",
+            "open_friend_request",
+            lambda: driver.open_friend_request(profile),
+        )
+        if not request_ready:
             raise WorkflowError("request_form_ready", "好友申请窗口不可用")
         self._success_step(
             emit, request, item, "request_form_ready", "申请窗口已就绪", index
         )
 
-        fields = driver.set_friend_fields(item.greeting, item.remark)
+        fields = self._driver_action(
+            "fields_verified",
+            "set_friend_fields",
+            lambda: driver.set_friend_fields(item.greeting, item.remark),
+        )
         if item.greeting is not None and fields.get("greeting") != item.greeting:
             raise WorkflowError("fields_verified", "打招呼语回读不一致")
         if item.remark and fields.get("remark") != item.remark:

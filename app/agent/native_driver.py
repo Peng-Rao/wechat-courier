@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -40,6 +41,48 @@ FRIEND_SUBMIT_SUCCESS_NAMES = (
     "等待验证",
     "申请已提交",
 )
+
+
+@dataclass(frozen=True)
+class SearchCandidate:
+    """Immutable search-row description; deliberately contains no UIA wrapper."""
+
+    display_name: str
+    identities: frozenset[str]
+    result_type: str
+    automation_id: str
+    row_index: int
+    row_depth: int
+    runtime_id: tuple[int, ...] = ()
+
+
+def _runtime_id(control: Any) -> tuple[int, ...]:
+    try:
+        value = control.GetRuntimeId()
+    except Exception:
+        value = safe_attr(control, "RuntimeId", ())
+    try:
+        return tuple(int(part) for part in value)
+    except (TypeError, ValueError):
+        return ()
+
+
+def _search_row_kind(control: Any) -> str | None:
+    name = str(safe_attr(control, "Name", "")).strip()
+    class_name = str(safe_attr(control, "ClassName", ""))
+    automation_id = str(safe_attr(control, "AutomationId", ""))
+    if not name or "SearchContentCellView" not in class_name:
+        return None
+    if not automation_id.startswith("search_item_"):
+        return None
+    lowered_id = automation_id.casefold()
+    if "web" in lowered_id or "network" in lowered_id:
+        return None
+    if name in {"搜索网络结果", "网络搜索", "搜一搜"}:
+        return None
+    if automation_id.startswith("search_item_function"):
+        return "function" if name == "文件传输助手" else None
+    return "contact"
 
 
 def safe_attr(control: Any, name: str, default=None):
@@ -87,19 +130,39 @@ def find_exact_control(
 
 def extract_contact_results(
     nodes: Iterable[tuple[Any, int]],
-) -> list[tuple[str, Any]]:
-    results = []
-    for control, _depth in nodes:
+) -> list[SearchCandidate]:
+    materialized = list(nodes)
+    results: list[SearchCandidate] = []
+    row_index = 0
+    for index, (control, depth) in enumerate(materialized):
         name = str(safe_attr(control, "Name", "")).strip()
-        class_name = str(safe_attr(control, "ClassName", ""))
         automation_id = str(safe_attr(control, "AutomationId", ""))
-        if not name or "SearchContentCellView" not in class_name:
+        result_type = _search_row_kind(control)
+        if result_type is None:
             continue
-        if not automation_id.startswith("search_item_"):
-            continue
-        if automation_id.startswith("search_item_function"):
-            continue
-        results.append((name, control))
+        is_function = result_type == "function"
+        identities: dict[str, str] = {}
+        identities.setdefault(normalize_identity(name), name)
+        if not is_function:
+            for child, child_depth in materialized[index + 1 :]:
+                if child_depth <= depth:
+                    break
+                child_name = str(safe_attr(child, "Name", "")).strip()
+                if child_name:
+                    identities.setdefault(normalize_identity(child_name), child_name)
+        values = frozenset(value for key, value in identities.items() if key)
+        results.append(
+            SearchCandidate(
+                display_name=name,
+                identities=(frozenset({"文件传输助手"}) if is_function else values),
+                result_type=result_type,
+                automation_id=automation_id,
+                row_index=row_index,
+                row_depth=depth,
+                runtime_id=_runtime_id(control),
+            )
+        )
+        row_index += 1
     return results
 
 
@@ -254,7 +317,8 @@ class NativeWeixinDriver:
         self._uia = None
         self._root = None
         self._search_edit = None
-        self._search_results: list[tuple[str, Any]] = []
+        self._search_results: list[SearchCandidate] = []
+        self._search_query = ""
         self._selected_target = ""
         self._composer = None
         self._add_hwnd = 0
@@ -383,17 +447,48 @@ class NativeWeixinDriver:
             raise
 
     def bind_window(self) -> dict[str, Any]:
-        self._ensure_session()
         from src.core.win32 import bring_window_to_front
 
-        bring_window_to_front(self._session.hwnd)
-        return {
-            "connected": True,
-            "hwnd": self._session.hwnd,
-            "pid": self._session.pid,
-            "version": self._session.version,
-            "supported": True,
-        }
+        failures = []
+        for attempt in range(2):
+            self._ensure_session()
+            hwnd = self._session.hwnd
+            activated = bool(bring_window_to_front(hwnd))
+            visible_root = activated and self._waiter.wait(
+                self._visible_root_bounds,
+                self._timeout,
+                self._wake_event,
+            )
+            if visible_root:
+                return {
+                    "connected": True,
+                    "hwnd": hwnd,
+                    "pid": self._session.pid,
+                    "version": self._session.version,
+                    "supported": True,
+                }
+            failures.append(
+                f"hwnd={hwnd}, activation={activated}, rootVisible={bool(visible_root)}"
+            )
+            if attempt == 0:
+                self.close()
+        raise RuntimeError(
+            "微信窗口恢复/置前或可见根边界校验失败；已重新发现句柄并重绑一次："
+            + "; ".join(failures)
+        )
+
+    def _visible_root_bounds(self) -> bool:
+        try:
+            root, _nodes = self._walk(self._session.hwnd)
+            rectangle = safe_attr(root, "BoundingRectangle")
+            if bool(safe_attr(root, "IsOffscreen", False)):
+                return False
+            if not self._rect_valid(rectangle):
+                return False
+            self._root = root
+            return True
+        except Exception:
+            return False
 
     def _tree_materialized(self) -> bool:
         try:
@@ -486,16 +581,113 @@ class NativeWeixinDriver:
             raise RuntimeError(f"UIA 控件未出现：{description}")
         return holder["control"]
 
-    def _click_bounds(self, control) -> None:
-        rectangle = safe_attr(control, "BoundingRectangle")
-        if rectangle is None:
-            raise RuntimeError("UIA 控件没有可点击边界")
-        if rectangle.right <= rectangle.left or rectangle.bottom <= rectangle.top:
-            raise RuntimeError("UIA 控件边界为空")
-        self._uia.Click(
-            (rectangle.left + rectangle.right) // 2,
-            (rectangle.top + rectangle.bottom) // 2,
+    @staticmethod
+    def _rect_valid(rectangle: Any) -> bool:
+        try:
+            return (
+                rectangle is not None
+                and rectangle.right > rectangle.left
+                and rectangle.bottom > rectangle.top
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _point_in_rect(point: tuple[int, int], rectangle: Any) -> bool:
+        return (
+            NativeWeixinDriver._rect_valid(rectangle)
+            and rectangle.left <= point[0] <= rectangle.right
+            and rectangle.top <= point[1] <= rectangle.bottom
         )
+
+    @staticmethod
+    def _clickable_point(control: Any) -> tuple[int, int] | None:
+        try:
+            value = control.GetClickablePoint()
+        except Exception:
+            return None
+        if isinstance(value, (tuple, list)) and len(value) == 3:
+            try:
+                return (
+                    (int(value[0]), int(value[1]))
+                    if bool(value[2])
+                    else None
+                )
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            if isinstance(value[0], bool):
+                value = value[1]
+                try:
+                    return int(value.x), int(value.y)
+                except Exception:
+                    return None
+            try:
+                return int(value[0]), int(value[1])
+            except (TypeError, ValueError):
+                return None
+        try:
+            return int(value.x), int(value.y)
+        except Exception:
+            return None
+
+    def _click_bounds(self, control) -> None:
+        if not bool(safe_attr(control, "IsEnabled", False)):
+            raise RuntimeError("UIA 控件未启用")
+        if bool(safe_attr(control, "IsOffscreen", True)):
+            raise RuntimeError("UIA 控件不可见")
+        window_rectangle = safe_attr(self._root, "BoundingRectangle")
+        if not self._rect_valid(window_rectangle):
+            raise RuntimeError("微信窗口没有可见的非零边界")
+        row_rectangle = safe_attr(control, "BoundingRectangle")
+
+        point = self._clickable_point(control)
+        if point is not None and self._point_in_rect(point, window_rectangle):
+            if not self._rect_valid(row_rectangle) or self._point_in_rect(
+                point, row_rectangle
+            ):
+                self._uia.Click(*point)
+                return
+
+        if self._rect_valid(row_rectangle):
+            point = (
+                (row_rectangle.left + row_rectangle.right) // 2,
+                (row_rectangle.top + row_rectangle.bottom) // 2,
+            )
+            if self._point_in_rect(point, window_rectangle):
+                self._uia.Click(*point)
+                return
+
+        try:
+            descendants = self._uia.WalkControl(
+                control, includeTop=False, maxDepth=12
+            )
+        except Exception:
+            descendants = []
+        for child, _depth in descendants:
+            if not bool(safe_attr(child, "IsEnabled", False)):
+                continue
+            if bool(safe_attr(child, "IsOffscreen", True)):
+                continue
+            rectangle = safe_attr(child, "BoundingRectangle")
+            if not self._rect_valid(rectangle):
+                continue
+            point = (
+                (rectangle.left + rectangle.right) // 2,
+                (rectangle.top + rectangle.bottom) // 2,
+            )
+            if not self._point_in_rect(point, window_rectangle):
+                continue
+            if self._rect_valid(row_rectangle) and not self._point_in_rect(
+                point, row_rectangle
+            ):
+                continue
+            self._uia.Click(*point)
+            return
+        raise RuntimeError("UIA 控件及其候选子树没有安全的可点击点")
+
+    def _click_search_candidate(self, control) -> None:
+        self._click_bounds(control)
 
     def _replace_text(self, control, value: str) -> None:
         from src.utils.clipboard_utils import set_text_to_clipboard
@@ -528,65 +720,167 @@ class NativeWeixinDriver:
             return False
         return self._waiter.wait(find_search, self._timeout, self._wake_event)
 
-    def search_contacts(self, target: str) -> list[str]:
+    @staticmethod
+    def _candidate_signature(candidates: Sequence[SearchCandidate]) -> tuple:
+        return tuple(
+            (
+                candidate.automation_id,
+                candidate.row_index,
+                tuple(sorted(normalize_identity(value) for value in candidate.identities)),
+                candidate.runtime_id,
+            )
+            for candidate in candidates
+        )
+
+    def _search_rows(self) -> tuple[list[SearchCandidate], list[Any]] | None:
+        profile = self._session.profile
+        nodes = self._all_nodes()
+        raise_for_risk_controls(nodes)
+        search_list = find_exact_control(
+            nodes,
+            automation_id=profile.search_list_automation_id,
+            enabled=False,
+        )
+        if search_list is None:
+            return None
+        try:
+            list_nodes = list(
+                self._uia.WalkControl(search_list, includeTop=True, maxDepth=12)
+            )
+        except Exception:
+            return None
+        candidates = extract_contact_results(list_nodes)
+        rows = [control for control, _depth in list_nodes if _search_row_kind(control)]
+        return candidates, rows
+
+    def search_contacts(self, target: str) -> list[SearchCandidate]:
         if not self.ensure_search_ready():
             return []
+
+        initial = self._search_rows()
+        initial_signature = self._candidate_signature(initial[0]) if initial else ()
+        self._search_results = []
+        self._search_query = ""
+        self._actions.set_text(self._search_edit, "", wake_event=self._wake_event)
+
+        def cleared_results_refreshed() -> bool:
+            if self._actions.read_text(self._search_edit) != "":
+                return False
+            current = self._search_rows()
+            if current is None:
+                return True
+            return (
+                not initial_signature
+                or self._candidate_signature(current[0]) != initial_signature
+            )
+
+        if not self._waiter.wait(
+            cleared_results_refreshed, self._timeout, self._wake_event
+        ):
+            raise RuntimeError("清空搜索词后结果列表未刷新")
+
         self._actions.set_text(self._search_edit, target, wake_event=self._wake_event)
-        profile = self._session.profile
-        holder = {"matches": []}
+        holder: dict[str, Any] = {
+            "matches": [],
+            "signature": None,
+            "stable": 0,
+        }
 
         def collect_results():
-            nodes = self._all_nodes()
-            raise_for_risk_controls(nodes)
-            search_list = find_exact_control(
-                nodes,
-                automation_id=profile.search_list_automation_id,
-                enabled=False,
+            if self._actions.read_text(self._search_edit) != target:
+                return False
+            current = self._search_rows()
+            if current is None:
+                return False
+            candidates, _rows = current
+            signature = self._candidate_signature(candidates)
+            if signature == holder["signature"]:
+                holder["stable"] += 1
+            else:
+                holder["signature"] = signature
+                holder["stable"] = 1
+            holder["matches"] = candidates
+            refreshed = (
+                not initial_signature or signature != initial_signature
             )
-            if search_list is None:
-                return False
-            try:
-                list_nodes = list(
-                    self._uia.WalkControl(
-                        search_list, includeTop=True, maxDepth=12
-                    )
-                )
-            except Exception:
-                return False
-            holder["matches"] = extract_contact_results(list_nodes)
-            return bool(holder["matches"])
+            return refreshed and holder["stable"] >= 2
 
-        self._waiter.wait(collect_results, self._timeout, self._wake_event)
-        self._search_results = holder["matches"]
-        return [name for name, _control in self._search_results]
+        if not self._waiter.wait(collect_results, self._timeout, self._wake_event):
+            raise RuntimeError("本轮搜索结果列表未稳定")
+        self._search_results = list(holder["matches"])
+        self._search_query = target
+        return list(self._search_results)
 
-    def select_search_result(self, candidate: str) -> None:
-        normalized = normalize_identity(candidate)
-        controls = [
-            control
-            for name, control in self._search_results
-            if normalize_identity(name) == normalized
+    def _resolve_search_candidate(self, candidate: SearchCandidate):
+        current = self._search_rows()
+        if current is None:
+            return None
+        candidates, controls = current
+        exact_indexes = [
+            index for index, current_candidate in enumerate(candidates)
+            if current_candidate == candidate
         ]
-        if len(controls) != 1:
+        if len(exact_indexes) != 1:
+            expected_identities = {
+                normalize_identity(value) for value in candidate.identities
+            }
+            exact_indexes = [
+                index
+                for index, current_candidate in enumerate(candidates)
+                if current_candidate.automation_id == candidate.automation_id
+                and current_candidate.result_type == candidate.result_type
+                and {
+                    normalize_identity(value)
+                    for value in current_candidate.identities
+                }
+                == expected_identities
+            ]
+        if len(exact_indexes) != 1:
+            return None
+        index = exact_indexes[0]
+        return controls[index] if index < len(controls) else None
+
+    def select_search_result(self, candidate: SearchCandidate) -> None:
+        if not isinstance(candidate, SearchCandidate):
+            raise TypeError("select_search_result requires SearchCandidate")
+        control = self._resolve_search_candidate(candidate)
+        if control is None:
             raise RuntimeError("无法解析唯一搜索结果控件")
-        self._selected_target = candidate
+        self._selected_target = self._search_query or candidate.display_name
+        normalized = normalize_identity(self._selected_target)
         self._actions.select(
-            controls[0],
+            control,
             lambda: self.composer_ready()
             and normalize_identity(self.current_chat_title()) == normalized,
+            resolve_control=lambda: self._resolve_search_candidate(candidate),
+            extra_postcondition=lambda: self.composer_ready(),
             wake_event=self._wake_event,
         )
 
     def current_chat_title(self) -> str:
         if not self._selected_target:
             return ""
+        if self._find_composer() is None:
+            return ""
         _root, nodes = self._walk(self._session.hwnd)
         root_rect = safe_attr(self._root, "BoundingRectangle")
         expected = normalize_identity(self._selected_target)
-        for control, _depth in nodes:
-            if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
+        excluded_depth: int | None = None
+        profile = self._session.profile
+        for control, depth in nodes:
+            if excluded_depth is not None:
+                if depth > excluded_depth:
+                    continue
+                excluded_depth = None
+            if (
+                str(safe_attr(control, "ClassName", ""))
+                == profile.search_popup_class
+                or str(safe_attr(control, "AutomationId", ""))
+                == profile.search_list_automation_id
+            ):
+                excluded_depth = depth
                 continue
-            if control in [item for _name, item in self._search_results]:
+            if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
                 continue
             rectangle = safe_attr(control, "BoundingRectangle")
             if root_rect is None or rectangle is None:
@@ -652,8 +946,19 @@ class NativeWeixinDriver:
                 controls.append(control)
         return controls
 
-    def message_snapshot(self) -> set[tuple]:
-        return {self._control_key(control) for control in self._message_controls()}
+    @staticmethod
+    def _message_identity(control: Any) -> tuple:
+        runtime_id = _runtime_id(control)
+        if runtime_id:
+            stable_id: tuple = ("runtime", runtime_id)
+        else:
+            stable_id = ("fallback", control_key(control))
+        return stable_id, str(safe_attr(control, "Name", "")).strip()
+
+    def message_snapshot(self) -> tuple[tuple, ...]:
+        return tuple(
+            self._message_identity(control) for control in self._message_controls()
+        )
 
     def _invoke_once_or_key(self, button_names: Sequence[str], key_control) -> str:
         _root, nodes = self._walk(self._session.hwnd)
@@ -688,12 +993,14 @@ class NativeWeixinDriver:
     def verify_sent(self, before, expected: str, timeout: float) -> bool | None:
         def appended():
             controls = self._message_controls()
-            current = {self._control_key(control) for control in controls}
-            has_new_match = any(
-                normalize_identity(str(safe_attr(control, "Name", "")))
-                == normalize_identity(expected)
-                and self._control_key(control) not in before
-                for control in controls
+            current = tuple(self._message_identity(control) for control in controls)
+            if not current:
+                return False
+            old_tail = before[-1][0] if before else None
+            new_tail = current[-1]
+            has_new_match = (
+                new_tail[0] != old_tail
+                and normalize_identity(new_tail[1]) == normalize_identity(expected)
             )
             return has_new_match and self.read_composer_text() == ""
 
@@ -740,7 +1047,10 @@ class NativeWeixinDriver:
         exact = [
             candidate
             for candidate in candidates
-            if normalize_identity(candidate) == expected
+            if any(
+                normalize_identity(identity) == expected
+                for identity in candidate.identities
+            )
         ]
         if len(exact) != 1:
             raise RuntimeError(f"无法定位唯一聊天目标：{target}")
@@ -896,7 +1206,9 @@ class NativeWeixinDriver:
         if count != len(paths) or count <= 0:
             return {"outcome": "error", "detail": "合并转发源文件尚未准备"}
 
-        target_snapshot = self.message_snapshot()
+        target_snapshot = {
+            control_key(control) for control in self._message_controls()
+        }
         self._open_exact_chat("文件传输助手")
         bubbles = self._recent_message_bubbles(count)
         self._right_click_bounds(bubbles[-1])
@@ -1148,6 +1460,7 @@ class NativeWeixinDriver:
 __all__ = [
     "NativeWeixinDriver",
     "RiskControlError",
+    "SearchCandidate",
     "extract_contact_results",
     "extract_exact_forward_candidates",
     "filter_recent_message_bubbles",
