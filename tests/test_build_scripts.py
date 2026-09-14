@@ -70,6 +70,17 @@ def test_build_spec_uses_repository_root_for_sources_and_hooks():
     assert 'os.path.join(ROOT, "build", "_comtypes_hook.py")' in spec_text
 
 
+def test_build_spec_bootstraps_repository_imports_for_console_entrypoint():
+    spec_text = (ROOT / "build" / "build.spec").read_text(encoding="utf-8")
+
+    root_assignment = spec_text.index("ROOT = os.path.dirname(SPECPATH)")
+    path_bootstrap = spec_text.index("sys.path.insert(0, ROOT)")
+    local_import = spec_text.index(
+        "from build.pyinstaller_filters import filter_qt_artifacts"
+    )
+    assert root_assignment < path_bootstrap < local_import
+
+
 def test_build_spec_does_not_hardcode_python_312_pywin32_dlls():
     spec_text = (ROOT / "build" / "build.spec").read_text(encoding="utf-8")
 

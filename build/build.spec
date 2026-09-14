@@ -3,11 +3,14 @@
 import os
 import sys
 
+ROOT = os.path.dirname(SPECPATH)  # WxAuto/
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 from build.pyinstaller_filters import filter_qt_artifacts
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
-ROOT = os.path.dirname(SPECPATH)  # WxAuto/
 
 # ═══════════════════════════════════════
 #  comtypes 预生成目录
