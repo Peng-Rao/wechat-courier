@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 env:
-  PYTHON_VERSION: "3.10"
-  PRODUCT_NAME: "五阿哥群发助手"
+  PYTHON_VERSION: "3.12"
+  PRODUCT_NAME: "五阿哥微信助手"
 
 jobs:
   # ── Test ──
@@ -60,6 +60,19 @@ jobs:
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean build/build.spec
 
+      - name: Validate PyInstaller outputs
+        shell: pwsh
+        run: |
+          $artifacts = @(
+            "dist/$($env:PRODUCT_NAME)/$($env:PRODUCT_NAME).exe"
+            "dist/$($env:PRODUCT_NAME)/wechat-agent.exe"
+          )
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+              throw "Missing build artifact: $artifact"
+            }
+          }
+
       - name: Read version from _version.py
         id: version
         shell: python
@@ -99,7 +112,21 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path "dist/$env:PRODUCT_NAME" `
-            -DestinationPath "dist/$env:PRODUCT_NAME_${{ steps.version.outputs.version }}.zip"
+            -DestinationPath "dist/$($env:PRODUCT_NAME)_${{ steps.version.outputs.version }}.zip"
+
+      - name: Validate release artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $artifacts = @(
+            "dist/$($env:PRODUCT_NAME)_$version.zip"
+            "dist/$($env:PRODUCT_NAME)_Setup.exe"
+          )
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+              throw "Missing build artifact: $artifact"
+            }
+          }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

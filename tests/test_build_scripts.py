@@ -102,6 +102,24 @@ def test_installer_shortcuts_use_embedded_exe_icon():
     ) in script
 
 
+def test_windows_ci_uses_python_312_and_validates_every_release_artifact():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'PYTHON_VERSION: "3.12"' in workflow
+    assert 'PRODUCT_NAME: "五阿哥微信助手"' in workflow
+    for artifact in (
+        '"dist/$($env:PRODUCT_NAME)/$($env:PRODUCT_NAME).exe"',
+        '"dist/$($env:PRODUCT_NAME)/wechat-agent.exe"',
+        '"dist/$($env:PRODUCT_NAME)_$version.zip"',
+        '"dist/$($env:PRODUCT_NAME)_Setup.exe"',
+    ):
+        assert artifact in workflow
+    assert workflow.count("Test-Path -LiteralPath $artifact -PathType Leaf") == 2
+    assert workflow.count('throw "Missing build artifact: $artifact"') == 2
+
+
 def test_build_spec_includes_qml_singleton_metadata():
     spec_text = (ROOT / "build" / "build.spec").read_text(encoding="utf-8")
 
