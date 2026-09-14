@@ -16,6 +16,7 @@ from app.agent.native_driver import (
     raise_for_risk_controls,
     resolve_friend_form_fields,
 )
+from app.agent.profile import UnsupportedWeixinVersion
 
 
 @dataclass
@@ -195,6 +196,87 @@ def test_repeated_search_accepts_identical_candidates_after_clear_transition():
     assert driver.search_contacts("Alice") == [candidate]
 
 
+def test_search_does_not_accept_transient_empty_rows_before_delayed_results():
+    class SearchEdit(FakeControl):
+        value = "old"
+
+    class Actions:
+        @staticmethod
+        def set_text(control, value, **_kwargs):
+            control.value = value
+
+        @staticmethod
+        def read_text(control):
+            return control.value
+
+    class PollingWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            for _ in range(10):
+                if predicate():
+                    return True
+            return False
+
+    old = SearchCandidate(
+        "old", frozenset({"old"}), "contact", "search_item_1", 0, 1, (1, 1)
+    )
+    alice = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_2", 0, 1, (1, 2)
+    )
+    snapshots = iter(
+        (
+            ([old], [object()]),
+            ([], []),
+            ([], []),
+            ([], []),
+            ([], []),
+            ([alice], [object()]),
+            ([alice], [object()]),
+        )
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver.ensure_search_ready = lambda: True
+    driver._search_edit = SearchEdit()
+    driver._actions = Actions()
+    driver._waiter = PollingWaiter()
+    driver._search_rows = lambda: next(snapshots, ([alice], [object()]))
+
+    assert driver.search_contacts("Alice") == [alice]
+
+
+def test_search_returns_empty_only_after_bounded_no_match_wait():
+    class SearchEdit(FakeControl):
+        value = "old"
+
+    class Actions:
+        @staticmethod
+        def set_text(control, value, **_kwargs):
+            control.value = value
+
+        @staticmethod
+        def read_text(control):
+            return control.value
+
+    class ExhaustingWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            for _ in range(5):
+                if predicate():
+                    return True
+            return False
+
+    old = SearchCandidate(
+        "old", frozenset({"old"}), "contact", "search_item_1", 0, 1
+    )
+    snapshots = iter((([old], [object()]), ([], [])))
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver.ensure_search_ready = lambda: True
+    driver._search_edit = SearchEdit()
+    driver._actions = Actions()
+    driver._waiter = ExhaustingWaiter()
+    driver._search_rows = lambda: next(snapshots, ([], []))
+
+    assert driver.search_contacts("missing") == []
+
+
 def test_open_exact_chat_supports_repeated_file_transfer_helper_searches():
     candidate = SearchCandidate(
         "文件传输助手",
@@ -260,6 +342,7 @@ def test_search_candidate_click_uses_valid_descendant_when_row_has_no_bounds():
     )
     driver = NativeWeixinDriver(gate_backend=object())
     driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    row.GetTopLevelControl = lambda: driver._root
     driver._uia = type(
         "Uia",
         (),
@@ -294,6 +377,71 @@ def test_click_prefers_the_uia_clickable_point_inside_the_row():
     driver._click_bounds(row)
 
     assert clicks == [(25, 25)]
+
+
+def test_click_allows_visible_same_process_secondary_dialog_control(monkeypatch):
+    main_root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    dialog_root = FakeControl(
+        "验证朋友申请",
+        "WindowControl",
+        "mmui::VerifyFriendWindow",
+        BoundingRectangle=FakeRect(300, 100, 700, 500),
+    )
+    dialog_root.NativeWindowHandle = 222
+    control = FakeControl(
+        "确定",
+        "ButtonControl",
+        "mmui::XButton",
+        BoundingRectangle=FakeRect(500, 400, 600, 450),
+    )
+    control.GetTopLevelControl = lambda: dialog_root
+    clicks = []
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._root = main_root
+    driver._session = type("Session", (), {"pid": 123, "hwnd": 111})()
+    driver._uia = type(
+        "Uia", (), {"Click": staticmethod(lambda x, y: clicks.append((x, y)))}
+    )()
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd == 222)
+    monkeypatch.setattr(
+        "win32process.GetWindowThreadProcessId", lambda hwnd: (0, 123)
+    )
+
+    driver._click_bounds(control)
+
+    assert clicks == [(550, 425)]
+
+
+def test_click_rejects_secondary_dialog_from_other_process_with_diagnostics(monkeypatch):
+    dialog_root = FakeControl(
+        "Other",
+        "WindowControl",
+        "mmui::VerifyFriendWindow",
+        BoundingRectangle=FakeRect(300, 100, 700, 500),
+    )
+    dialog_root.NativeWindowHandle = 222
+    control = FakeControl(
+        "确定",
+        "ButtonControl",
+        "mmui::XButton",
+        BoundingRectangle=FakeRect(500, 400, 600, 450),
+    )
+    control.GetTopLevelControl = lambda: dialog_root
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    driver._session = type("Session", (), {"pid": 123, "hwnd": 111})()
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda _hwnd: True)
+    monkeypatch.setattr(
+        "win32process.GetWindowThreadProcessId", lambda _hwnd: (0, 999)
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        driver._click_bounds(control)
+
+    detail = str(raised.value)
+    assert "ownerPid=999" in detail
+    assert "expectedPid=123" in detail
+    assert "ControlType='ButtonControl'" in detail
 
 
 def test_select_search_result_re_resolves_row_after_pattern_failure():
@@ -461,6 +609,118 @@ def test_bind_window_rebinds_once_when_first_root_is_invisible(monkeypatch):
     assert first.closed is True
 
 
+def test_bind_window_retries_initialization_exception_with_one_cleanup(monkeypatch):
+    root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    session = type(
+        "Session",
+        (),
+        {"hwnd": 2, "pid": 102, "version": "4.1.13.65"},
+    )()
+    attempts = []
+    cleanups = []
+    driver = NativeWeixinDriver(gate_backend=object())
+
+    def ensure():
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise RuntimeError("ControlFromHandle temporarily failed")
+        driver._session = session
+        driver._root = root
+
+    driver._ensure_session = ensure
+    driver.close = lambda: cleanups.append("close")
+    driver._walk = lambda _hwnd: (root, [])
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
+    )()
+    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+
+    result = driver.bind_window()
+
+    assert result["hwnd"] == 2
+    assert attempts == [1, 2]
+    assert cleanups == ["close"]
+
+
+def test_bind_window_does_not_retry_unsupported_version(monkeypatch):
+    attempts = []
+    cleanups = []
+    driver = NativeWeixinDriver(gate_backend=object())
+
+    def ensure():
+        attempts.append(1)
+        raise UnsupportedWeixinVersion("unsupported Weixin version: 4.1.14")
+
+    driver._ensure_session = ensure
+    driver.close = lambda: cleanups.append("close")
+    monkeypatch.setattr(
+        "src.core.win32.bring_window_to_front",
+        lambda _hwnd: pytest.fail("activation must not run"),
+    )
+
+    with pytest.raises(UnsupportedWeixinVersion):
+        driver.bind_window()
+
+    assert attempts == [1]
+    assert cleanups == []
+
+
+def test_bind_window_does_not_retry_accessibility_gate_safety_error(monkeypatch):
+    attempts = []
+    driver = NativeWeixinDriver(gate_backend=object())
+
+    def ensure():
+        attempts.append(1)
+        raise RuntimeError("accessibility gate write-back failed")
+
+    driver._ensure_session = ensure
+    monkeypatch.setattr(
+        "src.core.win32.bring_window_to_front",
+        lambda _hwnd: pytest.fail("activation must not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="gate write-back"):
+        driver.bind_window()
+
+    assert attempts == [1]
+
+
+def test_bind_window_final_activation_error_includes_root_state(monkeypatch):
+    root = FakeControl(
+        "微信",
+        "WindowControl",
+        "mmui::MainWindow",
+        "main",
+        BoundingRectangle=FakeRect(0, 0, 200, 200),
+    )
+    attempts = []
+    driver = NativeWeixinDriver(gate_backend=object())
+
+    def ensure():
+        attempts.append(1)
+        driver._session = type(
+            "Session", (), {"hwnd": 111, "pid": 123, "version": "4.1.13.65"}
+        )()
+        driver._root = root
+
+    driver._ensure_session = ensure
+    driver.close = lambda: setattr(driver, "_session", None)
+    monkeypatch.setattr(
+        "src.core.win32.bring_window_to_front",
+        lambda _hwnd: (_ for _ in ()).throw(RuntimeError("foreground denied")),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        driver.bind_window()
+
+    detail = str(raised.value)
+    assert attempts == [1, 1]
+    assert "action=bind_window.activate" in detail
+    assert "ControlType='WindowControl'" in detail
+    assert "ClassName='mmui::MainWindow'" in detail
+    assert "bounds=(0,0,200,200)" in detail
+
+
 def test_chat_title_ignores_matching_text_inside_search_popup_and_requires_composer():
     root = FakeControl(BoundingRectangle=FakeRect(0, 0, 1000, 800))
     popup = FakeControl(ClassName="mmui::XPopover")
@@ -553,6 +813,38 @@ def test_message_verification_does_not_reclassify_an_existing_message_as_new_tai
     )()
     driver.read_composer_text = lambda: ""
     driver._all_nodes = lambda: []
+
+    assert driver.verify_sent(before, "hello", timeout=0.1) is None
+
+
+def test_message_verification_requires_explicit_current_composer_empty_readback():
+    old = FakeControl("old", "TextControl", "mmui::ChatTextItemView")
+    new = FakeControl("hello", "TextControl", "mmui::ChatTextItemView")
+    old.GetRuntimeId = lambda: (1, 1)
+    new.GetRuntimeId = lambda: (1, 2)
+    controls = [old]
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._message_controls = lambda: list(controls)
+    before = driver.message_snapshot()
+    controls.append(new)
+    driver._find_composer = lambda: None
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
+    )()
+    driver._all_nodes = lambda: []
+
+    assert driver.verify_sent(before, "hello", timeout=0.1) is None
+
+    stale = FakeControl(
+        "",
+        "EditControl",
+        "mmui::ChatInputField",
+        "chat_input_field",
+        IsOffscreen=True,
+        BoundingRectangle=FakeRect(20, 150, 180, 190),
+    )
+    stale.GetValuePattern = lambda: type("Value", (), {"Value": ""})()
+    driver._find_composer = lambda: stale
 
     assert driver.verify_sent(before, "hello", timeout=0.1) is None
 

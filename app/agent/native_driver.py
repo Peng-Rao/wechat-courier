@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .actions import VerifiedActions
+from .actions import VerifiedActions, describe_control
 from .gate import NativeGateBackend, WeixinAccessibilitySession
 from .profile import UnsupportedWeixinVersion, get_weixin_profile
 from .uia_events import subscribe_uia_events
@@ -458,14 +458,39 @@ class NativeWeixinDriver:
 
         failures = []
         for attempt in range(2):
-            self._ensure_session()
+            try:
+                self._ensure_session()
+            except Exception as exc:
+                if not self._bind_retry_is_safe(exc):
+                    raise
+                failures.append(self._bind_failure_detail("initialize", exc))
+                if attempt == 0:
+                    self.close()
+                    continue
+                raise RuntimeError(
+                    "bind_window failed after one cleanup and rediscovery: "
+                    + "; ".join(failures)
+                ) from exc
+
             hwnd = self._session.hwnd
-            activated = bool(bring_window_to_front(hwnd))
-            visible_root = activated and self._waiter.wait(
-                self._visible_root_bounds,
-                self._timeout,
-                self._wake_event,
-            )
+            try:
+                activated = bool(bring_window_to_front(hwnd))
+                visible_root = activated and self._waiter.wait(
+                    self._visible_root_bounds,
+                    self._timeout,
+                    self._wake_event,
+                )
+            except Exception as exc:
+                if not self._bind_retry_is_safe(exc):
+                    raise
+                failures.append(self._bind_failure_detail("activate", exc))
+                if attempt == 0:
+                    self.close()
+                    continue
+                raise RuntimeError(
+                    "bind_window failed after one cleanup and rediscovery: "
+                    + "; ".join(failures)
+                ) from exc
             if visible_root:
                 return {
                     "connected": True,
@@ -475,13 +500,52 @@ class NativeWeixinDriver:
                     "supported": True,
                 }
             failures.append(
-                f"hwnd={hwnd}, activation={activated}, rootVisible={bool(visible_root)}"
+                self._bind_failure_detail(
+                    "activate",
+                    RuntimeError(
+                        f"activation={activated}, rootVisible={bool(visible_root)}"
+                    ),
+                )
             )
             if attempt == 0:
                 self.close()
         raise RuntimeError(
             "微信窗口恢复/置前或可见根边界校验失败；已重新发现句柄并重绑一次："
             + "; ".join(failures)
+        )
+
+    @staticmethod
+    def _bind_retry_is_safe(exc: Exception) -> bool:
+        if isinstance(exc, UnsupportedWeixinVersion):
+            return False
+        detail = str(exc).casefold()
+        unsafe_markers = (
+            "gate",
+            "rva",
+            "pe section",
+            "screen-reader",
+            "screen reader",
+            "refusing to write",
+            "restore",
+        )
+        return not any(marker in detail for marker in unsafe_markers)
+
+    def _bind_failure_detail(self, action: str, exc: Exception) -> str:
+        session = self._session
+        window_state = "window=unavailable"
+        if session is not None:
+            window_state = (
+                f"hwnd={safe_attr(session, 'hwnd', 'unavailable')}, "
+                f"pid={safe_attr(session, 'pid', 'unavailable')}"
+            )
+        control_state = (
+            "control=unavailable"
+            if self._root is None
+            else describe_control(self._root)
+        )
+        return (
+            f"action=bind_window.{action}, error={exc}; "
+            f"{window_state}; {control_state}"
         )
 
     def _visible_root_bounds(self) -> bool:
@@ -643,9 +707,7 @@ class NativeWeixinDriver:
             raise RuntimeError("UIA 控件未启用")
         if bool(safe_attr(control, "IsOffscreen", True)):
             raise RuntimeError("UIA 控件不可见")
-        window_rectangle = safe_attr(self._root, "BoundingRectangle")
-        if not self._rect_valid(window_rectangle):
-            raise RuntimeError("微信窗口没有可见的非零边界")
+        window_root, window_rectangle = self._owning_window(control)
         row_rectangle = safe_attr(control, "BoundingRectangle")
 
         point = self._clickable_point(control)
@@ -692,6 +754,73 @@ class NativeWeixinDriver:
             self._uia.Click(*point)
             return
         raise RuntimeError("UIA 控件及其候选子树没有安全的可点击点")
+
+    def _owning_window(self, control) -> tuple[Any, Any]:
+        try:
+            window_root = control.GetTopLevelControl()
+        except Exception:
+            window_root = None
+
+        control_rectangle = safe_attr(control, "BoundingRectangle")
+        main_rectangle = safe_attr(self._root, "BoundingRectangle")
+        # Geometry-only ownership is useful for isolated controls in unit tests, but
+        # is not strong enough once a live process session exists.  In production a
+        # control must resolve to an actual UIA top-level window so a secondary
+        # dialog can be checked against the session PID.
+        if (
+            window_root is None
+            and self._session is None
+            and self._rect_valid(control_rectangle)
+        ):
+            midpoint = (
+                (control_rectangle.left + control_rectangle.right) // 2,
+                (control_rectangle.top + control_rectangle.bottom) // 2,
+            )
+            if self._point_in_rect(midpoint, main_rectangle):
+                window_root = self._root
+        if window_root is None and control is self._root:
+            window_root = self._root
+        if window_root is None:
+            raise RuntimeError(
+                "无法解析控件所属的微信顶层窗口；" + describe_control(control)
+            )
+
+        window_rectangle = safe_attr(window_root, "BoundingRectangle")
+        if bool(safe_attr(window_root, "IsOffscreen", False)) or not self._rect_valid(
+            window_rectangle
+        ):
+            raise RuntimeError(
+                "控件所属顶层窗口不可见或边界无效；"
+                + describe_control(window_root)
+                + "; target="
+                + describe_control(control)
+            )
+
+        hwnd = int(safe_attr(window_root, "NativeWindowHandle", 0) or 0)
+        if hwnd:
+            try:
+                import win32gui
+                import win32process
+
+                visible = bool(win32gui.IsWindowVisible(hwnd))
+                owner_pid = int(win32process.GetWindowThreadProcessId(hwnd)[1])
+            except Exception as exc:
+                raise RuntimeError(
+                    f"无法校验控件所属窗口：hwnd={hwnd}, error={exc}; "
+                    + describe_control(control)
+                ) from exc
+            expected_pid = int(safe_attr(self._session, "pid", 0) or 0)
+            if not visible or not expected_pid or owner_pid != expected_pid:
+                raise RuntimeError(
+                    f"拒绝非当前微信会话窗口：hwnd={hwnd}, visible={visible}, "
+                    f"ownerPid={owner_pid}, expectedPid={expected_pid}; "
+                    + describe_control(control)
+                )
+        elif window_root is not self._root:
+            raise RuntimeError(
+                "控件所属顶层窗口没有可验证句柄；" + describe_control(control)
+            )
+        return window_root, window_rectangle
 
     def _click_search_candidate(self, control) -> None:
         self._click_bounds(control)
@@ -797,15 +926,24 @@ class NativeWeixinDriver:
             "matches": [],
             "signature": None,
             "stable": 0,
+            "last_state_valid": False,
         }
+
+        def reset_stability() -> None:
+            holder["signature"] = None
+            holder["stable"] = 0
+            holder["last_state_valid"] = False
 
         def collect_results():
             if self._actions.read_text(self._search_edit) != target:
+                reset_stability()
                 return False
             current = self._search_rows()
             if current is None:
+                reset_stability()
                 return False
             candidates, _rows = current
+            holder["last_state_valid"] = True
             signature = self._candidate_signature(candidates)
             if signature == holder["signature"]:
                 holder["stable"] += 1
@@ -813,10 +951,21 @@ class NativeWeixinDriver:
                 holder["signature"] = signature
                 holder["stable"] = 1
             holder["matches"] = candidates
+            if not candidates:
+                holder["signature"] = None
+                holder["stable"] = 0
+                return False
             return refresh_state["cleared"] and holder["stable"] >= 2
 
         if not self._waiter.wait(collect_results, self._timeout, self._wake_event):
-            raise RuntimeError("本轮搜索结果列表未稳定")
+            explicit_empty = (
+                refresh_state["cleared"]
+                and holder["last_state_valid"]
+                and holder["matches"] == []
+                and self._actions.read_text(self._search_edit) == target
+            )
+            if not explicit_empty:
+                raise RuntimeError("本轮搜索结果列表未稳定")
         self._search_results = list(holder["matches"])
         self._search_query = target
         return list(self._search_results)
@@ -957,10 +1106,26 @@ class NativeWeixinDriver:
             self._composer, text, wake_event=self._wake_event
         ).method
 
-    def read_composer_text(self) -> str:
-        if self._composer is None and not self.composer_ready():
-            return ""
-        return self._actions.read_text(self._composer) or ""
+    def read_composer_text(self) -> str | None:
+        try:
+            composer = self._find_composer()
+        except Exception:
+            return None
+        if composer is None:
+            return None
+        if bool(safe_attr(composer, "IsOffscreen", True)):
+            return None
+        if not self._rect_valid(safe_attr(composer, "BoundingRectangle")):
+            return None
+        try:
+            self._owning_window(composer)
+        except Exception:
+            return None
+        self._composer = composer
+        try:
+            return self._actions.read_text(composer)
+        except Exception:
+            return None
 
     @staticmethod
     def _control_key(control) -> tuple:
@@ -1046,7 +1211,12 @@ class NativeWeixinDriver:
                 and new_tail[0] not in prior_identities
                 and normalize_identity(new_tail[1]) == normalize_identity(expected)
             )
-            return has_new_match and self.read_composer_text() == ""
+            composer_text = self.read_composer_text()
+            return (
+                has_new_match
+                and composer_text is not None
+                and composer_text == ""
+            )
 
         if self._waiter.wait(appended, timeout, self._wake_event):
             return True
