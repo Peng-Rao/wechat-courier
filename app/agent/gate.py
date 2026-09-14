@@ -27,6 +27,10 @@ SPI_GETSCREENREADER = 0x0046
 SPI_SETSCREENREADER = 0x0047
 
 
+class AccessibilitySafetyError(RuntimeError):
+    """A PE/gate invariant or mutation state that must not be retried."""
+
+
 @dataclass(frozen=True)
 class ProcessModule:
     base: int
@@ -114,13 +118,17 @@ class NativeGateBackend:
         with open(path, "rb") as dll:
             dos = dll.read(64)
             if len(dos) < 64 or dos[:2] != b"MZ":
-                raise RuntimeError("Weixin.dll has an invalid DOS header")
+                raise AccessibilitySafetyError(
+                    "Weixin.dll has an invalid DOS header"
+                )
             pe_offset = struct.unpack_from("<I", dos, 0x3C)[0]
             dll.seek(pe_offset)
             signature = dll.read(4)
             coff = dll.read(20)
             if signature != b"PE\0\0" or len(coff) != 20:
-                raise RuntimeError("Weixin.dll has an invalid PE header")
+                raise AccessibilitySafetyError(
+                    "Weixin.dll has an invalid PE header"
+                )
             section_count = struct.unpack_from("<H", coff, 2)[0]
             optional_size = struct.unpack_from("<H", coff, 16)[0]
             dll.seek(optional_size, os.SEEK_CUR)
@@ -138,7 +146,9 @@ class NativeGateBackend:
             size = max(virtual_size, raw_size)
             if virtual_address <= rva < virtual_address + size:
                 return name, characteristics
-        raise RuntimeError(f"gate RVA 0x{rva:x} is outside every PE section")
+        raise AccessibilitySafetyError(
+            f"gate RVA 0x{rva:x} is outside every PE section"
+        )
 
     def open_process(self, pid: int):
         access = (
@@ -257,36 +267,53 @@ class WeixinAccessibilitySession:
         self.version = str(self.backend.file_version(self.module.path))
         self.profile = get_weixin_profile(self.version)
         if self.profile.gate_rva >= self.module.size:
-            raise RuntimeError("verified gate RVA exceeds the loaded module size")
+            raise AccessibilitySafetyError(
+                "verified gate RVA exceeds the loaded module size"
+            )
         self.section_name, section_flags = self.backend.pe_section_for_rva(
             self.module.path, self.profile.gate_rva
         )
         if not section_flags & IMAGE_SCN_MEM_WRITE:
-            raise RuntimeError(
+            raise AccessibilitySafetyError(
                 f"verified gate is in non-writable PE section {self.section_name!r}"
             )
         self.gate_address = self.module.base + self.profile.gate_rva
+        gate_access_started = False
         try:
             self._handle = self.backend.open_process(self.pid)
+            gate_access_started = True
             self._original_gate = self.backend.read_byte(
                 self._handle, self.gate_address
             )
             if self._original_gate not in (0, 1):
-                raise RuntimeError(
+                raise AccessibilitySafetyError(
                     f"unexpected gate value {self._original_gate!r}; refusing to write"
                 )
             if self._original_gate == 0:
                 if not self.backend.write_byte(self._handle, self.gate_address, 1):
-                    raise RuntimeError("failed to activate the Weixin accessibility gate")
+                    raise AccessibilitySafetyError(
+                        "failed to activate the Weixin accessibility gate"
+                    )
                 if self.backend.read_byte(self._handle, self.gate_address) != 1:
-                    raise RuntimeError("Weixin accessibility gate write-back failed")
+                    raise AccessibilitySafetyError(
+                        "Weixin accessibility gate write-back failed"
+                    )
             self._original_screen_reader = bool(self.backend.get_screen_reader())
             if not self._original_screen_reader:
                 if not self.backend.set_screen_reader(True):
-                    raise RuntimeError("failed to set the screen-reader session flag")
+                    raise AccessibilitySafetyError(
+                        "failed to set the screen-reader session flag"
+                    )
             return self
-        except Exception:
-            self.close()
+        except Exception as exc:
+            try:
+                self.close()
+            except Exception as cleanup_exc:
+                if isinstance(cleanup_exc, AccessibilitySafetyError):
+                    raise
+                raise AccessibilitySafetyError(str(cleanup_exc)) from cleanup_exc
+            if gate_access_started and not isinstance(exc, AccessibilitySafetyError):
+                raise AccessibilitySafetyError(str(exc)) from exc
             raise
 
     def close(self) -> None:
@@ -297,7 +324,7 @@ class WeixinAccessibilitySession:
                     if not self.backend.set_screen_reader(
                         self._original_screen_reader
                     ):
-                        raise RuntimeError(
+                        raise AccessibilitySafetyError(
                             "failed to restore the screen-reader session flag"
                         )
             except Exception as exc:
@@ -318,7 +345,7 @@ class WeixinAccessibilitySession:
                         self.backend.read_byte(self._handle, self.gate_address)
                         != self._original_gate
                     ):
-                        raise RuntimeError(
+                        raise AccessibilitySafetyError(
                             "failed to restore the Weixin accessibility gate"
                         )
             except Exception as exc:
@@ -334,13 +361,16 @@ class WeixinAccessibilitySession:
                     self._handle = None
                     self._original_gate = None
         if cleanup_error is not None:
-            raise cleanup_error
+            if isinstance(cleanup_error, AccessibilitySafetyError):
+                raise cleanup_error
+            raise AccessibilitySafetyError(str(cleanup_error)) from cleanup_error
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
 
 
 __all__ = [
+    "AccessibilitySafetyError",
     "IMAGE_SCN_MEM_WRITE",
     "NativeGateBackend",
     "ProcessModule",

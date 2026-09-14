@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from app.agent.gate import (
+    AccessibilitySafetyError,
     IMAGE_SCN_MEM_WRITE,
+    NativeGateBackend,
     ProcessModule,
     WeixinAccessibilitySession,
 )
@@ -62,6 +64,23 @@ class FakeGateBackend:
     def set_screen_reader(self, enabled):
         self.screen_reader = enabled
         return True
+
+
+def test_invalid_dos_and_pe_headers_are_typed_as_gate_safety_failures(tmp_path):
+    invalid_dos = tmp_path / "invalid-dos.dll"
+    invalid_dos.write_bytes(b"not a PE image")
+    invalid_pe = tmp_path / "invalid-pe.dll"
+    image = bytearray(88)
+    image[:2] = b"MZ"
+    image[0x3C:0x40] = (64).to_bytes(4, "little")
+    invalid_pe.write_bytes(image)
+
+    for path, message in (
+        (invalid_dos, "invalid DOS header"),
+        (invalid_pe, "invalid PE header"),
+    ):
+        with pytest.raises(AccessibilitySafetyError, match=message):
+            NativeGateBackend.pe_section_for_rva(str(path), 0)
 
 
 def test_accessibility_session_verifies_enables_and_restores_gate():

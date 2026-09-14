@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .actions import VerifiedActions, describe_control
-from .gate import NativeGateBackend, WeixinAccessibilitySession
+from .gate import (
+    AccessibilitySafetyError,
+    NativeGateBackend,
+    WeixinAccessibilitySession,
+)
 from .profile import UnsupportedWeixinVersion, get_weixin_profile
 from .uia_events import subscribe_uia_events
 from .waiters import DeadlineWaiter
@@ -516,19 +520,13 @@ class NativeWeixinDriver:
 
     @staticmethod
     def _bind_retry_is_safe(exc: Exception) -> bool:
-        if isinstance(exc, UnsupportedWeixinVersion):
-            return False
-        detail = str(exc).casefold()
-        unsafe_markers = (
-            "gate",
-            "rva",
-            "pe section",
-            "screen-reader",
-            "screen reader",
-            "refusing to write",
-            "restore",
+        return not isinstance(
+            exc,
+            (
+                AccessibilitySafetyError,
+                UnsupportedWeixinVersion,
+            ),
         )
-        return not any(marker in detail for marker in unsafe_markers)
 
     def _bind_failure_detail(self, action: str, exc: Exception) -> str:
         session = self._session

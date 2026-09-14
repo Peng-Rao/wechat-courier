@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from app.agent.gate import AccessibilitySafetyError
 from app.agent.native_driver import (
     NativeWeixinDriver,
     RiskControlError,
@@ -671,7 +672,7 @@ def test_bind_window_does_not_retry_accessibility_gate_safety_error(monkeypatch)
 
     def ensure():
         attempts.append(1)
-        raise RuntimeError("accessibility gate write-back failed")
+        raise AccessibilitySafetyError("accessibility gate write-back failed")
 
     driver._ensure_session = ensure
     monkeypatch.setattr(
@@ -683,6 +684,41 @@ def test_bind_window_does_not_retry_accessibility_gate_safety_error(monkeypatch)
         driver.bind_window()
 
     assert attempts == [1]
+
+
+def test_bind_window_retries_transient_error_even_when_message_mentions_restore(
+    monkeypatch,
+):
+    root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    session = type(
+        "Session",
+        (),
+        {"hwnd": 2, "pid": 102, "version": "4.1.13.65"},
+    )()
+    attempts = []
+    cleanups = []
+    driver = NativeWeixinDriver(gate_backend=object())
+
+    def ensure():
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise RuntimeError("ControlFromHandle restore race")
+        driver._session = session
+        driver._root = root
+
+    driver._ensure_session = ensure
+    driver.close = lambda: cleanups.append("close")
+    driver._walk = lambda _hwnd: (root, [])
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
+    )()
+    monkeypatch.setattr("src.core.win32.bring_window_to_front", lambda _hwnd: True)
+
+    result = driver.bind_window()
+
+    assert result["hwnd"] == 2
+    assert attempts == [1, 2]
+    assert cleanups == ["close"]
 
 
 def test_bind_window_final_activation_error_includes_root_state(monkeypatch):
