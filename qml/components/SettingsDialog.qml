@@ -7,16 +7,30 @@ Popup {
     id: root
     property var appBackend: null
     property int sectionIndex: 0
+    readonly property bool interactionLocked: !!(
+        appBackend && appBackend.task && appBackend.task.active
+    )
+
+    function applyIfUnlocked(callback) {
+        if (root.interactionLocked || !root.appBackend) return false
+        callback()
+        return true
+    }
 
     parent: Overlay.overlay
     modal: true
     focus: true
+    enabled: !root.interactionLocked
     closePolicy: Popup.CloseOnEscape
     width: Math.min(820, parent ? parent.width - 48 : 820)
     height: Math.min(620, parent ? parent.height - 48 : 620)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 0
+
+    onInteractionLockedChanged: {
+        if (root.interactionLocked && root.opened) root.close()
+    }
 
     Overlay.modal: Rectangle { color: WxTheme.isDark ? "#99070a0d" : "#660e1820" }
     background: Rectangle {
@@ -167,17 +181,22 @@ Popup {
                             description: "每位好友之间随机等待，降低连续操作风险"
                             RowLayout {
                                 TextField {
+                                    objectName: "settingsMessageIntervalMin"
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.message.intervalMin : "2"
                                     validator: DoubleValidator { bottom: 0; top: 300 }
-                                    onEditingFinished: root.appBackend.message.intervalMin = Number(text)
+                                    onEditingFinished: root.applyIfUnlocked(function() {
+                                        root.appBackend.message.intervalMin = Number(text)
+                                    })
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
                                 TextField {
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.message.intervalMax : "3"
                                     validator: DoubleValidator { bottom: 0; top: 300 }
-                                    onEditingFinished: root.appBackend.message.intervalMax = Number(text)
+                                    onEditingFinished: root.applyIfUnlocked(function() {
+                                        root.appBackend.message.intervalMax = Number(text)
+                                    })
                                 }
                                 Text { text: "秒"; color: WxTheme.clTextSecondary }
                             }
@@ -187,7 +206,9 @@ Popup {
                             description: "启用后按当前发送策略处理附件和留言"
                             Switch {
                                 checked: root.appBackend ? root.appBackend.message.useForward : false
-                                onToggled: root.appBackend.message.useForward = checked
+                                onToggled: root.applyIfUnlocked(function() {
+                                    root.appBackend.message.useForward = checked
+                                })
                             }
                         }
                         Item { Layout.fillHeight: true }
@@ -211,7 +232,9 @@ Popup {
                             TextField {
                                 width: 360
                                 text: root.appBackend ? root.appBackend.friends.defaultGreeting : ""
-                                onEditingFinished: root.appBackend.friends.defaultGreeting = text
+                                onEditingFinished: root.applyIfUnlocked(function() {
+                                    root.appBackend.friends.defaultGreeting = text
+                                })
                             }
                         }
                         SettingsRow {
@@ -220,7 +243,9 @@ Popup {
                             TextField {
                                 width: 220
                                 text: root.appBackend ? root.appBackend.friends.defaultRemark : ""
-                                onEditingFinished: root.appBackend.friends.defaultRemark = text
+                                onEditingFinished: root.applyIfUnlocked(function() {
+                                    root.appBackend.friends.defaultRemark = text
+                                })
                             }
                         }
                         SettingsRow {
@@ -231,14 +256,18 @@ Popup {
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.friends.intervalMin : "15"
                                     validator: IntValidator { bottom: 5; top: 300 }
-                                    onEditingFinished: root.appBackend.friends.intervalMin = Number(text)
+                                    onEditingFinished: root.applyIfUnlocked(function() {
+                                        root.appBackend.friends.intervalMin = Number(text)
+                                    })
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
                                 TextField {
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.friends.intervalMax : "30"
                                     validator: IntValidator { bottom: 5; top: 300 }
-                                    onEditingFinished: root.appBackend.friends.intervalMax = Number(text)
+                                    onEditingFinished: root.applyIfUnlocked(function() {
+                                        root.appBackend.friends.intervalMax = Number(text)
+                                    })
                                 }
                                 Text { text: "秒"; color: WxTheme.clTextSecondary }
                             }
@@ -265,7 +294,9 @@ Popup {
                                 width: 180
                                 model: ["标记未知并继续", "标记未知并停止"]
                                 currentIndex: root.appBackend && root.appBackend.settings.unknownPolicy === "stop" ? 1 : 0
-                                onActivated: root.appBackend.settings.unknownPolicy = currentIndex === 1 ? "stop" : "continue"
+                                onActivated: root.applyIfUnlocked(function() {
+                                    root.appBackend.settings.unknownPolicy = currentIndex === 1 ? "stop" : "continue"
+                                })
                             }
                         }
                         SettingsRow {
@@ -275,7 +306,9 @@ Popup {
                                 from: 0
                                 to: 2
                                 value: root.appBackend ? root.appBackend.settings.agentRestartLimit : 2
-                                onValueModified: root.appBackend.settings.agentRestartLimit = value
+                                onValueModified: root.applyIfUnlocked(function() {
+                                    root.appBackend.settings.agentRestartLimit = value
+                                })
                             }
                         }
                         SettingsRow {
@@ -289,8 +322,10 @@ Popup {
                                     var mode = root.appBackend.settings.wechatRecoveryMode
                                     return mode === "manual" ? 1 : mode === "silent" ? 2 : 0
                                 }
-                                onActivated: root.appBackend.settings.wechatRecoveryMode =
-                                    currentIndex === 1 ? "manual" : currentIndex === 2 ? "silent" : "confirm"
+                                onActivated: root.applyIfUnlocked(function() {
+                                    root.appBackend.settings.wechatRecoveryMode =
+                                        currentIndex === 1 ? "manual" : currentIndex === 2 ? "silent" : "confirm"
+                                })
                             }
                         }
                         SettingsRow {
@@ -301,7 +336,9 @@ Popup {
                                 to: 300
                                 stepSize: 10
                                 value: root.appBackend ? root.appBackend.settings.loginTimeout : 90
-                                onValueModified: root.appBackend.settings.loginTimeout = value
+                                onValueModified: root.applyIfUnlocked(function() {
+                                    root.appBackend.settings.loginTimeout = value
+                                })
                                 textFromValue: function(value) { return value + " 秒" }
                             }
                         }
@@ -318,7 +355,7 @@ Popup {
                         spacing: 0
                         SettingsHeading {
                             title: "外观"
-                            subtitle: "外观设置运行中也可修改，不影响 Agent 任务快照"
+                            subtitle: "外观设置会自动保存在本机"
                         }
                         SettingsRow {
                             title: "颜色模式"
@@ -326,10 +363,10 @@ Popup {
                             RowLayout {
                                 Button {
                                     text: "浅色"
-                                    onClicked: {
+                                    onClicked: root.applyIfUnlocked(function() {
                                         WxTheme.isDark = false
                                         root.appBackend.settings.isDark = false
-                                    }
+                                    })
                                     background: Rectangle {
                                         color: !WxTheme.isDark ? WxTheme.clBgSelected : "transparent"
                                         border.color: WxTheme.clSurfaceBorder
@@ -338,10 +375,10 @@ Popup {
                                 }
                                 Button {
                                     text: "深色"
-                                    onClicked: {
+                                    onClicked: root.applyIfUnlocked(function() {
                                         WxTheme.isDark = true
                                         root.appBackend.settings.isDark = true
-                                    }
+                                    })
                                     background: Rectangle {
                                         color: WxTheme.isDark ? WxTheme.clBgSelected : "transparent"
                                         border.color: WxTheme.clSurfaceBorder
@@ -355,10 +392,10 @@ Popup {
                             description: "关闭后回退为普通实色界面"
                             Switch {
                                 checked: WxTheme.glassEnabled
-                                onToggled: {
+                                onToggled: root.applyIfUnlocked(function() {
                                     WxTheme.glassEnabled = checked
                                     root.appBackend.settings.glassEnabled = checked
-                                }
+                                })
                             }
                         }
                         SettingsRow {
@@ -373,10 +410,10 @@ Popup {
                                     wheelEnabled: true
                                     value: WxTheme.glassOpacity
                                     enabled: WxTheme.glassEnabled
-                                    onMoved: {
+                                    onMoved: root.applyIfUnlocked(function() {
                                         WxTheme.glassOpacity = Math.round(value)
                                         root.appBackend.settings.glassOpacity = Math.round(value)
-                                    }
+                                    })
                                 }
                                 Text {
                                     text: WxTheme.glassOpacity + "%"

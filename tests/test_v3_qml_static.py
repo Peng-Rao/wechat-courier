@@ -86,6 +86,16 @@ def test_settings_center_contains_task_recovery_and_appearance_sections():
     assert "unknownPolicy" in source
 
 
+def test_settings_dialog_guards_every_mutating_callback_while_task_is_active():
+    source = qml("SettingsDialog.qml")
+
+    assert "readonly property bool interactionLocked" in source
+    assert "function applyIfUnlocked(callback)" in source
+    assert source.count("root.applyIfUnlocked(function()") == 15
+    assert "onInteractionLockedChanged" in source
+    assert "运行中也可修改" not in source
+
+
 def test_settings_pages_use_the_scroll_viewport_width():
     source = qml("SettingsDialog.qml")
 
