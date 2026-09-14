@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
+from uuid import uuid4
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, Signal, Slot
 
@@ -57,6 +58,7 @@ class FriendImportModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._records: list[FriendRecord] = []
+        self._manual_rows_pending_selection: set[str] = set()
         self._import_error = ""
 
     def roleNames(self):
@@ -103,8 +105,40 @@ class FriendImportModel(QAbstractListModel):
     def replace_records(self, records: Iterable[FriendRecord]) -> None:
         self.beginResetModel()
         self._records = list(records)
+        self._manual_rows_pending_selection.clear()
         self.endResetModel()
         self.countsChanged.emit()
+
+    @Slot(result=int)
+    def appendEmptyRecord(self) -> int:
+        row = len(self._records)
+        record = FriendRecord(item_id=f"manual-{uuid4().hex}", account="")
+        validate_records([record])
+        self.beginInsertRows(QModelIndex(), row, row)
+        self._records.append(record)
+        self._manual_rows_pending_selection.add(record.item_id)
+        self.endInsertRows()
+        self.countsChanged.emit()
+        return row
+
+    @Slot(int, result=bool)
+    def removeRecord(self, row: int) -> bool:
+        if not 0 <= row < len(self._records):
+            return False
+        item_id = self._records[row].item_id
+        self.beginRemoveRows(QModelIndex(), row, row)
+        self._records.pop(row)
+        self._manual_rows_pending_selection.discard(item_id)
+        self.endRemoveRows()
+        validate_records(self._records)
+        if self._records:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._records) - 1, 0),
+                [self.AccountRole, self.ValidRole, self.ErrorRole, self.SelectedRole],
+            )
+        self.countsChanged.emit()
+        return True
 
     @Slot(str, result=bool)
     def importFile(self, path: str) -> bool:
@@ -130,6 +164,14 @@ class FriendImportModel(QAbstractListModel):
         setattr(self._records[row], field, str(value).strip())
         if field == "account":
             validate_records(self._records)
+            record = self._records[row]
+            if (
+                record.valid
+                and record.item_id in self._manual_rows_pending_selection
+            ):
+                self._manual_rows_pending_selection.discard(record.item_id)
+                if self.selectedCount < 20:
+                    record.selected = True
         top = self.index(0, 0)
         bottom = self.index(len(self._records) - 1, 0)
         if bottom.isValid():
