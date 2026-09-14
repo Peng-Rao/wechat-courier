@@ -193,142 +193,146 @@ Item {
                     }
                 }
 
-                TableView {
-                    id: friendTable
-                    objectName: "friendImportTable"
+                Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    clip: true
-                    model: root.friendBackend ? root.friendBackend.model : null
-                    columnWidthProvider: function(column) { return width }
-                    rowHeightProvider: function(row) { return 46 }
-                    delegate: Rectangle {
-                        required property int row
-                        required property string account
-                        required property string greeting
-                        required property string remark
-                        required property bool valid
-                        required property string error
-                        required property string status
-                        required property bool selected
-                        implicitWidth: friendTable.width
-                        implicitHeight: 46
-                        color: !valid ? WxTheme.clDangerSoft
-                            : selected ? (row % 2 ? WxTheme.clRowAlternate : "transparent")
-                            : "transparent"
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 1
-                            color: WxTheme.clSurfaceBorder
-                        }
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 10
-                            spacing: 0
-                            CheckBox {
-                                Layout.preferredWidth: 54
-                                checked: selected
-                                enabled: valid && !root.interactionLocked
-                                onToggled: {
-                                    if (!root.interactionLocked && root.friendBackend)
-                                        root.friendBackend.model.setSelected(row, checked)
-                                }
+                    TableView {
+                        id: friendTable
+                        objectName: "friendImportTable"
+                        anchors.fill: parent
+                        clip: true
+                        model: root.friendBackend ? root.friendBackend.model : null
+                        columnWidthProvider: function(column) { return width }
+                        rowHeightProvider: function(row) { return 46 }
+                        delegate: Rectangle {
+                            required property int row
+                            required property string account
+                            required property string greeting
+                            required property string remark
+                            required property bool valid
+                            required property string error
+                            required property string status
+                            required property bool selected
+                            implicitWidth: friendTable.width
+                            implicitHeight: 46
+                            color: !valid ? WxTheme.clDangerSoft
+                                : selected ? (row % 2 ? WxTheme.clRowAlternate : "transparent")
+                                : "transparent"
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: 1
+                                color: WxTheme.clSurfaceBorder
                             }
-                            Text {
-                                text: String(row + 1).padStart(2, "0")
-                                Layout.preferredWidth: 48
-                                color: WxTheme.clTextSecondary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                            }
-                            TextField {
-                                Layout.preferredWidth: 220
-                                text: account
-                                enabled: !root.interactionLocked
-                                color: WxTheme.clTextPrimary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: {
-                                    if (!root.interactionLocked && root.friendBackend)
-                                        root.friendBackend.model.setCell(row, "account", text)
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: 0
+                                CheckBox {
+                                    Layout.preferredWidth: 54
+                                    checked: selected
+                                    enabled: valid && !root.interactionLocked
+                                    onToggled: {
+                                        if (!root.interactionLocked && root.friendBackend)
+                                            root.friendBackend.model.setSelected(row, checked)
+                                    }
                                 }
-                                background: Rectangle {
-                                    color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                    border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                    radius: WxTheme.radiusSmall
+                                Text {
+                                    text: String(row + 1).padStart(2, "0")
+                                    Layout.preferredWidth: 48
+                                    color: WxTheme.clTextSecondary
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
                                 }
-                            }
-                            TextField {
-                                Layout.fillWidth: true
-                                text: greeting
-                                placeholderText: "使用全局默认值"
-                                enabled: !root.interactionLocked
-                                color: WxTheme.clTextPrimary
-                                placeholderTextColor: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: {
-                                    if (!root.interactionLocked && root.friendBackend)
-                                        root.friendBackend.model.setCell(row, "greeting", text)
+                                TextField {
+                                    objectName: "friendAccountField"
+                                    Layout.preferredWidth: 220
+                                    text: account
+                                    enabled: !root.interactionLocked
+                                    color: WxTheme.clTextPrimary
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    onEditingFinished: {
+                                        if (!root.interactionLocked && root.friendBackend)
+                                            root.friendBackend.model.setCell(row, "account", text)
+                                    }
+                                    background: Rectangle {
+                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
+                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
+                                        radius: WxTheme.radiusSmall
+                                    }
                                 }
-                                background: Rectangle {
-                                    color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                    border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                    radius: WxTheme.radiusSmall
+                                TextField {
+                                    Layout.fillWidth: true
+                                    text: greeting
+                                    placeholderText: "使用全局默认值"
+                                    enabled: !root.interactionLocked
+                                    color: WxTheme.clTextPrimary
+                                    placeholderTextColor: WxTheme.clTextHint
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    onEditingFinished: {
+                                        if (!root.interactionLocked && root.friendBackend)
+                                            root.friendBackend.model.setCell(row, "greeting", text)
+                                    }
+                                    background: Rectangle {
+                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
+                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
+                                        radius: WxTheme.radiusSmall
+                                    }
                                 }
-                            }
-                            TextField {
-                                Layout.preferredWidth: 180
-                                text: remark
-                                placeholderText: "使用全局默认值"
-                                enabled: !root.interactionLocked
-                                color: WxTheme.clTextPrimary
-                                placeholderTextColor: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: {
-                                    if (!root.interactionLocked && root.friendBackend)
-                                        root.friendBackend.model.setCell(row, "remark", text)
+                                TextField {
+                                    Layout.preferredWidth: 180
+                                    text: remark
+                                    placeholderText: "使用全局默认值"
+                                    enabled: !root.interactionLocked
+                                    color: WxTheme.clTextPrimary
+                                    placeholderTextColor: WxTheme.clTextHint
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    onEditingFinished: {
+                                        if (!root.interactionLocked && root.friendBackend)
+                                            root.friendBackend.model.setCell(row, "remark", text)
+                                    }
+                                    background: Rectangle {
+                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
+                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
+                                        radius: WxTheme.radiusSmall
+                                    }
                                 }
-                                background: Rectangle {
-                                    color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                    border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                    radius: WxTheme.radiusSmall
-                                }
-                            }
-                            Item {
-                                Layout.preferredWidth: 110
-                                Layout.fillHeight: true
-                                Rectangle {
-                                    anchors.centerIn: parent
-                                    width: Math.min(100, statusText.implicitWidth + 18)
-                                    height: 24
-                                    radius: WxTheme.radiusSmall
-                                    color: !valid ? WxTheme.clDangerSoft
-                                        : status === "working" ? WxTheme.clInfoSoft
-                                        : status === "success" ? WxTheme.clSuccessSoft
-                                        : status === "unknown" ? WxTheme.clWarningSoft
-                                        : WxTheme.clNeutralSoft
-                                    Text {
-                                        id: statusText
+                                Item {
+                                    Layout.preferredWidth: 110
+                                    Layout.fillHeight: true
+                                    Rectangle {
                                         anchors.centerIn: parent
-                                        text: !valid ? error
-                                            : status === "working" ? "执行中"
-                                            : status === "success" ? "已提交"
-                                            : status === "error" ? "执行异常"
-                                            : status === "unknown" ? "结果未知" : "预检通过"
-                                        elide: Text.ElideRight
-                                        color: !valid || status === "error" ? WxTheme.clDangerNew
-                                            : status === "working" ? WxTheme.clInfo
-                                            : status === "success" ? WxTheme.clSuccessText
-                                            : status === "unknown" ? WxTheme.clWarningText
-                                            : WxTheme.clTextSecondary
-                                        font.family: WxTheme.fontFamily
-                                        font.pixelSize: WxTheme.fontSizeTiny
-                                        font.bold: true
+                                        width: Math.min(100, statusText.implicitWidth + 18)
+                                        height: 24
+                                        radius: WxTheme.radiusSmall
+                                        color: !valid ? WxTheme.clDangerSoft
+                                            : status === "working" ? WxTheme.clInfoSoft
+                                            : status === "success" ? WxTheme.clSuccessSoft
+                                            : status === "unknown" ? WxTheme.clWarningSoft
+                                            : WxTheme.clNeutralSoft
+                                        Text {
+                                            id: statusText
+                                            anchors.centerIn: parent
+                                            text: !valid ? error
+                                                : status === "working" ? "执行中"
+                                                : status === "success" ? "已提交"
+                                                : status === "error" ? "执行异常"
+                                                : status === "unknown" ? "结果未知" : "预检通过"
+                                            elide: Text.ElideRight
+                                            color: !valid || status === "error" ? WxTheme.clDangerNew
+                                                : status === "working" ? WxTheme.clInfo
+                                                : status === "success" ? WxTheme.clSuccessText
+                                                : status === "unknown" ? WxTheme.clWarningText
+                                                : WxTheme.clTextSecondary
+                                            font.family: WxTheme.fontFamily
+                                            font.pixelSize: WxTheme.fontSizeTiny
+                                            font.bold: true
+                                        }
                                     }
                                 }
                             }
@@ -336,12 +340,17 @@ Item {
                     }
 
                     MouseArea {
+                        id: tableContextOverlay
+                        objectName: "friendTableContextOverlay"
                         anchors.fill: parent
                         acceptedButtons: Qt.RightButton
                         enabled: !root.interactionLocked
                         z: 10
                         onClicked: function(mouse) {
-                            var cell = friendTable.cellAtPosition(mouse.x, mouse.y)
+                            var contentPosition = friendTable.contentItem.mapFromItem(
+                                tableContextOverlay, mouse.x, mouse.y)
+                            var cell = friendTable.cellAtPosition(
+                                contentPosition.x, contentPosition.y)
                             root.openTableContextMenu(cell.y)
                         }
                     }
@@ -462,8 +471,10 @@ Item {
 
     WxContextMenu {
         id: friendContextMenu
+        objectName: "friendContextMenu"
 
         WxContextMenuItem {
+            objectName: "addFriendRowMenuItem"
             text: "新增一行"
             enabled: !root.interactionLocked
             onTriggered: root.appendManualRecord()
@@ -479,6 +490,7 @@ Item {
         }
 
         WxContextMenuItem {
+            objectName: "removeFriendRowMenuItem"
             text: "删除此行"
             iconSource: "../icons/trash.svg"
             iconColor: WxTheme.clDangerNew
