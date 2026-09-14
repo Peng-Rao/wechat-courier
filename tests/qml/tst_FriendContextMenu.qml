@@ -67,6 +67,7 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
+    function accountField() { return findChild(workspace, "friendAccountField") }
     function init() {
         workspaceWindow.requestActivate()
         taskBackend.active = false
@@ -129,6 +130,14 @@ TestCase {
         mouseClick(contextOverlay(), 30, Math.floor(contextOverlay().height - 20), Qt.RightButton)
         wait(50)
         compare(menu().visible, false)
+    }
+
+    function test_left_click_account_field_establishes_focus() {
+        var field = accountField()
+        verify(field !== null)
+        verify(field.width > 0 && field.height > 0)
+        mouseClick(field, 20, Math.floor(field.height / 2), Qt.LeftButton)
+        tryCompare(field, "activeFocus", true)
     }
 
     function test_scrolled_row_menu_deletes_correct_record_and_append_is_visible() {
