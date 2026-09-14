@@ -5,6 +5,8 @@ import "../../qml/theme"
 
 TestCase {
     name: "WxTitleBar"
+    when: windowShown
+    property int settingsOpenCount: 0
 
     QtObject {
         id: mockBackend
@@ -20,6 +22,12 @@ TestCase {
         id: titleBar
         width: 640
         titleBackend: mockBackend
+        openSettings: function() { settingsOpenCount += 1 }
+    }
+
+    function init() {
+        settingsOpenCount = 0
+        titleBar.settingsEnabled = true
     }
 
     function cleanup() {
@@ -34,5 +42,20 @@ TestCase {
     function test_titlebar_does_not_change_visual_preferences() {
         compare(WxTheme.glassEnabled, true)
         compare(WxTheme.glassOpacity, 72)
+    }
+
+    function test_settings_button_obeys_enabled_state() {
+        var settingsArea = findChild(titleBar, "settingsMouseArea")
+        verify(settingsArea !== null)
+
+        titleBar.settingsEnabled = false
+        compare(settingsArea.enabled, false)
+        titleBar.requestSettings()
+        compare(settingsOpenCount, 0)
+
+        titleBar.settingsEnabled = true
+        compare(settingsArea.enabled, true)
+        titleBar.requestSettings()
+        compare(settingsOpenCount, 1)
     }
 }

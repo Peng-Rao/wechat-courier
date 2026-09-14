@@ -232,7 +232,13 @@ ApplicationWindow {
             z: 100
             window: root
             titleBackend: typeof backend !== "undefined" ? backend : null
-            openSettings: function() { appRoot.openSettings(3) }
+            settingsEnabled: !(
+                typeof backend !== "undefined" && backend
+                && backend.task && backend.task.active
+            )
+            openSettings: function() {
+                if (customTitleBar.settingsEnabled) appRoot.openSettings(3)
+            }
         }
 
         App {

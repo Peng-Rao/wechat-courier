@@ -9,10 +9,39 @@ Item {
     property var appBackend: null
     readonly property var friendBackend: appBackend ? appBackend.friends : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
+    readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
     property bool monitorVisible: taskBackend && taskBackend.kind === "friend_add"
+    property int contextRow: -1
 
     function startTask() {
+        if (root.interactionLocked) return
         if (taskBackend && taskBackend.startFriends()) monitorVisible = true
+    }
+
+    function appendManualRecord() {
+        if (root.interactionLocked || !root.friendBackend) return -1
+        var row = root.friendBackend.model.appendEmptyRecord()
+        if (row >= 0) {
+            Qt.callLater(function() {
+                if (root.friendBackend && row < root.friendBackend.model.count)
+                    friendTable.positionViewAtRow(row, TableView.Contain)
+            })
+        }
+        return row
+    }
+
+    function removeContextRecord() {
+        if (root.interactionLocked || !root.friendBackend || root.contextRow < 0)
+            return false
+        var removed = root.friendBackend.model.removeRecord(root.contextRow)
+        root.contextRow = -1
+        return removed
+    }
+
+    function openTableContextMenu(row) {
+        if (root.interactionLocked || !root.friendBackend) return
+        root.contextRow = row >= 0 && row < root.friendBackend.model.count ? row : -1
+        friendContextMenu.popup()
     }
 
     StackLayout {
@@ -45,7 +74,7 @@ Item {
                                 font.bold: true
                             }
                             Text {
-                                text: "导入后可直接编辑；每次最多执行 20 条选中记录"
+                                text: "可导入或右键新增/删除，单元格可直接编辑；每次最多执行 20 条选中记录"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
@@ -54,7 +83,10 @@ Item {
                         Item { Layout.fillWidth: true }
                         Button {
                             text: "下载模板"
-                            onClicked: templateDialog.open()
+                            enabled: !root.interactionLocked
+                            onClicked: {
+                                if (!root.interactionLocked) templateDialog.open()
+                            }
                             contentItem: Text {
                                 text: parent.text
                                 color: WxTheme.clTextPrimary
@@ -72,8 +104,10 @@ Item {
                         Button {
                             objectName: "importFriendsButton"
                             text: "＋ 导入 Excel / CSV"
-                            enabled: !(root.taskBackend && root.taskBackend.active)
-                            onClicked: importDialog.open()
+                            enabled: !root.interactionLocked
+                            onClicked: {
+                                if (!root.interactionLocked) importDialog.open()
+                            }
                             contentItem: Text {
                                 text: parent.text
                                 color: "white"
@@ -131,8 +165,11 @@ Item {
                         }
                         Button {
                             text: "选择前 20 条"
-                            enabled: root.friendBackend && !(root.taskBackend && root.taskBackend.active)
-                            onClicked: root.friendBackend.model.selectFirstValid()
+                            enabled: root.friendBackend && !root.interactionLocked
+                            onClicked: {
+                                if (!root.interactionLocked && root.friendBackend)
+                                    root.friendBackend.model.selectFirstValid()
+                            }
                         }
                     }
                 }
@@ -194,8 +231,11 @@ Item {
                             CheckBox {
                                 Layout.preferredWidth: 54
                                 checked: selected
-                                enabled: valid && !(root.taskBackend && root.taskBackend.active)
-                                onToggled: root.friendBackend.model.setSelected(row, checked)
+                                enabled: valid && !root.interactionLocked
+                                onToggled: {
+                                    if (!root.interactionLocked && root.friendBackend)
+                                        root.friendBackend.model.setSelected(row, checked)
+                                }
                             }
                             Text {
                                 text: String(row + 1).padStart(2, "0")
@@ -207,11 +247,14 @@ Item {
                             TextField {
                                 Layout.preferredWidth: 220
                                 text: account
-                                enabled: !(root.taskBackend && root.taskBackend.active)
+                                enabled: !root.interactionLocked
                                 color: WxTheme.clTextPrimary
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: root.friendBackend.model.setCell(row, "account", text)
+                                onEditingFinished: {
+                                    if (!root.interactionLocked && root.friendBackend)
+                                        root.friendBackend.model.setCell(row, "account", text)
+                                }
                                 background: Rectangle {
                                     color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
                                     border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
@@ -222,12 +265,15 @@ Item {
                                 Layout.fillWidth: true
                                 text: greeting
                                 placeholderText: "使用全局默认值"
-                                enabled: !(root.taskBackend && root.taskBackend.active)
+                                enabled: !root.interactionLocked
                                 color: WxTheme.clTextPrimary
                                 placeholderTextColor: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: root.friendBackend.model.setCell(row, "greeting", text)
+                                onEditingFinished: {
+                                    if (!root.interactionLocked && root.friendBackend)
+                                        root.friendBackend.model.setCell(row, "greeting", text)
+                                }
                                 background: Rectangle {
                                     color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
                                     border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
@@ -238,12 +284,15 @@ Item {
                                 Layout.preferredWidth: 180
                                 text: remark
                                 placeholderText: "使用全局默认值"
-                                enabled: !(root.taskBackend && root.taskBackend.active)
+                                enabled: !root.interactionLocked
                                 color: WxTheme.clTextPrimary
                                 placeholderTextColor: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeSmall
-                                onEditingFinished: root.friendBackend.model.setCell(row, "remark", text)
+                                onEditingFinished: {
+                                    if (!root.interactionLocked && root.friendBackend)
+                                        root.friendBackend.model.setCell(row, "remark", text)
+                                }
                                 background: Rectangle {
                                     color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
                                     border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
@@ -285,6 +334,17 @@ Item {
                             }
                         }
                     }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        enabled: !root.interactionLocked
+                        z: 10
+                        onClicked: function(mouse) {
+                            var cell = friendTable.cellAtPosition(mouse.x, mouse.y)
+                            root.openTableContextMenu(cell.y)
+                        }
+                    }
                 }
 
                 Rectangle {
@@ -317,8 +377,11 @@ Item {
                             Layout.preferredWidth: 300
                             placeholderText: "默认打招呼语"
                             text: root.friendBackend ? root.friendBackend.defaultGreeting : ""
-                            enabled: !(root.taskBackend && root.taskBackend.active)
-                            onEditingFinished: root.friendBackend.defaultGreeting = text
+                            enabled: !root.interactionLocked
+                            onEditingFinished: {
+                                if (!root.interactionLocked && root.friendBackend)
+                                    root.friendBackend.defaultGreeting = text
+                            }
                             color: WxTheme.clTextPrimary
                             background: WxGlassSurface {
                                 fillColor: WxTheme.clFieldFill
@@ -329,8 +392,11 @@ Item {
                             Layout.preferredWidth: 150
                             placeholderText: "默认备注"
                             text: root.friendBackend ? root.friendBackend.defaultRemark : ""
-                            enabled: !(root.taskBackend && root.taskBackend.active)
-                            onEditingFinished: root.friendBackend.defaultRemark = text
+                            enabled: !root.interactionLocked
+                            onEditingFinished: {
+                                if (!root.interactionLocked && root.friendBackend)
+                                    root.friendBackend.defaultRemark = text
+                            }
                             color: WxTheme.clTextPrimary
                             background: WxGlassSurface {
                                 fillColor: WxTheme.clFieldFill
@@ -361,7 +427,7 @@ Item {
                             objectName: "startFriendsButton"
                             text: "开始添加 " + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
                             enabled: root.appBackend && root.appBackend.agent.automationReady
-                                && !(root.taskBackend && root.taskBackend.active)
+                                && !root.interactionLocked
                                 && root.friendBackend && root.friendBackend.model.selectedCount > 0
                             onClicked: root.startTask()
                             implicitHeight: 38
@@ -394,12 +460,45 @@ Item {
         }
     }
 
+    WxContextMenu {
+        id: friendContextMenu
+
+        WxContextMenuItem {
+            text: "新增一行"
+            enabled: !root.interactionLocked
+            onTriggered: root.appendManualRecord()
+        }
+
+        MenuSeparator {
+            visible: root.contextRow >= 0
+            height: visible ? implicitHeight : 0
+            background: Rectangle {
+                implicitHeight: 1
+                color: WxTheme.clDivider
+            }
+        }
+
+        WxContextMenuItem {
+            text: "删除此行"
+            iconSource: "../icons/trash.svg"
+            iconColor: WxTheme.clDangerNew
+            hoverIconColor: WxTheme.clDangerNewHover
+            visible: root.contextRow >= 0
+            height: visible ? implicitHeight : 0
+            enabled: !root.interactionLocked
+            onTriggered: root.removeContextRecord()
+        }
+    }
+
     FileDialog {
         id: importDialog
         title: "导入好友账号"
         nameFilters: ["Excel / CSV (*.xlsx *.csv)"]
         fileMode: FileDialog.OpenFile
-        onAccepted: if (root.friendBackend) root.friendBackend.importFile(selectedFile)
+        onAccepted: {
+            if (!root.interactionLocked && root.friendBackend)
+                root.friendBackend.importFile(selectedFile)
+        }
     }
 
     FileDialog {
@@ -408,6 +507,9 @@ Item {
         nameFilters: ["Excel 文件 (*.xlsx)"]
         fileMode: FileDialog.SaveFile
         defaultSuffix: "xlsx"
-        onAccepted: if (root.friendBackend) root.friendBackend.createTemplate(selectedFile)
+        onAccepted: {
+            if (!root.interactionLocked && root.friendBackend)
+                root.friendBackend.createTemplate(selectedFile)
+        }
     }
 }

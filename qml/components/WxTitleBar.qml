@@ -9,6 +9,7 @@ Rectangle {
     property var window: null
     property var titleBackend: null
     property var openSettings: null
+    property bool settingsEnabled: true
     property bool layoutMenuOpen: false
 
     height: 40
@@ -21,6 +22,10 @@ Rectangle {
         } else {
             root.window.applySnapMode("maximize")
         }
+    }
+
+    function requestSettings() {
+        if (root.settingsEnabled && root.openSettings) root.openSettings()
     }
 
     // Bottom divider
@@ -109,7 +114,9 @@ Rectangle {
             Layout.preferredWidth: 30
             Layout.preferredHeight: 28
             radius: WxTheme.radiusSmall
-            color: settingsArea.containsMouse ? WxTheme.clBgHover : "transparent"
+            opacity: root.settingsEnabled ? 1.0 : 0.45
+            color: root.settingsEnabled && settingsArea.containsMouse
+                ? WxTheme.clBgHover : "transparent"
 
             WxIcon {
                 anchors.centerIn: parent
@@ -120,10 +127,12 @@ Rectangle {
 
             MouseArea {
                 id: settingsArea
+                objectName: "settingsMouseArea"
                 anchors.fill: parent
+                enabled: root.settingsEnabled
                 hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: if (root.openSettings) root.openSettings()
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.requestSettings()
             }
         }
 

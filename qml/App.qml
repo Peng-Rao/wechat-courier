@@ -9,9 +9,13 @@ Rectangle {
     objectName: "appRoot"
     property var appBackend: null
     property int workspaceIndex: 0
+    readonly property bool interactionLocked: !!(
+        appBackend && appBackend.task && appBackend.task.active
+    )
     color: "transparent"
 
     function openSettings(section) {
+        if (root.interactionLocked) return
         settingsDialog.sectionIndex = section === undefined ? 0 : section
         settingsDialog.open()
     }
@@ -40,11 +44,15 @@ Rectangle {
                         objectName: index === 0 ? "messageWorkspaceTab" : "friendWorkspaceTab"
                         Layout.preferredWidth: index === 0 ? 92 : 116
                         Layout.fillHeight: true
-                        onClicked: root.workspaceIndex = index
+                        enabled: !root.interactionLocked
+                        onClicked: {
+                            if (!root.interactionLocked) root.workspaceIndex = index
+                        }
                         contentItem: Text {
                             text: modelData
                             color: root.workspaceIndex === index
-                                ? WxTheme.clTextPrimary : WxTheme.clTextSecondary
+                                ? WxTheme.clTextPrimary
+                                : (parent.enabled ? WxTheme.clTextSecondary : WxTheme.clTextHint)
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeSmall + (root.workspaceIndex === index ? 1 : 0)
                             font.bold: root.workspaceIndex === index
@@ -105,6 +113,15 @@ Rectangle {
     SettingsDialog {
         id: settingsDialog
         appBackend: root.appBackend
+        enabled: !root.interactionLocked
+    }
+
+    Connections {
+        target: root.appBackend ? root.appBackend.task : null
+        ignoreUnknownSignals: true
+        function onActiveChanged() {
+            if (root.interactionLocked && settingsDialog.opened) settingsDialog.close()
+        }
     }
 
     RecoveryDialog {

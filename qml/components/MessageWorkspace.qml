@@ -9,9 +9,11 @@ Item {
     property var appBackend: null
     readonly property var messageBackend: appBackend ? appBackend.message : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
+    readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
     property bool monitorVisible: taskBackend && taskBackend.kind === "message_send"
 
     function startTask() {
+        if (root.interactionLocked) return
         if (taskBackend && taskBackend.startMessage()) {
             monitorVisible = true
         }
@@ -36,7 +38,7 @@ Item {
                     ColumnLayout {
                         width: Math.max(560, parent.width)
                         spacing: 10
-                        enabled: !(root.taskBackend && root.taskBackend.active)
+                        enabled: !root.interactionLocked
 
                         Item { Layout.preferredHeight: 4 }
 
@@ -80,7 +82,8 @@ Item {
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeNormal
                             onTextChanged: {
-                                if (root.messageBackend && root.messageBackend.recipientsText !== text)
+                                if (!root.interactionLocked && root.messageBackend
+                                        && root.messageBackend.recipientsText !== text)
                                     root.messageBackend.recipientsText = text
                             }
                             background: WxGlassSurface {
@@ -155,7 +158,8 @@ Item {
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeNormal
                             onTextChanged: {
-                                if (root.messageBackend && root.messageBackend.templateText !== text)
+                                if (!root.interactionLocked && root.messageBackend
+                                        && root.messageBackend.templateText !== text)
                                     root.messageBackend.templateText = text
                             }
                             background: WxGlassSurface {
@@ -179,7 +183,9 @@ Item {
                             Item { Layout.fillWidth: true }
                             Button {
                                 text: "＋ 选择文件"
-                                onClicked: messageFileDialog.open()
+                                onClicked: {
+                                    if (!root.interactionLocked) messageFileDialog.open()
+                                }
                                 contentItem: Text {
                                     text: parent.text
                                     color: WxTheme.clTextPrimary
@@ -237,7 +243,10 @@ Item {
                                         Button {
                                             implicitWidth: 30
                                             implicitHeight: 30
-                                            onClicked: root.messageBackend.removeFile(index)
+                                            onClicked: {
+                                                if (!root.interactionLocked && root.messageBackend)
+                                                    root.messageBackend.removeFile(index)
+                                            }
                                             contentItem: Text {
                                                 text: "×"
                                                 color: WxTheme.clTextSecondary
@@ -273,12 +282,17 @@ Item {
                             MouseArea {
                                 id: dropMouse
                                 anchors.fill: parent
+                                enabled: !root.interactionLocked
                                 hoverEnabled: true
-                                onClicked: messageFileDialog.open()
+                                onClicked: {
+                                    if (!root.interactionLocked) messageFileDialog.open()
+                                }
                             }
                             DropArea {
                                 anchors.fill: parent
+                                enabled: !root.interactionLocked
                                 onDropped: function(drop) {
+                                    if (root.interactionLocked || !root.messageBackend) return
                                     for (var i = 0; i < drop.urls.length; ++i)
                                         root.messageBackend.addFile(drop.urls[i])
                                 }
@@ -499,8 +513,13 @@ Item {
                     spacing: 12
 
                     Switch {
+                        objectName: "messageUseForwardSwitch"
                         checked: root.messageBackend ? root.messageBackend.useForward : false
-                        onToggled: if (root.messageBackend) root.messageBackend.useForward = checked
+                        enabled: !root.interactionLocked
+                        onToggled: {
+                            if (!root.interactionLocked && root.messageBackend)
+                                root.messageBackend.useForward = checked
+                        }
                     }
                     Text {
                         text: "合并转发附件"
@@ -539,7 +558,7 @@ Item {
                         objectName: "startMessageButton"
                         text: "开始发送 " + (root.messageBackend ? root.messageBackend.recipientCount : 0) + " 人"
                         enabled: root.appBackend && root.appBackend.agent.automationReady
-                            && !(root.taskBackend && root.taskBackend.active)
+                            && !root.interactionLocked
                             && root.messageBackend && root.messageBackend.recipientCount > 0
                         onClicked: root.startTask()
                         implicitHeight: 38
@@ -576,7 +595,7 @@ Item {
         title: "选择要发送的附件"
         fileMode: FileDialog.OpenFiles
         onAccepted: {
-            if (!root.messageBackend) return
+            if (root.interactionLocked || !root.messageBackend) return
             for (var i = 0; i < selectedFiles.length; ++i)
                 root.messageBackend.addFile(selectedFiles[i])
         }

@@ -36,6 +36,37 @@ def test_friend_workspace_has_editable_import_table_and_selection_limit():
     assert 'status === "working" ? "执行中"' in source
 
 
+def test_friend_workspace_exposes_right_click_add_and_delete_actions():
+    source = qml("FriendWorkspace.qml")
+
+    assert "function appendManualRecord()" in source
+    assert "function removeContextRecord()" in source
+    assert "appendEmptyRecord()" in source
+    assert "removeRecord(root.contextRow)" in source
+    assert "新增一行" in source
+    assert "删除此行" in source
+    assert "可导入或右键新增/删除，单元格可直接编辑" in source
+
+
+def test_active_task_locks_navigation_settings_and_configuration_controls():
+    app = (ROOT / "qml" / "App.qml").read_text(encoding="utf-8")
+    main = (ROOT / "qml" / "main.qml").read_text(encoding="utf-8")
+    titlebar = qml("WxTitleBar.qml")
+    friends = qml("FriendWorkspace.qml")
+    messages = qml("MessageWorkspace.qml")
+
+    assert "readonly property bool interactionLocked" in app
+    assert "if (root.interactionLocked) return" in app
+    assert "enabled: !root.interactionLocked" in app
+    assert "settingsEnabled:" in main
+    assert "property bool settingsEnabled: true" in titlebar
+    assert "enabled: root.settingsEnabled" in titlebar
+    assert "readonly property bool interactionLocked" in friends
+    assert "readonly property bool interactionLocked" in messages
+    assert 'objectName: "messageUseForwardSwitch"' in messages
+    assert "enabled: !root.interactionLocked" in messages
+
+
 def test_monitor_uses_chinese_state_machine_and_runtime_log():
     source = qml("TaskMonitor.qml")
     assert "消息发送状态" in source
