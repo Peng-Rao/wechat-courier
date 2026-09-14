@@ -159,6 +159,98 @@ def test_search_waits_for_refreshed_results_instead_of_accepting_old_nonempty_li
     assert driver._search_edit.value == "新结果"
 
 
+def test_repeated_search_accepts_identical_candidates_after_clear_transition():
+    class SearchEdit(FakeControl):
+        value = "Alice"
+
+    class Actions:
+        @staticmethod
+        def set_text(control, value, **_kwargs):
+            control.value = value
+
+        @staticmethod
+        def read_text(control):
+            return control.value
+
+    class PollingWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            for _ in range(6):
+                if predicate():
+                    return True
+            return False
+
+    candidate = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_1", 0, 1, (1, 7)
+    )
+    snapshots = iter(
+        (([candidate], [object()]), None, ([candidate], [object()]), ([candidate], [object()]))
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver.ensure_search_ready = lambda: True
+    driver._search_edit = SearchEdit()
+    driver._actions = Actions()
+    driver._waiter = PollingWaiter()
+    driver._search_rows = lambda: next(snapshots, ([candidate], [object()]))
+
+    assert driver.search_contacts("Alice") == [candidate]
+
+
+def test_open_exact_chat_supports_repeated_file_transfer_helper_searches():
+    candidate = SearchCandidate(
+        "文件传输助手",
+        frozenset({"文件传输助手"}),
+        "function",
+        "search_item_function_1",
+        0,
+        1,
+    )
+    class SearchEdit(FakeControl):
+        value = "文件传输助手"
+
+    class Actions:
+        @staticmethod
+        def set_text(control, value, **_kwargs):
+            control.value = value
+
+        @staticmethod
+        def read_text(control):
+            return control.value
+
+    class PollingWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            for _ in range(6):
+                if predicate():
+                    return True
+            return False
+
+    selected = []
+    snapshots = iter(
+        (
+            ([candidate], [object()]),
+            None,
+            ([candidate], [object()]),
+            ([candidate], [object()]),
+            ([candidate], [object()]),
+            None,
+            ([candidate], [object()]),
+            ([candidate], [object()]),
+        )
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver.ensure_search_ready = lambda: True
+    driver._search_edit = SearchEdit()
+    driver._actions = Actions()
+    driver._waiter = PollingWaiter()
+    driver._search_rows = lambda: next(snapshots, ([candidate], [object()]))
+    driver.select_search_result = lambda value: selected.append(value)
+    driver.current_chat_title = lambda: "文件传输助手"
+
+    driver._open_exact_chat("文件传输助手")
+    driver._open_exact_chat("文件传输助手")
+
+    assert selected == [candidate, candidate]
+
+
 def test_search_candidate_click_uses_valid_descendant_when_row_has_no_bounds():
     row = FakeControl(
         "Alice", "ListItemControl", "mmui::SearchContentCellView", "search_item_1"
@@ -242,6 +334,96 @@ def test_select_search_result_re_resolves_row_after_pattern_failure():
     assert clicked == [(130, 120)]
 
 
+def test_select_rejects_new_duplicate_identity_before_fallback_click():
+    first = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_1", 0, 1
+    )
+    duplicate = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_2", 1, 1
+    )
+    stale = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(20, 20, 80, 50),
+    )
+    second_row = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_2",
+        BoundingRectangle=FakeRect(90, 20, 150, 50),
+    )
+    stale.GetSelectionItemPattern = lambda: type(
+        "Pattern", (), {"Select": staticmethod(lambda **_kwargs: False)}
+    )()
+    snapshots = iter(
+        (([first], [stale]), ([first, duplicate], [stale, second_row]))
+    )
+    clicks = []
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._search_query = "Alice"
+    driver._search_rows = lambda: next(
+        snapshots, ([first, duplicate], [stale, second_row])
+    )
+    driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
+    driver._uia = type(
+        "Uia", (), {"Click": staticmethod(lambda x, y: clicks.append((x, y)))}
+    )()
+    driver.composer_ready = lambda: False
+
+    with pytest.raises(RuntimeError, match="唯一|re-resolution"):
+        driver.select_search_result(first)
+
+    assert clicks == []
+
+
+def test_select_accepts_remark_chat_title_for_nickname_query():
+    candidate = SearchCandidate(
+        "Alice 备注",
+        frozenset({"Alice 备注", "Alice 昵称"}),
+        "contact",
+        "search_item_1",
+        0,
+        1,
+    )
+    row = FakeControl(
+        "Alice 备注",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(20, 20, 80, 50),
+    )
+    row.GetSelectionItemPattern = lambda: type(
+        "Pattern", (), {"Select": staticmethod(lambda **_kwargs: True)}
+    )()
+    root = FakeControl(BoundingRectangle=FakeRect(0, 0, 1000, 800))
+    title_bar = FakeControl(ClassName="mmui::ChatTitleBarMasterView")
+    title = FakeControl(
+        "Alice 备注",
+        "TextControl",
+        "mmui::XTextView",
+        "content_view.top_content_view.title_h_view.left_v_view.left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label",
+        BoundingRectangle=FakeRect(600, 100, 800, 140),
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._search_query = "Alice 昵称"
+    driver._search_rows = lambda: ([candidate], [row])
+    driver._root = root
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver._walk = lambda _hwnd: (
+        root,
+        [(root, 0), (title_bar, 1), (title, 2)],
+    )
+    driver._find_composer = lambda: object()
+    driver.composer_ready = lambda: True
+
+    driver.select_search_result(candidate)
+
+    assert driver.current_chat_title() == "Alice 备注"
+
+
 def test_bind_window_rebinds_once_when_first_root_is_invisible(monkeypatch):
     class Session:
         def __init__(self, hwnd, root):
@@ -286,8 +468,13 @@ def test_chat_title_ignores_matching_text_inside_search_popup_and_requires_compo
         "Alice", "TextControl", BoundingRectangle=FakeRect(600, 50, 800, 90)
     )
     chat_title = FakeControl(
-        "Alice", "TextControl", BoundingRectangle=FakeRect(600, 100, 800, 140)
+        "Alice",
+        "TextControl",
+        "mmui::XTextView",
+        "content_view.top_content_view.title_h_view.left_v_view.left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label",
+        BoundingRectangle=FakeRect(600, 100, 800, 140),
     )
+    title_bar = FakeControl(ClassName="mmui::ChatTitleBarMasterView")
     driver = NativeWeixinDriver(gate_backend=object())
     driver._selected_target = "Alice"
     driver._root = root
@@ -296,12 +483,41 @@ def test_chat_title_ignores_matching_text_inside_search_popup_and_requires_compo
     )()
     driver._walk = lambda _hwnd: (
         root,
-        [(root, 0), (popup, 1), (search_title, 2), (chat_title, 1)],
+        [(root, 0), (popup, 1), (search_title, 2), (title_bar, 1), (chat_title, 2)],
     )
     driver._find_composer = lambda: object()
 
     assert driver.current_chat_title() == "Alice"
     driver._find_composer = lambda: None
+    assert driver.current_chat_title() == ""
+
+
+def test_chat_title_rejects_ordinary_matching_label_in_upper_right_quadrant():
+    root = FakeControl(BoundingRectangle=FakeRect(0, 0, 1000, 800))
+    unrelated = FakeControl(
+        "Alice", "TextControl", "mmui::Label", BoundingRectangle=FakeRect(600, 50, 800, 90)
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._selected_target = "Alice"
+    driver._root = root
+    driver._session = type(
+        "Session",
+        (),
+        {
+            "hwnd": 1,
+            "profile": type(
+                "P",
+                (),
+                {
+                    "search_popup_class": "mmui::XPopover",
+                    "search_list_automation_id": "search_list",
+                },
+            )(),
+        },
+    )()
+    driver._walk = lambda _hwnd: (root, [(root, 0), (unrelated, 1)])
+    driver._find_composer = lambda: object()
+
     assert driver.current_chat_title() == ""
 
 
@@ -320,6 +536,25 @@ def test_message_verification_requires_a_new_matching_tail_and_empty_composer():
 
     driver._message_controls = lambda: [old, new, FakeControl("other", "TextControl", "mmui::ChatTextItemView")]
     assert driver.verify_sent((((1, 1), "old"),), "hello", timeout=0.1) is None
+
+
+def test_message_verification_does_not_reclassify_an_existing_message_as_new_tail():
+    hello = FakeControl("hello", "TextControl", "mmui::ChatTextItemView")
+    later = FakeControl("later", "TextControl", "mmui::ChatTextItemView")
+    hello.GetRuntimeId = lambda: (1, 1)
+    later.GetRuntimeId = lambda: (1, 2)
+    controls = [hello, later]
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._message_controls = lambda: list(controls)
+    before = driver.message_snapshot()
+    controls[:] = [hello]
+    driver._waiter = type(
+        "W", (), {"wait": staticmethod(lambda predicate, *_args, **_kwargs: predicate())}
+    )()
+    driver.read_composer_text = lambda: ""
+    driver._all_nodes = lambda: []
+
+    assert driver.verify_sent(before, "hello", timeout=0.1) is None
 
 
 def test_forward_candidates_require_one_exact_interactive_identity():

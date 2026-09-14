@@ -5,6 +5,7 @@ import threading
 import pytest
 
 from app.agent.contracts import TaskItem, TaskOptions, TaskRequest
+from app.agent.native_driver import SearchCandidate
 from app.agent.runtime import TaskControl
 from app.agent.workflows import RiskControlError, WeixinWorkflowEngine
 
@@ -187,6 +188,33 @@ def test_message_checks_title_and_composer_before_triggering_send():
     assert result["error"] == 1
     assert driver.sent == []
     assert events[-1]["step"] == "content_inserted"
+
+
+def test_message_accepts_remark_title_for_unique_nickname_candidate():
+    candidate = SearchCandidate(
+        "Alice 备注",
+        frozenset({"Alice 备注", "Alice 昵称"}),
+        "contact",
+        "search_item_1",
+        0,
+        1,
+    )
+    driver = FakeDriver()
+    driver.search_results["Alice 昵称"] = [candidate]
+    driver.select_search_result = lambda selected: setattr(
+        driver, "chat_title", selected.display_name
+    )
+
+    result, _events = run_engine(
+        driver,
+        request(
+            "message_send",
+            [TaskItem("one", target="Alice 昵称", message="hello")],
+        ),
+    )
+
+    assert result["success"] == 1
+    assert driver.sent == ["hello"]
 
 
 def test_message_retries_the_safe_location_chain_once_before_send():

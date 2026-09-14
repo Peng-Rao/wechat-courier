@@ -628,7 +628,7 @@ class WeixinWorkflowEngine:
         title = self._driver_action(
             "target_verified", "current_chat_title", driver.current_chat_title
         )
-        if normalize_identity(title) != expected:
+        if not candidate_matches_identity(exact[0], normalize_identity(title)):
             raise WorkflowError(
                 "target_verified", f"聊天标题校验失败：{title or '<空>'}"
             )

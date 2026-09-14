@@ -41,6 +41,12 @@ FRIEND_SUBMIT_SUCCESS_NAMES = (
     "等待验证",
     "申请已提交",
 )
+CHAT_TITLE_CONTAINER_CLASS = "mmui::ChatTitleBarMasterView"
+CHAT_TITLE_CONTROL_CLASS = "mmui::XTextView"
+CHAT_TITLE_AUTOMATION_ID = (
+    "content_view.top_content_view.title_h_view.left_v_view."
+    "left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label"
+)
 
 
 @dataclass(frozen=True)
@@ -320,6 +326,7 @@ class NativeWeixinDriver:
         self._search_results: list[SearchCandidate] = []
         self._search_query = ""
         self._selected_target = ""
+        self._selected_identities: frozenset[str] = frozenset()
         self._composer = None
         self._add_hwnd = 0
         self._verify_hwnd = 0
@@ -763,16 +770,22 @@ class NativeWeixinDriver:
         self._search_query = ""
         self._actions.set_text(self._search_edit, "", wake_event=self._wake_event)
 
+        refresh_state = {"cleared": False}
+
         def cleared_results_refreshed() -> bool:
             if self._actions.read_text(self._search_edit) != "":
                 return False
             current = self._search_rows()
             if current is None:
+                refresh_state["cleared"] = True
                 return True
-            return (
+            refreshed = (
                 not initial_signature
                 or self._candidate_signature(current[0]) != initial_signature
             )
+            if refreshed:
+                refresh_state["cleared"] = True
+            return refreshed
 
         if not self._waiter.wait(
             cleared_results_refreshed, self._timeout, self._wake_event
@@ -800,10 +813,7 @@ class NativeWeixinDriver:
                 holder["signature"] = signature
                 holder["stable"] = 1
             holder["matches"] = candidates
-            refreshed = (
-                not initial_signature or signature != initial_signature
-            )
-            return refreshed and holder["stable"] >= 2
+            return refresh_state["cleared"] and holder["stable"] >= 2
 
         if not self._waiter.wait(collect_results, self._timeout, self._wake_event):
             raise RuntimeError("本轮搜索结果列表未稳定")
@@ -816,8 +826,20 @@ class NativeWeixinDriver:
         if current is None:
             return None
         candidates, controls = current
+        expected = normalize_identity(self._search_query)
+        matching_indexes = [
+            index
+            for index, current_candidate in enumerate(candidates)
+            if any(
+                normalize_identity(identity) == expected
+                for identity in current_candidate.identities
+            )
+        ]
+        if len(matching_indexes) != 1:
+            return None
         exact_indexes = [
-            index for index, current_candidate in enumerate(candidates)
+            index
+            for index, current_candidate in enumerate(candidates)
             if current_candidate == candidate
         ]
         if len(exact_indexes) != 1:
@@ -838,6 +860,8 @@ class NativeWeixinDriver:
         if len(exact_indexes) != 1:
             return None
         index = exact_indexes[0]
+        if index != matching_indexes[0]:
+            return None
         return controls[index] if index < len(controls) else None
 
     def select_search_result(self, candidate: SearchCandidate) -> None:
@@ -847,11 +871,19 @@ class NativeWeixinDriver:
         if control is None:
             raise RuntimeError("无法解析唯一搜索结果控件")
         self._selected_target = self._search_query or candidate.display_name
-        normalized = normalize_identity(self._selected_target)
+        self._selected_identities = candidate.identities
+
+        def selected_chat_verified() -> bool:
+            title = normalize_identity(self.current_chat_title())
+            return bool(title) and any(
+                normalize_identity(identity) == title
+                for identity in candidate.identities
+            )
+
         self._actions.select(
             control,
             lambda: self.composer_ready()
-            and normalize_identity(self.current_chat_title()) == normalized,
+            and selected_chat_verified(),
             resolve_control=lambda: self._resolve_search_candidate(candidate),
             extra_postcondition=lambda: self.composer_ready(),
             wake_event=self._wake_event,
@@ -864,31 +896,41 @@ class NativeWeixinDriver:
             return ""
         _root, nodes = self._walk(self._session.hwnd)
         root_rect = safe_attr(self._root, "BoundingRectangle")
-        expected = normalize_identity(self._selected_target)
-        excluded_depth: int | None = None
-        profile = self._session.profile
+        accepted_identities = {
+            normalize_identity(identity)
+            for identity in (
+                self._selected_identities or frozenset({self._selected_target})
+            )
+        }
+        title_container_depth: int | None = None
         for control, depth in nodes:
-            if excluded_depth is not None:
-                if depth > excluded_depth:
-                    continue
-                excluded_depth = None
-            if (
-                str(safe_attr(control, "ClassName", ""))
-                == profile.search_popup_class
-                or str(safe_attr(control, "AutomationId", ""))
-                == profile.search_list_automation_id
-            ):
-                excluded_depth = depth
+            class_name = str(safe_attr(control, "ClassName", ""))
+            if title_container_depth is not None and depth <= title_container_depth:
+                title_container_depth = None
+            if class_name == CHAT_TITLE_CONTAINER_CLASS:
+                title_container_depth = depth
                 continue
-            if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
+            if title_container_depth is None:
+                continue
+            if class_name != CHAT_TITLE_CONTROL_CLASS:
+                continue
+            if (
+                str(safe_attr(control, "AutomationId", ""))
+                != CHAT_TITLE_AUTOMATION_ID
+            ):
+                continue
+            title = str(safe_attr(control, "Name", "")).strip()
+            if normalize_identity(title) not in accepted_identities:
                 continue
             rectangle = safe_attr(control, "BoundingRectangle")
-            if root_rect is None or rectangle is None:
+            if not self._rect_valid(root_rect) or not self._rect_valid(rectangle):
                 continue
-            right_pane = rectangle.left >= root_rect.left + root_rect.width() * 0.25
-            near_top = rectangle.top <= root_rect.top + root_rect.height() * 0.25
-            if right_pane and near_top:
-                return str(safe_attr(control, "Name", "")).strip()
+            midpoint = (
+                (rectangle.left + rectangle.right) // 2,
+                (rectangle.top + rectangle.bottom) // 2,
+            )
+            if self._point_in_rect(midpoint, root_rect):
+                return title
         return ""
 
     def _find_composer(self):
@@ -998,8 +1040,10 @@ class NativeWeixinDriver:
                 return False
             old_tail = before[-1][0] if before else None
             new_tail = current[-1]
+            prior_identities = {entry[0] for entry in before}
             has_new_match = (
                 new_tail[0] != old_tail
+                and new_tail[0] not in prior_identities
                 and normalize_identity(new_tail[1]) == normalize_identity(expected)
             )
             return has_new_match and self.read_composer_text() == ""
@@ -1055,7 +1099,11 @@ class NativeWeixinDriver:
         if len(exact) != 1:
             raise RuntimeError(f"无法定位唯一聊天目标：{target}")
         self.select_search_result(exact[0])
-        if normalize_identity(self.current_chat_title()) != expected:
+        title = normalize_identity(self.current_chat_title())
+        if not title or not any(
+            normalize_identity(identity) == title
+            for identity in exact[0].identities
+        ):
             raise RuntimeError(f"聊天标题校验失败：{target}")
 
     def prepare_forward_bundle(self, paths: Sequence[str]) -> dict[str, Any]:
