@@ -76,6 +76,24 @@ TestCase {
         return findChild(monitor, "taskStepNode-" + index)
     }
 
+    function hasText(item, value) {
+        if (item.text !== undefined && item.text === value)
+            return true
+        var children = item.children || []
+        for (var i = 0; i < children.length; ++i)
+            if (hasText(children[i], value))
+                return true
+        return false
+    }
+
+    function test_stopped_row_does_not_display_waiting() {
+        taskItems.append({target: "mock_only", detail: "未执行：任务已结束",
+                          result: "stopped", duration: "--", stepCode: "", itemId: "one"})
+        tryVerify(function() { return hasText(monitor, "已停止") })
+        verify(!hasText(monitor, "等待中"))
+        taskItems.clear()
+    }
+
     function connector(index) {
         return findChild(monitor, "taskStepConnector-" + index)
     }

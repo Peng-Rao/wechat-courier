@@ -3370,17 +3370,124 @@ def test_friend_submit_accepts_confirm_window_close_with_visible_weixin_owner(
     driver._waiter = ImmediateWaiter()
     driver._verify_hwnd = 303
     driver._add_hwnd = 100
-    driver._session = type("Session", (), {"hwnd": 101})()
+    driver._session = type("Session", (), {"hwnd": 101, "pid": 202})()
     driver._raise_process_risk = lambda: None
     driver._raise_scoped_risk = lambda **_kwargs: None
     driver._find_scoped_controls = lambda **_kwargs: []
     monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd != 303)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, 202))
     monkeypatch.setattr(
         "win32gui.IsWindowVisible", lambda hwnd: hwnd in {100, 101}
     )
 
     assert driver.verify_friend_request(timeout=0.1) is True
     assert driver._verify_hwnd == 0
+
+
+@pytest.mark.parametrize("closed", [{100, 303}, {100}])
+def test_friend_verification_does_not_probe_disappeared_dialogs(monkeypatch, closed):
+    from types import SimpleNamespace
+
+    # Submit can destroy both the add-friend owner and its confirmation form.
+    # A dead HWND fails WM_NULL just like a hung window, but is not a hung main.
+    checked = []
+    def responsive(hwnd, **_kwargs):
+        checked.append(hwnd)
+        return hwnd not in closed
+
+    driver = NativeWeixinDriver(gate_backend=SimpleNamespace(window_responsive=responsive))
+    driver._session = SimpleNamespace(hwnd=101, pid=202)
+    driver._add_hwnd, driver._verify_hwnd = 100, 303
+    driver._uia = SimpleNamespace()
+    def root(hwnd):
+        driver.ensure_window_responsive(hwnd)
+        return FakeControl("微信", "WindowControl")
+    driver._control_root = root
+    monkeypatch.setattr("app.agent.native_driver.subscribe_uia_events", lambda *_: None)
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd not in closed)
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd not in closed)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, 202))
+    driver._raise_process_risk = lambda: driver.ensure_window_responsive(101)
+    driver._raise_scoped_risk = lambda hwnd: driver.ensure_window_responsive(hwnd)
+    driver._find_scoped_controls = lambda **_kwargs: []
+
+    result = driver.verify_friend_request(timeout=0.01)
+
+    assert result is (True if 303 in closed else None)
+    assert not closed.intersection(checked)
+
+
+@pytest.mark.parametrize("owner_pid", [202, 999])
+def test_friend_verification_closed_form_keeps_live_owner_safety(monkeypatch, owner_pid):
+    from types import SimpleNamespace
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = SimpleNamespace(hwnd=101, pid=202)
+    driver._verify_hwnd, driver._add_hwnd = 303, 100
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd == 101)
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd == 101)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, owner_pid))
+    driver._raise_process_risk = lambda: None
+    driver._raise_scoped_risk = lambda **_kwargs: None
+    driver._find_scoped_controls = lambda **_kwargs: []
+    assert driver.verify_friend_request(0.01) is (True if owner_pid == 202 else None)
+
+    if owner_pid == 202:
+        def hung(**_kwargs):
+            raise WeixinUnresponsiveError("live owner is unresponsive")
+        driver._verify_hwnd = 303
+        driver._raise_process_risk = hung
+        with pytest.raises(WeixinUnresponsiveError):
+            driver.verify_friend_request(0.01)
+
+
+def test_friend_verification_ignores_success_words_in_main_chat(monkeypatch):
+    from types import SimpleNamespace
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = SimpleNamespace(hwnd=101, pid=202)
+    driver._verify_hwnd, driver._add_hwnd = 303, 100
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: True)
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: True)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, 202))
+    driver._raise_process_risk = lambda: None
+    driver._raise_scoped_risk = lambda **_kwargs: None
+    driver._find_scoped_controls = lambda hwnd, **_kwargs: [FakeControl("申请已提交")] if hwnd == 101 else []
+    assert driver.verify_friend_request(0.01) is None
+
+
+@pytest.mark.parametrize("stage", ["enumeration", "risk_scan"])
+@pytest.mark.parametrize("disappears", [True, False])
+def test_process_risk_scan_skips_only_disappeared_auxiliary(monkeypatch, stage, disappears):
+    from types import SimpleNamespace
+
+    alive = {101, 100}
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd in alive)
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd in alive)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, 202))
+    monkeypatch.setattr("win32gui.EnumWindows", lambda callback, extra: callback(100, extra))
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = SimpleNamespace(hwnd=101, pid=202)
+    driver._query = object()
+    driver._control_root = lambda hwnd: FakeControl("微信", "WindowControl")
+    def probe(hwnd):
+        if hwnd == 100 and stage == "enumeration":
+            if disappears:
+                alive.remove(100)
+            raise WeixinUnresponsiveError("destroyed during enumeration")
+        return True
+    driver.ensure_window_responsive = probe
+    def risk(hwnd, root):
+        if hwnd == 100:
+            if disappears:
+                alive.remove(100)
+            raise WeixinUnresponsiveError("destroyed during risk scan")
+    driver._raise_scoped_risk = risk
+    if disappears:
+        driver._raise_process_risk()
+    else:
+        with pytest.raises(WeixinUnresponsiveError):
+            driver._raise_process_risk()
 
 
 def test_friend_preflight_closes_the_request_form_with_invoke_pattern(monkeypatch):
@@ -3650,7 +3757,7 @@ def test_friend_submit_checks_risk_controls_even_after_form_closes():
         driver.verify_friend_request(timeout=0.1)
 
 
-def test_friend_submit_accepts_an_explicit_success_status():
+def test_friend_submit_accepts_an_explicit_success_status(monkeypatch):
     class ImmediateWaiter:
         def wait(self, predicate, *_args, **_kwargs):
             return bool(predicate())
@@ -3659,6 +3766,10 @@ def test_friend_submit_accepts_an_explicit_success_status():
     driver._waiter = ImmediateWaiter()
     driver._verify_hwnd = 0
     driver._add_hwnd = 100
+    driver._session = type("Session", (), {"hwnd": 101, "pid": 202})()
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd in {100, 101})
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd in {100, 101})
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda hwnd: (1, 202))
     driver._all_nodes = lambda: []
     driver._walk = lambda _hwnd: (
         None,

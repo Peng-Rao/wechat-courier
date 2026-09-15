@@ -275,6 +275,7 @@ Item {
                                             : result === "error" ? "异常"
                                             : result === "unknown" ? "结果未知"
                                             : result === "working" ? "执行中"
+                                            : result === "stopped" ? "已停止"
                                             : "等待中"
                                         color: result === "success" ? WxTheme.clSuccessText
                                             : result === "error" ? WxTheme.clDangerNew
@@ -623,7 +624,8 @@ Item {
                         ? "成功 " + root.taskBackend.successCount
                             + "  ·  失败 " + root.taskBackend.failureCount
                             + "  ·  未知 " + root.taskBackend.unknownCount
-                            + "  ·  剩余 " + Math.max(0, root.taskBackend.total - root.taskBackend.done)
+                            + (root.taskBackend.active ? "  ·  剩余 " : "  ·  未执行 ")
+                            + Math.max(0, root.taskBackend.total - root.taskBackend.done)
                         : ""
                     color: WxTheme.clTextHint
                     font.family: WxTheme.fontFamily

@@ -225,10 +225,10 @@ def test_product_versions_and_installer_upgrade_contract_are_v034():
     )
     installer = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
 
-    assert '__version__ = "0.3.4"' in app_version
-    assert '__version__ = "0.3.4"' in library_version
+    assert '__version__ = "0.3.5"' in app_version
+    assert '__version__ = "0.3.5"' in library_version
     assert '!define PRODUCT_NAME "五阿哥微信助手"' in installer
-    assert '!define PRODUCT_VERSION "0.3.4"' in installer
+    assert '!define PRODUCT_VERSION "0.3.5"' in installer
     assert '!define OLD_PRODUCT_NAME "五阿哥群发助手"' in installer
     assert "taskkill" in installer
     assert "OLD_PRODUCT_NAME" in installer

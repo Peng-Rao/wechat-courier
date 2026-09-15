@@ -1523,7 +1523,18 @@ class NativeWeixinDriver:
             raise_for_risk_controls(self._all_nodes())
             return
         for hwnd, root in self._visible_process_roots():
-            self._raise_scoped_risk(hwnd=hwnd, root=root)
+            try:
+                self._raise_scoped_risk(hwnd=hwnd, root=root)
+            except WeixinUnresponsiveError:
+                if not self._auxiliary_window_disappeared(hwnd):
+                    raise
+
+    def _auxiliary_window_disappeared(self, hwnd: int) -> bool:
+        import win32gui
+
+        if not hwnd or hwnd == int(safe_attr(self._session, "hwnd", 0) or 0):
+            return False
+        return not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd)
 
     def _walk(self, hwnd: int | None = None):
         if self._uia is None:
@@ -2296,20 +2307,26 @@ class NativeWeixinDriver:
             fresh = matches[0]
         if not bool(safe_attr(fresh, "IsEnabled", False)) or bool(safe_attr(fresh, "IsOffscreen", True)):
             raise WindowBlockedError("Keyboard target is disabled or hidden")
-        validate_owner()
-        if int(win32gui.GetForegroundWindow() or 0) != hwnd:
-            if not _foreground_with_thread_handshake(hwnd):
-                raise WindowBlockedError("Cannot foreground the keyboard owner")
-        validate_owner(foreground=True)
-        fresh.SetFocus()
-        self._guard_click_modal(hwnd)
-        validate_owner(foreground=True)
-        if (
-            not bool(safe_attr(fresh, "IsEnabled", False))
-            or bool(safe_attr(fresh, "IsOffscreen", True))
-            or (not is_window and not bool(safe_attr(fresh, "HasKeyboardFocus", False)))
-        ):
-            raise WindowBlockedError("Keyboard target did not retain enabled focus")
+        for focus_attempt in range(2):
+            validate_owner()
+            if int(win32gui.GetForegroundWindow() or 0) != hwnd:
+                if not _foreground_with_thread_handshake(hwnd):
+                    raise WindowBlockedError("无法将微信输入窗口置前；未注入按键")
+            validate_owner(foreground=True)
+            fresh.SetFocus()
+            self._guard_click_modal(hwnd)
+            validate_owner()
+            if int(win32gui.GetForegroundWindow() or 0) != hwnd:
+                if focus_attempt == 0:
+                    continue  # No key has been injected; re-focus once only.
+                raise WindowBlockedError("微信输入窗口持续失去前台；未注入按键，任务已安全停止")
+            if (
+                not bool(safe_attr(fresh, "IsEnabled", False))
+                or bool(safe_attr(fresh, "IsOffscreen", True))
+                or (not is_window and not bool(safe_attr(fresh, "HasKeyboardFocus", False)))
+            ):
+                raise WindowBlockedError("Keyboard target did not retain enabled focus")
+            break
         validate_owner(foreground=True)
         check_action_deadline()
         self._uia.SendKeys(keys, waitTime=wait_time)
@@ -3220,8 +3237,13 @@ class NativeWeixinDriver:
         win32gui.EnumWindows(collect, None)
         result = []
         for hwnd in handles:
-            self.ensure_window_responsive(hwnd)
-            root = self._control_root(hwnd)
+            try:
+                self.ensure_window_responsive(hwnd)
+                root = self._control_root(hwnd)
+            except WeixinUnresponsiveError:
+                if self._auxiliary_window_disappeared(hwnd):
+                    continue
+                raise
             if root is not None:
                 result.append((hwnd, root))
         return result
@@ -4285,26 +4307,44 @@ class NativeWeixinDriver:
 
     def verify_friend_request(self, timeout: float) -> bool | None:
         import win32gui
+        import win32process
 
         submitted_form_hwnd = int(self._verify_hwnd or 0)
+        main_hwnd = int(safe_attr(self._session, "hwnd", 0) or 0)
+        expected_pid = int(safe_attr(self._session, "pid", 0) or 0)
+
+        def live_owned_window(hwnd):
+            if not hwnd or not expected_pid:
+                return False
+            try:
+                return bool(
+                    win32gui.IsWindow(hwnd)
+                    and win32gui.IsWindowVisible(hwnd)
+                    and win32process.GetWindowThreadProcessId(hwnd)[1] == expected_pid
+                )
+            except Exception:
+                return False
 
         def explicitly_confirmed():
             self._raise_process_risk()
-            handles = [self._add_hwnd] if self._add_hwnd else []
-            if (
-                self._verify_hwnd
-                and win32gui.IsWindow(self._verify_hwnd)
-                and win32gui.IsWindowVisible(self._verify_hwnd)
-            ):
-                handles.append(self._verify_hwnd)
+            handles = dict.fromkeys((self._add_hwnd, self._verify_hwnd))
             for hwnd in handles:
-                self._raise_scoped_risk(hwnd=hwnd)
-                if self._find_scoped_controls(
-                    hwnd=hwnd,
-                    name=FRIEND_SUBMIT_SUCCESS_NAMES,
-                    enabled=False,
-                ):
-                    return True
+                if not live_owned_window(hwnd):
+                    continue
+                try:
+                    self._raise_scoped_risk(hwnd=hwnd)
+                    if self._find_scoped_controls(
+                        hwnd=hwnd,
+                        name=FRIEND_SUBMIT_SUCCESS_NAMES,
+                        enabled=False,
+                    ):
+                        return True
+                except WeixinUnresponsiveError:
+                    # Submission may destroy a dialog between enumeration and
+                    # WM_NULL. Only that disappearance is benign, never a hung
+                    # live window or the loss of the main window.
+                    if hwnd == main_hwnd or live_owned_window(hwnd):
+                        raise
             # The verified confirmation window is modal.  After the exact
             # hit-tested “确定” click, its destruction/hide while a same-session
             # Weixin owner remains visible is an explicit UI transition, not a
@@ -4317,19 +4357,16 @@ class NativeWeixinDriver:
                     int(self._add_hwnd or 0),
                     int(safe_attr(self._session, "hwnd", 0) or 0),
                 }
-                if any(
-                    hwnd
-                    and win32gui.IsWindow(hwnd)
-                    and win32gui.IsWindowVisible(hwnd)
-                    for hwnd in owner_handles
-                ):
+                if any(live_owned_window(hwnd) for hwnd in owner_handles):
                     return True
             return False
 
         if self._wait_for(
             explicitly_confirmed,
             timeout,
-            hwnd=self._add_hwnd or self._verify_hwnd,
+            # The successful click can destroy both auxiliary HWNDs before
+            # event subscription is installed. Bind waiting to the main owner.
+            hwnd=main_hwnd,
         ):
             self._verify_hwnd = 0
             return True

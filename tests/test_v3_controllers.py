@@ -9,6 +9,28 @@ from PySide6.QtCore import QObject, QSettings, Signal
 from app.backend import BackendController
 
 
+def test_finished_batch_marks_unstarted_rows_without_counting_them_as_failures(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice\nBob\nCarol"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+    payload = client.calls[-1][2]
+    client.notificationReceived.emit("task.event", {
+        "taskId": payload["taskId"], "itemId": payload["items"][0]["itemId"],
+        "step": "search_ready", "outcome": "error", "detail": "window blocked",
+        "done": 1, "total": 3, "errorCode": "WINDOW_BLOCKED",
+    })
+    client.notificationReceived.emit("task.finished", {
+        "taskId": payload["taskId"], "outcome": "error", "done": 1, "total": 3,
+    })
+    rows = backend.task._items._items
+    assert [row.result for row in rows] == ["error", "stopped", "stopped"]
+    assert all("未执行" in row.detail for row in rows[1:])
+    assert backend.task.failureCount == 1
+    assert backend.task.done == 1
+    assert not backend.task.active
+
+
 class FakeAgentClient(QObject):
     stateChanged = Signal(str)
     connectedChanged = Signal(bool)

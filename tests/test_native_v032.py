@@ -605,7 +605,20 @@ def test_keyboard_refuses_foreground_loss_during_set_focus(keyboard_driver):
     fresh.SetFocus = lambda: foreground.__setitem__(0, 999)
     with pytest.raises(AutomationRetryError):
         driver._send_keys(stale, "{Enter}")
-    assert events == [("foreground", 101)]
+    assert events == [("foreground", 101), ("foreground", 101)]
+
+
+def test_keyboard_recovers_one_focus_loss_before_injecting_once(keyboard_driver):
+    driver, stale, fresh, foreground, enabled, events = keyboard_driver
+    focus_calls = []
+    def focus():
+        focus_calls.append(1)
+        if len(focus_calls) == 1:
+            foreground[0] = 999
+    fresh.SetFocus = focus
+    assert driver._send_keys(stale, "{Enter}") is fresh
+    assert len(focus_calls) == 2
+    assert [event for event in events if event[0] == "keys"] == [("keys", "{Enter}", 101)]
 
 
 def test_keyboard_refuses_changed_control_identity(keyboard_driver):

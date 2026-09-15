@@ -125,7 +125,7 @@ def test_frozen_missing_or_invalid_manifest_does_not_claim_source_provenance(
     info = module.build_info()
     assert info["buildFingerprint"] == "unavailable"
     assert info["provenance"] in {"missing", "invalid"}
-    assert info["version"] == "0.3.4"
+    assert info["version"] == "0.3.5"
 
 
 def test_source_build_info_is_json_safe_and_does_not_expose_argv_or_environment(monkeypatch):
@@ -134,7 +134,7 @@ def test_source_build_info_is_json_safe_and_does_not_expose_argv_or_environment(
     monkeypatch.setattr(sys, "argv", ["app", "--password=secret argument"])
     monkeypatch.setenv("PROVENANCE_TEST_TOKEN", "secret environment")
     info = module.build_info()
-    assert info["version"] == "0.3.4"
+    assert info["version"] == "0.3.5"
     assert info["releaseChannel"] == "candidate"
     assert info["frozen"] is False
     assert info["provenance"] == "source"

@@ -1079,7 +1079,7 @@ class TaskController(QObject):
 
     @Property(int, notify=progressChanged)
     def failureCount(self):
-        return sum(item.result in {"error", "stopped"} for item in self._items._items)
+        return sum(item.result == "error" for item in self._items._items)
 
     @Property(int, notify=progressChanged)
     def unknownCount(self):
@@ -1652,6 +1652,18 @@ class TaskController(QObject):
             self._finished_result = copy.deepcopy(params)
             cleanup = params.get("cleanup")
             self._cleanup_result = copy.deepcopy(cleanup) if isinstance(cleanup, dict) else {}
+            for item in self._items._items:
+                if item.result != "pending":
+                    continue
+                event = {
+                    "itemId": item.item_id,
+                    "outcome": "stopped",
+                    "detail": "未执行：任务已结束，请返回编辑后重新选择",
+                    "step": "",
+                }
+                self._items.apply_event(event)
+                if self._kind == "friend_add":
+                    self._friends.model.apply_event(event)
             self._pending_start_request_id = 0
             raw_done = int(params.get("done", 0))
             self._done = min(

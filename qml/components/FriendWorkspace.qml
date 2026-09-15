@@ -396,6 +396,7 @@ Item {
                                                         ? "预检完成" : "已提交")
                                                 : status === "error" ? "执行异常"
                                                 : status === "unknown" ? "结果未知"
+                                                : status === "stopped" ? "未执行"
                                                 : (root.taskBackend && root.taskBackend.acceptanceEnabled
                                                     ? "预检通过" : "待提交")
                                             elide: Text.ElideRight
