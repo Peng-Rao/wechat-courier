@@ -352,7 +352,8 @@ def test_acceptance_metadata_is_stable_notified_and_correlated_to_actual_task(tm
     backend.friends.model.appendEmptyRecord()
     backend.friends.model.setCell(0, "account", "wxid_demo")
     backend.friends.model.setCell(0, "greeting", "greeting")
-    backend.friends.model.setCell(0, "remark", "remark")
+    backend.friends.model.setCell(0, "name", "remark")
+    backend.friends.model.setCell(0, "relationship", "无")
     friend = backend.task.acceptanceFriendState
     assert friend["items"] == [{"account": "wxid_demo", "greeting": "greeting", "remark": "remark"}]
     assert friend["options"]["filePaths"] == []
@@ -478,6 +479,7 @@ def render_fake_health_states(output):
     backend.message.templateText = "hello"
     backend.friends.model.appendEmptyRecord()
     assert backend.friends.model.setCell(0, "account", "wxid_demo")
+    assert backend.friends.model.setCell(0, "name", "示例学生")
     engine = QQmlApplicationEngine()
     errors = []
     engine.warnings.connect(lambda warnings: errors.extend(w.toString() for w in warnings))

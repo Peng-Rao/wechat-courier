@@ -40,7 +40,7 @@ def test_friend_import_status_stays_working_until_submit_is_verified(qapp):
     model = FriendImportModel()
     model.replace_records(
         load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", "测试"]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "测试"]]
         )
     )
 
@@ -69,7 +69,7 @@ def test_friend_preflight_completed_is_a_terminal_success(qapp):
     model = FriendImportModel()
     model.replace_records(
         load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", "测试"]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "测试"]]
         )
     )
 

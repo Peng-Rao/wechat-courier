@@ -5,51 +5,18 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QMetaObject, QObject, Property, QPoint, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QMetaObject, QObject, Property, QPoint, QUrl, Qt, Signal, Slot, QSettings
+from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 from PySide6.QtQuick import QQuickItem, QQuickView
 from PySide6.QtTest import QTest
 
-from app.task_models import FriendImportModel
+from app.controllers import FriendController
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-class FriendBackend(QObject):
-    def __init__(self, model: FriendImportModel) -> None:
-        super().__init__()
-        self._model = model
-
-    @Property(QObject, constant=True)
-    def model(self) -> FriendImportModel:
-        return self._model
-
-    @Property(str, constant=True)
-    def defaultGreeting(self) -> str:
-        return ""
-
-    @Property(str, constant=True)
-    def defaultRemark(self) -> str:
-        return ""
-
-    @Property(float, constant=True)
-    def intervalMin(self) -> float:
-        return 15.0
-
-    @Property(float, constant=True)
-    def intervalMax(self) -> float:
-        return 30.0
-
-    @Slot(str, result=bool)
-    def importFile(self, _path: str) -> bool:
-        return False
-
-    @Slot(str, result=bool)
-    def createTemplate(self, _path: str) -> bool:
-        return False
 
 
 class TaskBackend(QObject):
@@ -90,7 +57,7 @@ class AgentBackend(QObject):
 class AppBackend(QObject):
     def __init__(
         self,
-        friends: FriendBackend,
+        friends: FriendController,
         task: TaskBackend,
         agent: AgentBackend,
     ) -> None:
@@ -100,7 +67,7 @@ class AppBackend(QObject):
         self._agent = agent
 
     @Property(QObject, constant=True)
-    def friends(self) -> FriendBackend:
+    def friends(self) -> FriendController:
         return self._friends
 
     @Property(QObject, constant=True)
@@ -143,11 +110,18 @@ def _type(view: QQuickView, text: str) -> None:
 
 def _exercise_context_menu() -> None:
     app = QGuiApplication([])
-    model = FriendImportModel()
+    if os.name == "nt":
+        QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")
+        app.setFont(QFont("Microsoft YaHei", 10))
+    settings_dir = tempfile.TemporaryDirectory()
+    friends = FriendController(QSettings(str(Path(settings_dir.name) / "settings.ini"), QSettings.IniFormat))
+    friends.defaultGreeting = "{称呼}，您好！"
+    model = friends.model
     model.appendEmptyRecord()
     assert model.setCell(0, "account", "wxid_original")
+    assert model.setCell(0, "name", "示例学生")
     task = TaskBackend()
-    backend = AppBackend(FriendBackend(model), task, AgentBackend())
+    backend = AppBackend(friends, task, AgentBackend())
     view = QQuickView()
     view.setResizeMode(QQuickView.SizeRootObjectToView)
     view.setInitialProperties({"appBackend": backend})
@@ -178,6 +152,62 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     assert account_field.property("text") == "wxidedited", account_field.property("text")
     assert model.record_at(0).account == "wxidedited"
+
+    name_field = _find_item(table.property("contentItem"), "friendNameField")
+    relationship = _find_item(table.property("contentItem"), "friendRelationshipSelector")
+    remark = _find_item(table.property("contentItem"), "friendRemarkField")
+    preview = root.findChild(QQuickItem, "friendContentPreview")
+    global_relationship = root.findChild(QQuickItem, "globalRelationshipSelector")
+    global_greeting = root.findChild(QQuickItem, "globalFriendGreetingField")
+    assert all(item is not None for item in (name_field, relationship, remark, preview, global_relationship))
+    assert remark.property("readOnly") is True
+    _click(view, name_field, QPoint(20, 15), Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
+    _type(view, "Student")
+    QTest.keyClick(view, Qt.Key_Return)
+    QTest.qWait(50)
+    assert model.record_at(0).name == "student"
+    assert "student妈妈" in preview.property("text")
+
+    # Exercise the real popup: first item is global, second is explicit none.
+    _click(view, relationship, QPoint(int(relationship.width()) - 12, 15), Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_Home)
+    QTest.keyClick(view, Qt.Key_Down)
+    QTest.keyClick(view, Qt.Key_Return)
+    QTest.qWait(100)
+    assert model.record_at(0).relationship == ""
+    assert remark.property("text") == "student"
+    assert friends.build_items()[0]["greeting"] == "student，您好！"
+    friends.defaultRelationship = "姐姐"
+    QTest.qWait(50)
+    assert remark.property("text") == "student"
+
+    # Custom entry uses the ComboBox's editable input, not a fake model setter.
+    _click(view, relationship, QPoint(25, 15), Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
+    _type(view, "Guardian")
+    QTest.keyClick(view, Qt.Key_Return)
+    QTest.qWait(100)
+    assert model.record_at(0).relationship == "guardian"
+    assert "studentguardian" in preview.property("text")
+    _click(view, global_greeting, QPoint(20, 15), Qt.LeftButton)
+    QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
+    QTest.keyClick(view, Qt.Key_Backspace)
+    QTest.qWait(50)
+    assert friends.build_items()[0]["greeting"] is None
+    assert "保留微信原文" in preview.property("text")
+    insert_address = root.findChild(QQuickItem, "insertAddressPlaceholder")
+    _activate(view, insert_address)
+    assert friends.defaultGreeting == "{称呼}"
+    assert friends.build_items()[0]["greeting"] == "studentguardian"
+    task.set_active(True)
+    QTest.qWait(50)
+    assert not relationship.property("enabled")
+    assert not name_field.property("enabled")
+    assert not global_relationship.property("enabled")
+    assert not global_greeting.property("enabled")
+    assert not insert_address.property("enabled")
+    task.set_active(False)
 
     _click(view, table, QPoint(30, 20), Qt.RightButton)
     assert menu.property("visible") is True
@@ -240,8 +270,24 @@ def _exercise_context_menu() -> None:
     last_row = model.count - 1
     content_y = float(table.property("contentY"))
     assert content_y <= last_row * 46
-    assert content_y + table.height() >= (last_row + 1) * 46
+    assert content_y + table.height() >= (last_row + 1) * 46, (content_y, table.height(), last_row)
 
+    # Replacing a long, scrolled table with a short import must show its first row.
+    from app.friend_import import load_friend_records
+    model.replace_records(load_friend_records([
+            ["姓名", "账号", "打招呼语"],
+            ["示例学生妈妈", "mock_only_001", ""],
+            ["示例学生姐姐", "mock_only_002", "{称呼}您好，我是班主任。"],
+            ["示例学生", "mock_only_003", ""],
+    ]))
+    model.setCell(2, "relationship", "无")
+    friends.defaultGreeting = "{称呼}，您好，我是老师。"
+    QTest.qWait(150)
+    assert table.property("contentY") == 0, table.property("contentY")
+    if os.environ.get("FRIEND_PREVIEW_IMAGE"):
+        view.resize(1280, 760)
+        QTest.qWait(250)
+        view.grabWindow().save(os.environ["FRIEND_PREVIEW_IMAGE"])
     view.hide()
     view.setSource(QUrl())
     app.processEvents()

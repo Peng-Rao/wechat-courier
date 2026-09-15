@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Property, QSettings, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Property, QSettings, QTimer, QUrl, Signal, Slot
 
 from .agent.client import AgentClient
 from .agent.diagnostics import default_log_dir, redact_identifier
@@ -268,12 +268,12 @@ class MessageController(QObject):
 
 class FriendController(QObject):
     defaultGreetingChanged = Signal(str)
-    defaultRemarkChanged = Signal(str)
+    defaultRelationshipChanged = Signal(str)
     intervalMinChanged = Signal(float)
     intervalMaxChanged = Signal(float)
 
     DEFAULT_GREETING = "你好，我是五阿哥，方便认识一下吗？"
-    DEFAULT_REMARK = "新联系人"
+    DEFAULT_RELATIONSHIP = "妈妈"
 
     def __init__(self, settings: QSettings, parent=None):
         super().__init__(parent)
@@ -282,9 +282,10 @@ class FriendController(QObject):
         self._default_greeting = str(
             settings.value("friends/defaultGreeting", self.DEFAULT_GREETING)
         )
-        self._default_remark = str(
-            settings.value("friends/defaultRemark", self.DEFAULT_REMARK)
+        self._default_relationship = str(
+            settings.value("friends/defaultRelationship", self.DEFAULT_RELATIONSHIP)
         )
+        self._model.set_defaults(self._default_greeting, self._default_relationship)
         raw_interval_min = float(settings.value("friends/intervalMin", 15.0))
         raw_interval_max = float(settings.value("friends/intervalMax", 30.0))
         bounded_min = max(1.0, min(300.0, raw_interval_min))
@@ -309,24 +310,32 @@ class FriendController(QObject):
             return
         self._default_greeting = value
         self._settings.setValue("friends/defaultGreeting", value)
+        self._model.set_defaults(value, self._default_relationship)
         self.defaultGreetingChanged.emit(value)
 
     defaultGreeting = Property(
         str, _get_greeting, _set_greeting, notify=defaultGreetingChanged
     )
 
-    def _get_remark(self):
-        return self._default_remark
+    @Property("QStringList", constant=True)
+    def relationshipOptions(self):
+        from .friend_templates import RELATIONSHIPS
+        return ["无", *RELATIONSHIPS]
 
-    def _set_remark(self, value):
-        value = str(value)
-        if value == self._default_remark:
+    def _get_relationship(self):
+        return self._default_relationship
+
+    def _set_relationship(self, value):
+        from .friend_templates import normalize_relationship
+        value = normalize_relationship(str(value))
+        if value == "使用全局" or value == self._default_relationship:
             return
-        self._default_remark = value
-        self._settings.setValue("friends/defaultRemark", value)
-        self.defaultRemarkChanged.emit(value)
+        self._default_relationship = value
+        self._settings.setValue("friends/defaultRelationship", value)
+        self._model.set_defaults(self._default_greeting, value)
+        self.defaultRelationshipChanged.emit(value)
 
-    defaultRemark = Property(str, _get_remark, _set_remark, notify=defaultRemarkChanged)
+    defaultRelationship = Property(str, _get_relationship, _set_relationship, notify=defaultRelationshipChanged)
 
     def _get_interval_min(self):
         return self._interval_min
@@ -365,15 +374,12 @@ class FriendController(QObject):
         return self._model.importFile(path)
 
     def build_items(self) -> list[dict[str, Any]]:
-        return self._model.selected_payload(
-            self._default_greeting, self._default_remark
-        )
+        return self._model.selected_payload()
 
     @Slot(str, result=bool)
     def createTemplate(self, file_url: str) -> bool:
-        path = file_url.replace("file:///", "")
-        if sys.platform == "win32":
-            path = path.lstrip("/")
+        url = QUrl(file_url)
+        path = url.toLocalFile() if url.isLocalFile() else file_url
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Alignment, Font, PatternFill
@@ -381,12 +387,13 @@ class FriendController(QObject):
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.title = "好友导入"
-            worksheet.append(["账号", "打招呼语", "备注"])
-            worksheet.append(["18896904196", "你好，方便认识一下吗？", "示例联系人"])
+            worksheet.append(["姓名", "账号", "打招呼语"])
+            worksheet.append(["示例学生妈妈", "mock_only_001", "{称呼}，你好，我是老师。"])
+            worksheet.append(["李明", "mock_only_002", ""])
             worksheet.freeze_panes = "A2"
             worksheet.column_dimensions["A"].width = 24
-            worksheet.column_dimensions["B"].width = 42
-            worksheet.column_dimensions["C"].width = 24
+            worksheet.column_dimensions["B"].width = 24
+            worksheet.column_dimensions["C"].width = 48
             for cell in worksheet[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="07C160")
@@ -889,7 +896,7 @@ class TaskController(QObject):
             self.activeChanged, self.phaseChanged, self.kindChanged, self.progressChanged, self.executionStateChanged,
             message.recipientsTextChanged, message.templateTextChanged, message.filePathsChanged,
             message.useForwardChanged, message.intervalMinChanged, message.intervalMaxChanged,
-            friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRemarkChanged,
+            friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRelationshipChanged,
             friends.intervalMinChanged, friends.intervalMaxChanged, settings.unknownPolicyChanged,
         ):
             signal.connect(lambda *_: self.acceptanceStateChanged.emit())

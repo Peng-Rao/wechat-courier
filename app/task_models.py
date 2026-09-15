@@ -5,9 +5,10 @@ from datetime import datetime
 from typing import Any, Iterable
 from uuid import uuid4
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, Signal, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, QUrl, Signal, Slot
 
 from .friend_import import FriendRecord, load_friend_records, validate_records
+from .friend_templates import normalize_relationship, split_name
 
 
 _TERMINAL_STEPS = {"send_verified", "preflight_completed", "submit_verified"}
@@ -40,9 +41,14 @@ class FriendImportModel(QAbstractListModel):
     StatusRole = Qt.UserRole + 6
     SelectedRole = Qt.UserRole + 7
     ItemIdRole = Qt.UserRole + 8
+    NameRole = Qt.UserRole + 9
+    RelationshipRole = Qt.UserRole + 10
+    RelationshipSourceRole = Qt.UserRole + 11
+    RenderedGreetingRole = Qt.UserRole + 12
 
     countsChanged = Signal()
     importErrorChanged = Signal(str)
+    importWarningChanged = Signal(str)
 
     _ROLE_NAMES = {
         AccountRole: b"account",
@@ -53,6 +59,10 @@ class FriendImportModel(QAbstractListModel):
         StatusRole: b"status",
         SelectedRole: b"selected",
         ItemIdRole: b"itemId",
+        NameRole: b"friendName",
+        RelationshipRole: b"relationshipChoice",
+        RelationshipSourceRole: b"relationshipSource",
+        RenderedGreetingRole: b"renderedGreeting",
     }
 
     def __init__(self, parent=None):
@@ -60,6 +70,9 @@ class FriendImportModel(QAbstractListModel):
         self._records: list[FriendRecord] = []
         self._manual_rows_pending_selection: set[str] = set()
         self._import_error = ""
+        self._import_warning = ""
+        self._default_greeting = ""
+        self._default_relationship = "妈妈"
 
     def roleNames(self):
         return self._ROLE_NAMES
@@ -80,6 +93,10 @@ class FriendImportModel(QAbstractListModel):
             self.StatusRole: record.status,
             self.SelectedRole: record.selected,
             self.ItemIdRole: record.item_id,
+            self.NameRole: record.name,
+            self.RelationshipRole: "使用全局" if record.relationship is None else record.relationship or "无",
+            self.RelationshipSourceRole: record.relationship_source,
+            self.RenderedGreetingRole: record.rendered_greeting or "",
         }
         return values.get(role)
 
@@ -98,6 +115,33 @@ class FriendImportModel(QAbstractListModel):
     @Property(str, notify=importErrorChanged)
     def importError(self):
         return self._import_error
+
+    @Property(str, notify=importWarningChanged)
+    def importWarning(self):
+        return self._import_warning
+
+    def set_defaults(self, greeting: str, relationship: str) -> None:
+        self._default_greeting = greeting
+        self._default_relationship = normalize_relationship(relationship)
+        self._refresh()
+
+    def _validate(self) -> None:
+        validate_records(self._records, self._default_greeting, self._default_relationship)
+
+    def _refresh(self) -> None:
+        self._validate()
+        self._select_newly_valid_manual_records()
+        if self._records:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._records) - 1, 0), list(self._ROLE_NAMES))
+        self.countsChanged.emit()
+
+    @Slot(int, result="QVariantMap")
+    def preview(self, row: int) -> dict:
+        if not 0 <= row < len(self._records):
+            return {}
+        record = self._records[row]
+        return {"greeting": record.rendered_greeting, "remark": record.remark,
+                "error": record.error, "valid": record.valid}
 
     def record_at(self, row: int) -> FriendRecord:
         return self._records[row]
@@ -119,6 +163,7 @@ class FriendImportModel(QAbstractListModel):
         self.beginResetModel()
         self._records = list(records)
         self._manual_rows_pending_selection.clear()
+        self._validate()
         self.endResetModel()
         self.countsChanged.emit()
 
@@ -126,9 +171,9 @@ class FriendImportModel(QAbstractListModel):
     def appendEmptyRecord(self) -> int:
         row = len(self._records)
         record = FriendRecord(item_id=f"manual-{uuid4().hex}", account="")
-        validate_records([record])
         self.beginInsertRows(QModelIndex(), row, row)
         self._records.append(record)
+        self._validate()
         self._manual_rows_pending_selection.add(record.item_id)
         self.endInsertRows()
         self.countsChanged.emit()
@@ -143,7 +188,7 @@ class FriendImportModel(QAbstractListModel):
         self._records.pop(row)
         self._manual_rows_pending_selection.discard(item_id)
         self.endRemoveRows()
-        validate_records(self._records)
+        self._validate()
         self._select_newly_valid_manual_records()
         if self._records:
             self.dataChanged.emit(
@@ -160,6 +205,7 @@ class FriendImportModel(QAbstractListModel):
             self._records
             or self._manual_rows_pending_selection
             or self._import_error
+            or self._import_warning
         )
         if not changed:
             return False
@@ -171,22 +217,29 @@ class FriendImportModel(QAbstractListModel):
         if self._import_error:
             self._import_error = ""
             self.importErrorChanged.emit("")
+        self._import_warning = ""
+        self.importWarningChanged.emit("")
         self.countsChanged.emit()
         return True
 
     @Slot(str, result=bool)
     def importFile(self, path: str) -> bool:
-        if path.startswith("file:///"):
-            path = path[8:]
+        if QUrl(path).isLocalFile():
+            path = QUrl(path).toLocalFile()
         try:
-            records = load_friend_records(path)
+            warnings = []
+            records = load_friend_records(path, warnings=warnings)
         except Exception as exc:
             self._import_error = str(exc)
             self.importErrorChanged.emit(self._import_error)
             return False
         self._import_error = ""
         self.importErrorChanged.emit("")
+        self._import_warning = "；".join(warnings)
+        self.importWarningChanged.emit(self._import_warning)
         self.replace_records(records)
+        # Selection must use the actual global template, not loader defaults.
+        self.selectFirstValid()
         return True
 
     @Slot(int, str, object, result=bool)
@@ -194,17 +247,23 @@ class FriendImportModel(QAbstractListModel):
     def setCell(self, row: int, field: str, value: Any) -> bool:
         if not 0 <= row < len(self._records):
             return False
-        if field not in {"account", "greeting", "remark"}:
+        if field not in {"account", "greeting", "name", "relationship"}:
             return False
-        setattr(self._records[row], field, str(value).strip())
-        if field == "account":
-            validate_records(self._records)
-            self._select_newly_valid_manual_records()
-        top = self.index(0, 0)
-        bottom = self.index(len(self._records) - 1, 0)
-        if bottom.isValid():
-            self.dataChanged.emit(top, bottom, list(self._ROLE_NAMES))
-        self.countsChanged.emit()
+        record = self._records[row]
+        value = str(value).strip()
+        if field == "relationship":
+            record.relationship = None if value == "使用全局" else normalize_relationship(value)
+            record.relationship_source = "manual"
+        elif field == "name":
+            if value == record.name:
+                return True
+            record.name, recognized = split_name(value)
+            if record.relationship_source != "manual":
+                record.relationship = recognized
+                record.relationship_source = "auto" if recognized is not None else "global"
+        else:
+            setattr(record, field, value)
+        self._refresh()
         return True
 
     @Slot(int, bool, result=bool)
@@ -238,20 +297,22 @@ class FriendImportModel(QAbstractListModel):
         self.countsChanged.emit()
 
     def selected_payload(
-        self, default_greeting: str, default_remark: str
+        self, default_greeting: str | None = None, default_relationship: str | None = None
     ) -> list[dict[str, Any]]:
+        if default_greeting is not None or default_relationship is not None:
+            self.set_defaults(self._default_greeting if default_greeting is None else default_greeting,
+                              self._default_relationship if default_relationship is None else default_relationship)
+        self._validate()
         payload = []
         for record in self._records:
             if not record.valid or not record.selected:
                 continue
-            greeting = record.greeting or default_greeting or None
-            remark = record.remark or default_remark or ""
             payload.append(
                 {
                     "itemId": record.item_id,
                     "account": record.account,
-                    "greeting": greeting,
-                    "remark": remark,
+                    "greeting": record.rendered_greeting,
+                    "remark": record.remark,
                 }
             )
         return payload

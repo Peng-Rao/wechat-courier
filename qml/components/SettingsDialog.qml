@@ -248,14 +248,16 @@ Popup {
                             }
                         }
                         SettingsRow {
-                            title: "默认备注"
-                            description: "两处都为空时不填写备注"
-                            TextField {
+                            title: "默认后缀"
+                            description: "仅影响“使用全局”的行；无＝备注只保留姓名"
+                            FriendRelationshipSelector {
                                 width: 220
-                                text: root.appBackend ? root.appBackend.friends.defaultRemark : ""
-                                onEditingFinished: root.applyIfUnlocked(function() {
-                                    root.appBackend.friends.defaultRemark = text
-                                })
+                                allowGlobal: false
+                                choice: root.appBackend ? (root.appBackend.friends.defaultRelationship || "无") : "妈妈"
+                                options: root.appBackend ? root.appBackend.friends.relationshipOptions : []
+                                onChosen: function(value) {
+                                    root.applyIfUnlocked(function() { root.appBackend.friends.defaultRelationship = value })
+                                }
                             }
                         }
                         SettingsRow {

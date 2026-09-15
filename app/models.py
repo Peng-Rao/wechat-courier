@@ -12,7 +12,7 @@ def extract_greeting_name(remark: str) -> str:
     """从微信备注名中提取称呼。
 
     "25届初二-郑子轩妈妈" → "子轩妈妈"
-    "张永琪爸爸"         → "永琪爸爸"
+    "王小明爸爸"         → "小明爸爸"
     "王小明"             → "王小明"
     """
     remark = remark.strip()

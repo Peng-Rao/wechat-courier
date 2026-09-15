@@ -275,19 +275,19 @@ def test_friend_task_uses_default_precedence_and_limits(tmp_path, qapp):
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
-                ["18896904196", "行内问候", ""],
+                ["账号", "打招呼语", "姓名"],
+                ["18896904196", "行内问候", "示例学生"],
             ]
         )
     )
     backend.friends.defaultGreeting = "默认问候"
-    backend.friends.defaultRemark = "默认备注"
+    backend.friends.defaultRelationship = "姐姐"
 
     assert backend.task.startFriends() is True
     payload = client.calls[-1][2]
     assert payload["kind"] == "friend_add"
     assert payload["items"][0]["greeting"] == "行内问候"
-    assert payload["items"][0]["remark"] == "默认备注"
+    assert payload["items"][0]["remark"] == "示例学生姐姐"
     assert payload["options"]["submitFriendRequest"] is True
 
 
@@ -297,7 +297,7 @@ def test_friend_task_refuses_agent_without_submit_capability(tmp_path, qapp):
     backend.friends.model.replace_records(
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
 
@@ -348,7 +348,7 @@ def test_acceptance_mode_keeps_friend_task_as_non_submitting_preflight(
     backend.friends.model.replace_records(
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
 
@@ -367,7 +367,7 @@ def test_friend_task_recovery_refuses_replacement_agent_without_submit_capabilit
     backend.friends.model.replace_records(
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
     assert backend.task.startFriends() is True
@@ -395,7 +395,7 @@ def test_friend_task_rechecks_submit_capability_immediately_before_resume(
     backend.friends.model.replace_records(
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
-            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+            [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
     assert backend.task.startFriends() is True

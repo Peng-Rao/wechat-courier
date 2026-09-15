@@ -12,9 +12,11 @@ TestCase {
         property int validCount: count
         property int selectedCount: 0
         property string importError: ""
+        property string importWarning: ""
+        function preview(row) { return { greeting: "", remark: "", error: "" } }
 
         function appendEmptyRecord() {
-            append({ account: "", greeting: "", remark: "", valid: false,
+            append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "", greeting: "", remark: "", valid: false,
                      error: "账号不能为空", status: "pending", selected: false })
             return count - 1
         }
@@ -35,7 +37,8 @@ TestCase {
         id: friendBackend
         property var model: friendModel
         property string defaultGreeting: ""
-        property string defaultRemark: ""
+        property string defaultRelationship: "妈妈"
+        property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property real intervalMin: 15
         property real intervalMax: 30
         function importFile() { return false }
@@ -108,7 +111,7 @@ TestCase {
         menu().close()
         tryCompare(menu(), "visible", false)
         friendModel.clear()
-        friendModel.append({ account: "wxid_original", greeting: "", remark: "", valid: true,
+        friendModel.append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
         friendModel.selectedCount = 1
         wait(100)
@@ -128,6 +131,27 @@ TestCase {
                    Math.floor(submitCancelButton().height / 2), Qt.LeftButton)
         tryCompare(submitDialog(), "visible", false)
         compare(taskBackend.startCalls, 0)
+    }
+
+    function test_relationship_editors_preview_and_template_tools_exist_and_lock() {
+        var cell = table().itemAtCell(Qt.point(0, 0))
+        verify(cell !== null)
+        var nameField = findChild(cell, "friendNameField")
+        var relationship = findChild(cell, "friendRelationshipSelector")
+        var remark = findChild(cell, "friendRemarkField")
+        var globalRelationship = findChild(workspace, "globalRelationshipSelector")
+        var insertButton = findChild(workspace, "insertAddressPlaceholder")
+        verify(nameField !== null)
+        verify(relationship !== null)
+        verify(remark !== null && remark.readOnly)
+        verify(globalRelationship !== null)
+        verify(insertButton !== null)
+        verify(findChild(workspace, "friendContentPreview") !== null)
+        taskBackend.active = true
+        compare(nameField.enabled, false)
+        compare(relationship.enabled, false)
+        compare(globalRelationship.enabled, false)
+        compare(insertButton.enabled, false)
     }
 
     function test_confirmation_starts_exactly_one_friend_task() {
@@ -171,7 +195,7 @@ TestCase {
     }
 
     function test_row_right_click_deletes_that_row() {
-        friendModel.append({ account: "wxid_second", greeting: "", remark: "", valid: true,
+        friendModel.append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_second", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
         verify(contextOverlay() !== null)
         mouseClick(contextOverlay(), 30, 20, Qt.RightButton)
@@ -183,7 +207,7 @@ TestCase {
     }
 
     function test_clear_button_removes_all_rows_and_is_disabled_while_locked() {
-        friendModel.append({ account: "wxid_second", greeting: "", remark: "", valid: true,
+        friendModel.append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_second", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
         verify(clearButton() !== null)
         verify(clearButton().enabled)
@@ -236,7 +260,7 @@ TestCase {
         verify(contextOverlay() !== null)
         verify(table().height > 46)
         for (var row = friendModel.count; row < 30; ++row) {
-            friendModel.append({ account: "wxid_scroll" + row, greeting: "", remark: "",
+            friendModel.append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_scroll" + row, greeting: "", remark: "",
                                  valid: true, error: "", status: "pending", selected: false })
         }
         wait(100)
