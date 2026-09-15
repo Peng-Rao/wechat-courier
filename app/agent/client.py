@@ -14,7 +14,8 @@ from PySide6.QtNetwork import QLocalSocket
 
 from .rpc import JsonLineDecoder, encode_frame
 from .diagnostics import default_log_dir
-from .journal import SafetyJournal
+from .instance_lock import AGENT_ALREADY_RUNNING_EXIT_CODE
+from .journal import SafetyJournal, default_gate_lease_path
 
 
 class AgentClient(QObject):
@@ -31,6 +32,7 @@ class AgentClient(QObject):
         *,
         heartbeat_timeout_ms: int = 3_500,
         journal_path: str | None = None,
+        gate_lease_path: str | os.PathLike[str] | None = None,
         diagnostics_log_dir: str | os.PathLike[str] | None = None,
         stderr_max_bytes: int = 2 * 1024 * 1024,
         parent: QObject | None = None,
@@ -53,7 +55,11 @@ class AgentClient(QObject):
             Path(tempfile.gettempdir())
             / f"wuge-wechat-agent-{os.getpid()}-{uuid.uuid4().hex}-safety.json"
         )
-        self._gate_lease_path = self._journal_path + ".gate"
+        self._gate_lease_path = str(
+            Path(gate_lease_path)
+            if gate_lease_path is not None
+            else default_gate_lease_path()
+        )
         log_dir = (
             Path(diagnostics_log_dir)
             if diagnostics_log_dir is not None
@@ -73,7 +79,8 @@ class AgentClient(QObject):
         self._watchdog.timeout.connect(self._check_heartbeat)
         self._gate_recovery_timeout = QTimer(self)
         self._gate_recovery_timeout.setSingleShot(True)
-        self._gate_recovery_timeout.setInterval(3_500)
+        # Includes the Agent's five-second ownership wait, then startup/rollback.
+        self._gate_recovery_timeout.setInterval(8_000)
         self._gate_recovery_timeout.timeout.connect(
             self._on_gate_recovery_timeout
         )
@@ -204,6 +211,15 @@ class AgentClient(QObject):
         )
         self._capture_process_stderr()
         self._process = None
+        if int(_exit_code) == AGENT_ALREADY_RUNNING_EXIT_CODE:
+            self._retry.stop()
+            self._watchdog.stop()
+            self._set_connected(False)
+            self._set_state("error")
+            self.processError.emit(
+                "已有自动化 Agent 正在操作微信，请先关闭其他助手实例后重试"
+            )
+            return
         if self._state != "stopped":
             self._set_state("disconnected")
             self._set_connected(False)
@@ -373,7 +389,7 @@ class AgentClient(QObject):
             process.setProgram(sys.executable)
             process.setArguments(["-m", "app.agent.main", "--recover-gate"])
         process.start()
-        if not process.waitForFinished(3_000):
+        if not process.waitForFinished(self._gate_recovery_timeout.interval()):
             process.kill()
             process.waitForFinished(500)
             self.processError.emit("wechat-agent gate recovery timed out")

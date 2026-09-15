@@ -30,6 +30,12 @@ class WeixinUnresponsiveError(AutomationRetryError):
     wechat_responsive = False
 
 
+class UiaTreeNotReadyError(AutomationRetryError):
+    code = "UIA_TREE_NOT_READY_AFTER_REFRESH"
+    retry_kind = "none"
+    recoverable = False
+
+
 @dataclass(frozen=True)
 class RetryNotice:
     attempt: int
@@ -215,6 +221,7 @@ __all__ = [
     "RetryNotice",
     "StaleElementError",
     "TransientUiError",
+    "UiaTreeNotReadyError",
     "WeixinUnresponsiveError",
     "classify_exception",
 ]

@@ -21,6 +21,7 @@ from .retry import (
     AutomationRetryError,
     StaleElementError,
     TransientUiError,
+    UiaTreeNotReadyError,
     WeixinUnresponsiveError,
     classify_exception,
 )
@@ -797,6 +798,7 @@ class NativeWeixinDriver:
             self._assert_session_identity(
                 hwnd=self._session.hwnd, pid=self._session.pid, version=self._session.version
             )
+            self._refresh_accessibility_broadcast()
             self._check_window_blocked(allow_verify=True, allow_friend_parent=True)
             self._cancel_known_verify()
             self._check_window_blocked(allow_friend_parent=True)
@@ -1088,6 +1090,7 @@ class NativeWeixinDriver:
             return
         self._initialize_uia()
         session = self._session
+        session_created = False
         if session is None:
             try:
                 session = WeixinAccessibilitySession(
@@ -1100,6 +1103,7 @@ class NativeWeixinDriver:
                 )
                 self._session = session
                 session.__enter__()
+                session_created = True
                 self._screen_reader_restore_value = None
             except Exception:
                 self._screen_reader_restore_value = None
@@ -1109,6 +1113,8 @@ class NativeWeixinDriver:
             subscription = self._event_subscription
             if subscription is not None:
                 self._retire_event_subscription()
+            if not session_created:
+                self._refresh_accessibility_broadcast()
             self.ensure_window_responsive(session.hwnd)
             self._root = self._uia.ControlFromHandle(session.hwnd)
             if self._root is None:
@@ -1119,7 +1125,10 @@ class NativeWeixinDriver:
                 hwnd=session.hwnd,
                 root=self._root,
             ):
-                raise RuntimeError("微信 UIA 控件树未就绪，请重启微信后重试")
+                raise UiaTreeNotReadyError(
+                    "微信 UIA 控件树未就绪：门禁已写入并重新广播，"
+                    "但微信仍未加载完整可访问性树；请导出诊断包检查重复 Agent"
+                )
             self._session_generation += 1
             self._session_identity_changed = False
         except Exception:
@@ -1128,6 +1137,24 @@ class NativeWeixinDriver:
             # same live session and therefore never toggles Weixin's gate.
             self._release_control_proxies()
             raise
+
+    def _refresh_accessibility_broadcast(self) -> None:
+        refresh = getattr(self._session, "refresh", None)
+        if callable(refresh):
+            refresh()
+            return
+        rebroadcast = getattr(self._gate_backend, "broadcast_screen_reader_enabled", None)
+        if callable(rebroadcast):
+            try:
+                refreshed = bool(rebroadcast())
+            except Exception as exc:
+                raise AccessibilitySafetyError(
+                    "failed to refresh the screen-reader broadcast before rebinding the Weixin UIA tree"
+                ) from exc
+            if not refreshed:
+                raise AccessibilitySafetyError(
+                    "failed to refresh the screen-reader broadcast before rebinding the Weixin UIA tree"
+                )
 
     def _assert_session_identity(
         self,
@@ -1552,6 +1579,7 @@ class NativeWeixinDriver:
             self._retire_event_subscription()
         self._release_control_proxies()
         self._wake_event.clear()
+        self._refresh_accessibility_broadcast()
         self.ensure_window_responsive(self._session.hwnd)
         self._root = self._uia.ControlFromHandle(self._session.hwnd)
         if self._root is None:
@@ -1562,7 +1590,9 @@ class NativeWeixinDriver:
             hwnd=self._session.hwnd,
             root=self._root,
         ):
-            raise RuntimeError("刷新后微信 UIA 控件树仍未就绪")
+            raise UiaTreeNotReadyError(
+                "刷新后微信 UIA 控件树仍未就绪；可访问性会话不会通过重启循环重试"
+            )
         self._session_generation += 1
         return self._session_generation
 

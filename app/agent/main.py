@@ -5,14 +5,41 @@ import sys
 
 from PySide6.QtCore import QCoreApplication
 
-from .gate import restore_gate_lease
+from .gate import (
+    NativeGateBackend,
+    restore_gate_lease,
+    restore_legacy_gate_leases,
+)
+from .instance_lock import (
+    AGENT_ALREADY_RUNNING_EXIT_CODE,
+    AgentAlreadyRunningError,
+    AgentInstanceLock,
+)
 from .runtime import AgentRuntime
 from .server import AgentServer
 
 
-def main() -> int:
+def _run_locked() -> int:
+    gate_backend = NativeGateBackend()
     try:
-        recovery = restore_gate_lease()
+        other_agents = gate_backend.legacy_agent_pids()
+    except Exception as exc:
+        print(
+            "wechat-agent gate recovery failed: "
+            f"cannot verify existing Agent processes: {exc}",
+            file=sys.stderr,
+        )
+        return 4
+    if other_agents:
+        raise AgentAlreadyRunningError(
+            "wechat-agent is already running in this Windows session"
+        )
+    try:
+        recovery = restore_gate_lease(gate_backend)
+        restore_legacy_gate_leases(
+            gate_backend,
+            other_agent_pids=gate_backend.legacy_agent_pids,
+        )
     except Exception as exc:
         print(f"wechat-agent gate recovery failed: {exc}", file=sys.stderr)
         return 4
@@ -41,6 +68,15 @@ def main() -> int:
     finally:
         server.close()
         runtime.close()
+
+
+def main() -> int:
+    try:
+        with AgentInstanceLock():
+            return _run_locked()
+    except AgentAlreadyRunningError as exc:
+        print(str(exc), file=sys.stderr)
+        return AGENT_ALREADY_RUNNING_EXIT_CODE
 
 
 if __name__ == "__main__":

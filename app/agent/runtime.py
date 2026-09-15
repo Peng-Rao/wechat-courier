@@ -145,9 +145,16 @@ class _AutomationRunner(QObject):
 
     @Slot(object)
     def recover_wechat(self, envelope: dict[str, Any]) -> None:
+        def emit_if_running(method, params):
+            if envelope["stop"].is_set():
+                raise RuntimeError("Weixin recovery cancelled during Agent shutdown")
+            self.notice.emit(method, params)
+
         try:
+            if envelope["stop"].is_set():
+                raise RuntimeError("Weixin recovery cancelled before start")
             result = self._get_engine().recover_wechat(
-                envelope["timeout"], self.notice.emit
+                envelope["timeout"], emit_if_running
             )
             envelope["result"] = dict(result or {})
         except Exception as exc:
@@ -181,7 +188,7 @@ class AgentRuntime(QObject):
         self,
         *,
         engine_factory: Callable[[], Any] | None = None,
-        inspect_timeout_ms: int = 5_000,
+        inspect_timeout_ms: int = 7_500,
         action_timeout_ms: int = 15_000,
         journal: SafetyJournal | None = None,
         diagnostics: UiaDiagnostics | None = None,
@@ -220,6 +227,7 @@ class AgentRuntime(QObject):
             Callable[[dict[str, Any] | None, Exception | None], Any]
         ] = []
         self._shutdown_pending = False
+        self._recovery_stop: threading.Event | None = None
         self._control: TaskControl | None = None
         self._fatal_exit = fatal_exit
         self._action_watchdog = QTimer(self)
@@ -356,17 +364,26 @@ class AgentRuntime(QObject):
             else:
                 self._journal.clear(task_id=task_id, item_id=item_id)
         elif decision == "restart_wechat":
+            if self._recovery_stop is not None or self._shutdown_pending:
+                raise ValueError("recovery or shutdown is already in progress")
             timeout = max(30, min(300, int(payload.get("loginTimeout", 90))))
-            self.recoveryRequested.emit({"timeout": timeout})
+            self._recovery_stop = threading.Event()
+            self.recoveryRequested.emit({"timeout": timeout, "stop": self._recovery_stop})
         else:
             self._journal.clear()
         return {"accepted": True, "decision": decision}
 
     def shutdown(self) -> dict[str, Any]:
-        if self._control is not None:
+        if self._control is not None or self._inspection_pending or self._recovery_stop is not None:
             self._shutdown_pending = True
-            self._control.request_stop()
-            self._shutdown_deadline.start()
+            if self._control is not None:
+                self._control.request_stop()
+            if self._recovery_stop is not None:
+                self._recovery_stop.set()
+            self._shutdown_deadline.start(
+                max(2_500, self._inspection_watchdog.interval() + 500)
+                if self._inspection_pending or self._recovery_stop is not None else 2_500
+            )
         else:
             QTimer.singleShot(0, self.shutdownRequested.emit)
         return {"accepted": True}
@@ -416,13 +433,18 @@ class AgentRuntime(QObject):
         payload["taskId"] = task_id
         self._forward_notice("task.finished", payload)
         self._forward_notice("agent.status", {"status": "idle", "taskId": ""})
-        if self._shutdown_pending:
+        if self._shutdown_pending and not self._inspection_pending and self._recovery_stop is None:
             self._shutdown_pending = False
             self._shutdown_deadline.stop()
             QTimer.singleShot(0, self.shutdownRequested.emit)
 
     @Slot(object)
     def _recovery_finished(self, envelope: dict[str, Any]) -> None:
+        self._recovery_stop = None
+        if self._shutdown_pending and self._control is None and not self._inspection_pending:
+            self._shutdown_pending = False
+            self._shutdown_deadline.stop()
+            QTimer.singleShot(0, self.shutdownRequested.emit)
         if "error" in envelope:
             self._forward_notice(
                 "agent.status",
@@ -448,6 +470,10 @@ class AgentRuntime(QObject):
         callbacks = self._inspection_callbacks
         self._inspection_callbacks = []
         self._inspection_pending = False
+        if self._shutdown_pending and self._control is None and self._recovery_stop is None:
+            self._shutdown_pending = False
+            self._shutdown_deadline.stop()
+            QTimer.singleShot(0, self.shutdownRequested.emit)
         fallback_callback = envelope.get("callback")
         if fallback_callback is not None and not callbacks:
             callbacks = [fallback_callback]
@@ -486,6 +512,8 @@ class AgentRuntime(QObject):
         self._fatal_exit(70)
 
     def close(self, timeout_ms: int = 2_000) -> None:
+        if self._recovery_stop is not None:
+            self._recovery_stop.set()
         self._action_watchdog.stop()
         self._inspection_watchdog.stop()
         self._inspection_envelope = None

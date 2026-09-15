@@ -10,6 +10,52 @@ from app.agent.runtime import AgentRuntime, TaskControl
 from tests.test_agent_runtime import RecordingEngine, message_request
 
 
+def test_shutdown_waits_for_inspection_before_requesting_worker_cleanup(qapp, qtbot):
+    engine = HeldInspection()
+    runtime = AgentRuntime(engine_factory=lambda: engine)
+    exits = []
+    runtime.shutdownRequested.connect(lambda: exits.append("shutdown"))
+    try:
+        runtime.inspect_async(lambda *_: None)
+        assert engine.inspect_started.wait(1)
+        runtime.shutdown()
+        qtbot.wait(80)
+        assert exits == []
+        engine.inspect_release.set()
+        qtbot.waitUntil(lambda: exits == ["shutdown"])
+    finally:
+        engine.inspect_release.set()
+        runtime.close()
+
+
+def test_shutdown_cancels_login_wait_before_worker_cleanup(qapp, qtbot):
+    recovery_finished = threading.Event()
+    class WaitingRecovery(RecordingEngine):
+        def recover_wechat(self, _timeout, emit):
+            self.started.set()
+            try:
+                for _ in range(100):
+                    self.release.wait(0.01)
+                    emit("agent.status", {"status": "waiting_login"})
+                raise AssertionError("recovery was not cancelled")
+            finally:
+                recovery_finished.set()
+
+    engine = WaitingRecovery()
+    runtime = AgentRuntime(engine_factory=lambda: engine)
+    exited = []
+    runtime.shutdownRequested.connect(lambda: exited.append(recovery_finished.is_set()))
+    try:
+        runtime.approve_recovery({"decision": "restart_wechat"})
+        assert engine.started.wait(1)
+        runtime.shutdown()
+        qtbot.waitUntil(lambda: bool(exited), timeout=2000)
+        assert exited == [True]
+    finally:
+        engine.release.set()
+        runtime.close()
+
+
 class HeldInspection(RecordingEngine):
     def __init__(self):
         super().__init__()
@@ -135,8 +181,13 @@ def test_requested_shutdown_still_recovers_after_abnormal_exit(tmp_path, qapp, e
 
 def test_requested_clean_shutdown_recovers_a_remaining_gate_lease(tmp_path, qapp):
     journal_path = tmp_path / "safety.json"
-    journal_path.with_name("safety.json.gate").write_text("{}", encoding="utf-8")
-    client = AgentClient(journal_path=str(journal_path), diagnostics_log_dir=tmp_path)
+    gate_path = tmp_path / "stable-gate.json"
+    gate_path.write_text("{}", encoding="utf-8")
+    client = AgentClient(
+        journal_path=str(journal_path),
+        gate_lease_path=gate_path,
+        diagnostics_log_dir=tmp_path,
+    )
     recovery = []
     client._run_gate_recovery = lambda: recovery.append("recover") or True
     client._state = "connected"

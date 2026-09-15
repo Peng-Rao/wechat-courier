@@ -15,7 +15,8 @@ def process_peer(qapp, qtbot, tmp_path):
     pipe = "wuge-process-test-" + uuid.uuid4().hex
     token = secrets.token_hex(32)
     environment = dict(os.environ, WECHAT_AGENT_PIPE=pipe, WECHAT_AGENT_TOKEN=token,
-                       WECHAT_AGENT_JOURNAL=str(tmp_path / "safety.json"))
+                       WECHAT_AGENT_JOURNAL=str(tmp_path / "safety.json"),
+                       WECHAT_AGENT_GATE_LEASE=str(tmp_path / "gate.json"))
     process = subprocess.Popen([sys.executable, "-m", "tests.agent_process_fixture"],
                                cwd=Path(__file__).resolve().parents[1], env=environment,
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -67,6 +68,60 @@ def test_real_pipe_multiple_independent_tasks_cleanup_and_reconnect(process_peer
     client.connect_to_server(pipe, token)
     qtbot.waitUntil(lambda: client.connected, timeout=2000)
     assert process.poll() is None
+
+
+def test_authenticated_gui_disappearance_exits_agent_and_cleans_gate_lease(
+    qapp, qtbot, tmp_path
+):
+    pipe = "wuge-process-orphan-test-" + uuid.uuid4().hex
+    token = secrets.token_hex(32)
+    gate_path = tmp_path / "stable-gate.json"
+    environment = dict(
+        os.environ,
+        WECHAT_AGENT_PIPE=pipe,
+        WECHAT_AGENT_TOKEN=token,
+        WECHAT_AGENT_JOURNAL=str(tmp_path / "safety.json"),
+        WECHAT_AGENT_GATE_LEASE=str(gate_path),
+        PROCESS_FIXTURE_GATE_LEASE="1",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "tests.agent_process_fixture"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    client = AgentClient(
+        gate_lease_path=gate_path,
+        diagnostics_log_dir=tmp_path,
+    )
+    replies = []
+    client.replyReceived.connect(
+        lambda request_id, result: replies.append((request_id, result))
+    )
+    try:
+        for _ in range(30):
+            client.connect_to_server(pipe, token)
+            qtbot.wait(100)
+            if client.connected:
+                break
+        assert client.connected
+        inspect_id = client.call("wechat.inspect")
+        qtbot.waitUntil(
+            lambda: any(reply[0] == inspect_id for reply in replies),
+            timeout=2_000,
+        )
+        assert gate_path.is_file()
+
+        client._socket.abort()
+        qtbot.waitUntil(lambda: process.poll() is not None, timeout=4_000)
+
+        assert process.returncode == 0
+        assert not gate_path.exists()
+    finally:
+        client.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
 
 
 @pytest.mark.parametrize("mode,code", [("crash", 71), ("hang", 70)])

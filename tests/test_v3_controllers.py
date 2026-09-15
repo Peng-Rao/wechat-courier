@@ -594,6 +594,51 @@ def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):
     assert backend.task.phase == "waiting_login"
 
 
+def test_refreshed_but_empty_uia_tree_stops_without_a_restart_loop(
+    tmp_path, qapp
+):
+    backend, client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+    assert backend.task.startMessage()
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    fire_scheduled_agent_restart(backend)
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.helloReceived.emit({"recovery": None})
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "processDetected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "versionSupported": True,
+            "uiaReady": False,
+            "sessionReady": False,
+            "windowResponsive": True,
+            "windowEnabled": True,
+            "degradedReason": "UIA_TREE_NOT_READY_AFTER_REFRESH",
+            "detail": "可访问性广播已刷新，但微信仍只暴露壳节点",
+        }
+    )
+
+    backend.task._check_reconnect_inspection()
+
+    restart_wechat_calls = [
+        payload
+        for _id, method, payload in client.calls
+        if method == "recovery.approve"
+        and payload.get("decision") == "restart_wechat"
+    ]
+    assert restart_wechat_calls == []
+    assert backend.task.recoveryRequired is False
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert "广播已刷新" in backend.task.error
+
+
 def test_agent_restarts_use_two_and_five_second_backoff(tmp_path, qapp):
     backend, client = make_backend(tmp_path)
     backend.message.recipientsText = "Alice"

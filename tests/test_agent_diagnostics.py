@@ -212,7 +212,7 @@ def test_record_includes_correlation_process_and_build_provenance(tmp_path):
     assert entry["pid"] == os.getpid()
     assert entry["threadId"] == threading.get_ident()
     assert entry["nativeThreadId"] == threading.get_native_id()
-    assert entry["build"]["version"] == "0.3.3"
+    assert entry["build"]["version"] == "0.3.4"
     assert entry["build"]["buildFingerprint"].startswith("sha256:")
     assert entry["context"]["queryCount"] == 2
     assert entry["context"]["contact"]["hashPrefix"].startswith("sha256:")

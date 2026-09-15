@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import subprocess
 import struct
+import tempfile
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .journal import GateLeaseJournal
@@ -28,11 +31,13 @@ WAIT_TIMEOUT = 0x00000102
 ERROR_INVALID_PARAMETER = 87
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
+TH32CS_SNAPPROCESS = 0x00000002
 IMAGE_SCN_MEM_WRITE = 0x80000000
 MAX_MODULE_NAME32 = 255
 MAX_PATH = 260
 SPI_GETSCREENREADER = 0x0046
 SPI_SETSCREENREADER = 0x0047
+SPIF_SENDCHANGE = 0x0002
 WM_NULL = 0x0000
 SMTO_BLOCK = 0x0001
 SMTO_ABORTIFHUNG = 0x0002
@@ -61,6 +66,21 @@ class ModuleEntry32W(ctypes.Structure):
         ("hModule", wintypes.HMODULE),
         ("szModule", ctypes.c_wchar * (MAX_MODULE_NAME32 + 1)),
         ("szExePath", ctypes.c_wchar * MAX_PATH),
+    ]
+
+
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * MAX_PATH),
     ]
 
 
@@ -301,6 +321,56 @@ class NativeGateBackend:
         finally:
             kernel32.CloseHandle(handle)
 
+    def other_agent_pids(self) -> tuple[int, ...]:
+        """List peers across sessions: the same user can share a lease path."""
+
+        self._require_windows()
+        kernel32 = ctypes.windll.kernel32
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        invalid = ctypes.c_void_p(-1).value
+        if snapshot == invalid:
+            raise RuntimeError("cannot enumerate running Agent processes")
+        current_pid = os.getpid()
+        matches: list[int] = []
+        try:
+            entry = ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                raise RuntimeError("Process32FirstW failed")
+            while True:
+                pid = int(entry.th32ProcessID)
+                if (
+                    pid != current_pid
+                    and entry.szExeFile.casefold() == "wechat-agent.exe"
+                ):
+                    matches.append(pid)
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return tuple(matches)
+
+    def process_session_id(self, pid: int) -> int:
+        self._require_windows()
+        session_id = wintypes.DWORD()
+        if not ctypes.windll.kernel32.ProcessIdToSessionId(int(pid), ctypes.byref(session_id)):
+            raise RuntimeError(f"cannot verify Windows session for Agent PID {pid}")
+        return int(session_id.value)
+
+    def legacy_agent_pids(self) -> tuple[int, ...]:
+        """Call only while owning AgentInstanceLock; peers of this image wait on it.
+
+        Windows keeps a loaded executable locked. Compare file identities, not
+        an editable version manifest. Unknown/different images stay fail-closed.
+        """
+        peers = self.other_agent_pids()
+        if not getattr(sys, "frozen", False):
+            return peers
+        current_session = self.process_session_id(os.getpid())
+        return tuple(pid for pid in peers
+                     if self.process_session_id(pid) != current_session
+                     or not os.path.samefile(self.process_path(pid), sys.executable))
+
     def terminate_process(self, pid: int) -> None:
         self._require_windows()
         handle = ctypes.windll.kernel32.OpenProcess(
@@ -385,9 +455,14 @@ class NativeGateBackend:
     def set_screen_reader(enabled: bool) -> bool:
         return bool(
             ctypes.windll.user32.SystemParametersInfoW(
-                SPI_SETSCREENREADER, int(enabled), None, 0x02
+                SPI_SETSCREENREADER, int(enabled), None, SPIF_SENDCHANGE
             )
         )
+
+    def broadcast_screen_reader_enabled(self) -> bool:
+        """Refresh the per-session accessibility notification for Weixin."""
+
+        return self.set_screen_reader(True)
 
 
 def _process_start_time(backend: Any, pid: int) -> str:
@@ -405,6 +480,10 @@ def restore_gate_lease(
     journal = journal or GateLeaseJournal.from_environment()
     record = journal.load()
     if record is None:
+        if journal.path.exists():
+            raise AccessibilitySafetyError(
+                "invalid gate lease was left untouched for manual diagnosis"
+            )
         return {"restored": False, "reason": "no_lease"}
 
     same_process = False
@@ -429,6 +508,17 @@ def restore_gate_lease(
                     f"cannot verify stale gate lease process identity: {exc}"
                 ) from exc
             same_process = current_start_time == str(record["processStartTime"])
+        session_reader = getattr(backend, "process_session_id", None)
+        if callable(session_reader):
+            current_session = session_reader(os.getpid())
+            recorded_session = record.get("windowsSessionId")
+            if recorded_session is not None and recorded_session != current_session:
+                raise AccessibilitySafetyError("gate lease belongs to another Windows session")
+            if same_process:
+                if session_reader(pid) != current_session:
+                    raise AccessibilitySafetyError("leased process belongs to another Windows session")
+            elif recorded_session is None:
+                raise AccessibilitySafetyError("cannot verify Windows session of an abandoned legacy lease")
         if same_process:
             module = backend.find_module(pid, "Weixin.dll")
             version = str(backend.file_version(module.path))
@@ -500,6 +590,83 @@ def restore_gate_lease(
     finally:
         if handle is not None:
             backend.close_process(handle)
+
+
+def restore_legacy_gate_leases(
+    backend: Any | None = None,
+    *,
+    temp_dir: str | os.PathLike[str] | None = None,
+    other_agent_pids: Any | None = None,
+) -> list[dict[str, str]]:
+    """Recover old random-path leases only when no legacy Agent is alive."""
+
+    backend = backend or NativeGateBackend()
+    directory = Path(temp_dir) if temp_dir is not None else Path(tempfile.gettempdir())
+    paths = sorted(
+        directory.glob("wuge-wechat-agent-*-safety.json.gate"),
+        key=lambda path: path.name.casefold(),
+    )
+    if not paths:
+        return []
+    detector = other_agent_pids
+    if detector is None:
+        detector = getattr(backend, "other_agent_pids", None)
+    if not callable(detector):
+        raise AccessibilitySafetyError(
+            "cannot verify whether another Agent owns a legacy gate lease"
+        )
+    try:
+        live_agents = tuple(int(pid) for pid in detector())
+    except Exception as exc:
+        raise AccessibilitySafetyError(
+            f"cannot verify whether another Agent owns a legacy gate lease: {exc}"
+        ) from exc
+    if live_agents:
+        raise AccessibilitySafetyError(
+            "another Agent is still running; legacy gate lease was left untouched"
+        )
+
+    restored: list[dict[str, str]] = []
+    for path in paths:
+        journal = GateLeaseJournal(path)
+        record = journal.load()
+        if record is None:
+            raise AccessibilitySafetyError(
+                f"invalid legacy gate lease was left untouched: {path.name}"
+            )
+        process_exists = getattr(backend, "process_exists", None)
+        if not callable(process_exists):
+            raise AccessibilitySafetyError(
+                "cannot verify the legacy gate lease recorded process"
+            )
+        try:
+            recorded_pid = int(record["pid"])
+            process_alive = bool(process_exists(recorded_pid))
+            current_start_time = (
+                _process_start_time(backend, recorded_pid)
+                if process_alive
+                else ""
+            )
+        except Exception as exc:
+            raise AccessibilitySafetyError(
+                f"cannot verify the legacy gate lease recorded process: {exc}"
+            ) from exc
+        if not process_alive:
+            raise AccessibilitySafetyError(
+                "legacy gate lease recorded process is no longer available"
+            )
+        if current_start_time != str(record["processStartTime"]):
+            raise AccessibilitySafetyError(
+                "legacy gate lease recorded process identity has changed"
+            )
+        result = restore_gate_lease(backend, journal)
+        restored.append(
+            {
+                "path": str(path),
+                "reason": str(result["reason"]),
+            }
+        )
+    return restored
 
 
 class WeixinAccessibilitySession:
@@ -620,21 +787,31 @@ class WeixinAccessibilitySession:
                     gate_owned=self._original_gate == 0,
                     screen_reader_owned=not self._original_screen_reader,
                     session_generation=self.session_generation,
+                    windows_session_id=(
+                        self.backend.process_session_id(os.getpid())
+                        if callable(getattr(self.backend, "process_session_id", None)) else None
+                    ),
                 )
-            if self._original_gate == 0:
-                if not self.backend.write_byte(self._handle, self.gate_address, 1):
-                    raise AccessibilitySafetyError(
-                        "failed to activate the Weixin accessibility gate"
-                    )
-                if self.backend.read_byte(self._handle, self.gate_address) != 1:
-                    raise AccessibilitySafetyError(
-                        "Weixin accessibility gate write-back failed"
-                    )
-            if not current_screen_reader:
-                if not self.backend.set_screen_reader(True):
-                    raise AccessibilitySafetyError(
-                        "failed to notify the screen-reader session flag"
-                    )
+            if not self.backend.write_byte(self._handle, self.gate_address, 1):
+                raise AccessibilitySafetyError(
+                    "failed to activate the Weixin accessibility gate"
+                )
+            if self.backend.read_byte(self._handle, self.gate_address) != 1:
+                raise AccessibilitySafetyError(
+                    "Weixin accessibility gate write-back failed"
+                )
+            broadcast = getattr(
+                self.backend, "broadcast_screen_reader_enabled", None
+            )
+            notified = (
+                bool(broadcast())
+                if callable(broadcast)
+                else bool(self.backend.set_screen_reader(True))
+            )
+            if not notified:
+                raise AccessibilitySafetyError(
+                    "failed to broadcast the screen-reader session flag"
+                )
             if not self.backend.get_screen_reader():
                 raise AccessibilitySafetyError(
                     "screen-reader session flag notification did not persist"
@@ -651,6 +828,33 @@ class WeixinAccessibilitySession:
                 raise AccessibilitySafetyError(str(exc)) from exc
             raise
 
+    def refresh(self) -> None:
+        """Reassert the live gate without replacing its original ownership lease.
+
+        Weixin can reset the byte during a tray/window transition. A reader
+        broadcast alone cannot reactivate that process's accessibility tree.
+        """
+        if self._handle is None or self._original_gate is None or not self._same_process_instance():
+            raise AccessibilitySafetyError("cannot refresh an inactive or replaced gate session")
+        module = self.backend.find_module(self.pid, "Weixin.dll")
+        if module.base != self.module.base or self.backend.file_version(module.path) != self.version:
+            raise AccessibilitySafetyError("gate module identity changed before refresh")
+        current = self.backend.read_byte(self._handle, self.gate_address)
+        if current not in (0, 1):
+            raise AccessibilitySafetyError("unexpected gate value during session refresh")
+        try:
+            if not self.backend.write_byte(self._handle, self.gate_address, 1):
+                raise AccessibilitySafetyError("failed to reassert the live Weixin gate")
+            if self.backend.read_byte(self._handle, self.gate_address) != 1:
+                raise AccessibilitySafetyError("live gate refresh read-back failed")
+            broadcast = getattr(self.backend, "broadcast_screen_reader_enabled", None)
+            notified = bool(broadcast()) if callable(broadcast) else bool(self.backend.set_screen_reader(True))
+            if not notified or not self.backend.get_screen_reader():
+                raise AccessibilitySafetyError("failed to refresh the screen-reader broadcast")
+        except Exception:
+            self.close()
+            raise
+
     def close(self, *, preserve_screen_reader: bool = False) -> None:
         cleanup_error: Exception | None = None
         gate_was_restored = True
@@ -661,10 +865,17 @@ class WeixinAccessibilitySession:
         if self._handle is not None:
             try:
                 same_process = self._same_process_instance()
+                current_gate = None
+                if same_process and self._original_gate is not None:
+                    module = self.backend.find_module(self.pid, "Weixin.dll")
+                    if module.base != self.module.base or self.backend.file_version(module.path) != self.version:
+                        raise AccessibilitySafetyError("gate module identity changed before cleanup")
+                    current_gate = self.backend.read_byte(self._handle, self.gate_address)
+                    if current_gate not in (0, 1) and current_gate != self._original_gate:
+                        raise AccessibilitySafetyError("unexpected gate value during session cleanup")
                 if same_process and (
                     self._original_gate is not None
-                    and self.backend.read_byte(self._handle, self.gate_address)
-                    != self._original_gate
+                    and current_gate != self._original_gate
                 ):
                     if not self.backend.write_byte(
                         self._handle, self.gate_address, self._original_gate
@@ -746,5 +957,6 @@ __all__ = [
     "NativeGateBackend",
     "ProcessModule",
     "WeixinAccessibilitySession",
+    "restore_legacy_gate_leases",
     "restore_gate_lease",
 ]

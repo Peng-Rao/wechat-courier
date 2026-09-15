@@ -40,6 +40,23 @@ def test_fingerprint_is_content_based_and_independent_of_checkout_path(tmp_path)
     assert str(tmp_path) not in json.dumps(one)
 
 
+def test_fingerprint_normalizes_windows_and_unix_text_line_endings(tmp_path):
+    module = _module()
+    unix_root, windows_root = tmp_path / "unix", tmp_path / "windows"
+    _sources(unix_root)
+    _sources(windows_root)
+    for path in module._source_files(unix_root):
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+    for path in module._source_files(windows_root):
+        normalized = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(normalized.replace(b"\n", b"\r\n"))
+
+    assert (
+        module.create_build_manifest(unix_root)["buildFingerprint"]
+        == module.create_build_manifest(windows_root)["buildFingerprint"]
+    )
+
+
 @pytest.mark.parametrize("relative", [
     "app/main.py", "src/core.py", "qml/Main.qml", "build/build.spec",
 ])
@@ -108,7 +125,7 @@ def test_frozen_missing_or_invalid_manifest_does_not_claim_source_provenance(
     info = module.build_info()
     assert info["buildFingerprint"] == "unavailable"
     assert info["provenance"] in {"missing", "invalid"}
-    assert info["version"] == "0.3.3"
+    assert info["version"] == "0.3.4"
 
 
 def test_source_build_info_is_json_safe_and_does_not_expose_argv_or_environment(monkeypatch):
@@ -117,7 +134,7 @@ def test_source_build_info_is_json_safe_and_does_not_expose_argv_or_environment(
     monkeypatch.setattr(sys, "argv", ["app", "--password=secret argument"])
     monkeypatch.setenv("PROVENANCE_TEST_TOKEN", "secret environment")
     info = module.build_info()
-    assert info["version"] == "0.3.3"
+    assert info["version"] == "0.3.4"
     assert info["releaseChannel"] == "candidate"
     assert info["frozen"] is False
     assert info["provenance"] == "source"

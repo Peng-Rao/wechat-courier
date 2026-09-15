@@ -7,7 +7,7 @@
 
 ; ── 基本信息 ──
 !define PRODUCT_NAME "五阿哥微信助手"
-!define PRODUCT_VERSION "0.3.3"
+!define PRODUCT_VERSION "0.3.4"
 !define OLD_PRODUCT_NAME "五阿哥群发助手"
 !define PRODUCT_PUBLISHER "wx4py"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_NAME}.exe"

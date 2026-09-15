@@ -17,6 +17,122 @@ from app.agent.journal import GateLeaseJournal
 from app.agent.profile import UnsupportedWeixinVersion
 
 
+def test_agent_discovery_keeps_foreign_session_peers_for_shared_lease_safety(monkeypatch):
+    import ctypes
+
+    processes = iter([(101, "wechat-agent.exe"), (202, "wechat-agent.exe"),
+                      (303, "wechat-agent.exe"), (404, "Weixin.exe")])
+
+    def next_process(_snapshot, entry):
+        try:
+            pid, name = next(processes)
+        except StopIteration:
+            return False
+        entry._obj.th32ProcessID = pid
+        entry._obj.szExeFile = name
+        return True
+
+    kernel = SimpleNamespace(CreateToolhelp32Snapshot=lambda *_: 123,
+                             Process32FirstW=next_process, Process32NextW=next_process,
+                             CloseHandle=lambda *_: True)
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel))
+    monkeypatch.setattr(gate_module.os, "getpid", lambda: 101)
+    backend = NativeGateBackend()
+    monkeypatch.setattr(backend, "_require_windows", lambda: None)
+    monkeypatch.setattr(backend, "process_session_id", lambda pid: {101: 1, 202: 1, 303: 2}[pid], raising=False)
+    assert backend.other_agent_pids() == (202, 303)
+
+
+def test_locked_agent_ignores_only_same_image_mutex_waiters(monkeypatch, tmp_path):
+    import sys
+    candidate = tmp_path / "wechat-agent.exe"
+    legacy = tmp_path / "old-agent.exe"
+    candidate.write_bytes(b"candidate")
+    legacy.write_bytes(b"legacy")
+    backend = NativeGateBackend()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(candidate))
+    monkeypatch.setattr(backend, "other_agent_pids", lambda: (202, 303))
+    monkeypatch.setattr(backend, "process_path", lambda pid: str({202: candidate, 303: legacy}[pid]))
+    monkeypatch.setattr(backend, "process_session_id", lambda _: 1)
+    assert backend.legacy_agent_pids() == (303,)
+
+
+def test_reused_session_reasserts_drifted_gate_before_broadcast_and_keeps_original_lease(tmp_path):
+    backend = FakeGateBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    session = WeixinAccessibilitySession(backend, lease_journal=journal)
+    session.__enter__()
+    original_lease = journal.load()
+    backend.memory[session.gate_address] = 0  # Observed after repeated tray cycles.
+    order = []
+    write = backend.write_byte
+    broadcast = backend.broadcast_screen_reader_enabled
+    backend.write_byte = lambda handle, address, value: order.append("write") or write(handle, address, value)
+    backend.broadcast_screen_reader_enabled = lambda: order.append(("broadcast", backend.memory[session.gate_address])) or broadcast()
+    try:
+        session.refresh()
+        assert order == ["write", ("broadcast", 1)]
+        assert journal.load() == original_lease
+    finally:
+        session.close()
+    assert backend.memory[backend.module.base + 0x0AE2B0C8] == 0
+    assert backend.screen_reader is False
+
+
+def test_refresh_broadcast_failure_rolls_back_original_state_and_clears_lease(tmp_path):
+    backend = FakeGateBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    session = WeixinAccessibilitySession(backend, lease_journal=journal)
+    session.__enter__()
+    backend.memory[session.gate_address] = 0
+    backend.broadcast_screen_reader_enabled = lambda: False
+    with pytest.raises(AccessibilitySafetyError, match="broadcast"):
+        session.refresh()
+    assert backend.memory[session.gate_address] == 0
+    assert backend.screen_reader is False
+    assert journal.load() is None
+    assert backend.closed
+
+
+def test_refresh_and_cleanup_refuse_to_overwrite_unexpected_live_gate(tmp_path):
+    backend = FakeGateBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    session = WeixinAccessibilitySession(backend, lease_journal=journal)
+    session.__enter__()
+    backend.memory[session.gate_address] = 7
+    writes_before = list(backend.writes)
+    with pytest.raises(AccessibilitySafetyError, match="unexpected gate"):
+        session.refresh()
+    with pytest.raises(AccessibilitySafetyError, match="unexpected gate"):
+        session.close()
+    assert backend.writes == writes_before
+    assert journal.load() is not None
+    assert backend.screen_reader is True
+    # Test double only: restore a recognized byte so fixture cleanup can finish.
+    backend.memory[session.gate_address] = 1
+    session.close()
+
+
+def test_refresh_and_cleanup_refuse_changed_module_identity(tmp_path):
+    backend = FakeGateBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    session = WeixinAccessibilitySession(backend, lease_journal=journal)
+    session.__enter__()
+    original_module = backend.module
+    backend.module = ProcessModule(original_module.base + 4096, original_module.size, original_module.path)
+    writes_before = list(backend.writes)
+    with pytest.raises(AccessibilitySafetyError, match="module identity"):
+        session.refresh()
+    with pytest.raises(AccessibilitySafetyError, match="module identity"):
+        session.close()
+    assert backend.writes == writes_before
+    assert journal.load() is not None
+    assert backend.screen_reader is True
+    backend.module = original_module
+    session.close()
+
+
 class FakeGateBackend:
     def __init__(self):
         self.hwnd = 101
@@ -29,6 +145,7 @@ class FakeGateBackend:
         self.opened = False
         self.closed = False
         self.writes = []
+        self.broadcasts = []
 
     def find_main_window(self):
         return self.hwnd
@@ -69,6 +186,10 @@ class FakeGateBackend:
     def set_screen_reader(self, enabled):
         self.screen_reader = enabled
         return True
+
+    def broadcast_screen_reader_enabled(self):
+        self.broadcasts.append(True)
+        return self.set_screen_reader(True)
 
 
 def test_invalid_dos_and_pe_headers_are_typed_as_gate_safety_failures(tmp_path):
@@ -125,7 +246,7 @@ def test_accessibility_session_writes_gate_before_notifying_screen_reader():
         ]
 
 
-def test_accessibility_session_does_not_rebroadcast_when_screen_reader_is_already_on():
+def test_accessibility_session_rebroadcasts_when_screen_reader_is_already_on():
     class NotifyingBackend(FakeGateBackend):
         def __init__(self):
             super().__init__()
@@ -137,11 +258,43 @@ def test_accessibility_session_does_not_rebroadcast_when_screen_reader_is_alread
             return super().set_screen_reader(enabled)
 
     backend = NotifyingBackend()
+    address = backend.module.base + 0x0AE2B0C8
+    backend.memory[address] = 1
 
     with WeixinAccessibilitySession(backend):
-        assert backend.notifications == []
+        assert backend.writes == [(address, 1)]
+        assert backend.broadcasts == [True]
+        assert backend.notifications == [True]
 
+    assert backend.memory[address] == 1
     assert backend.screen_reader is True
+
+
+def test_accessibility_session_rolls_back_gate_when_rebroadcast_fails(tmp_path):
+    class FailedBroadcastBackend(FakeGateBackend):
+        def __init__(self):
+            super().__init__()
+            self.screen_reader = True
+
+        def broadcast_screen_reader_enabled(self):
+            self.broadcasts.append(True)
+            return False
+
+    backend = FailedBroadcastBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    address = backend.module.base + 0x0AE2B0C8
+
+    with pytest.raises(AccessibilitySafetyError, match="broadcast"):
+        WeixinAccessibilitySession(
+            backend,
+            lease_journal=journal,
+        ).__enter__()
+
+    assert backend.broadcasts == [True]
+    assert backend.memory[address] == 0
+    assert backend.screen_reader is True
+    assert backend.closed is True
+    assert journal.load() is None
 
 
 def test_native_window_responsiveness_uses_bounded_wm_null(monkeypatch):
@@ -176,9 +329,16 @@ def test_native_screen_reader_notification_broadcasts_the_change(monkeypatch):
         gate_module.ctypes, "windll", SimpleNamespace(user32=user32)
     )
 
-    assert NativeGateBackend.set_screen_reader(True) is True
+    assert NativeGateBackend().broadcast_screen_reader_enabled() is True
 
-    assert calls == [(gate_module.SPI_SETSCREENREADER, 1, None, 0x02)]
+    assert calls == [
+        (
+            gate_module.SPI_SETSCREENREADER,
+            1,
+            None,
+            gate_module.SPIF_SENDCHANGE,
+        )
+    ]
 
 
 def test_native_backend_terminates_the_verified_weixin_process_tree(monkeypatch):
