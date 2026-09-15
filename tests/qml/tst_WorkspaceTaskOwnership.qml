@@ -14,6 +14,8 @@ TestCase {
         property int validCount: count
         property int selectedCount: count
         property string importError: ""
+        property string importWarning: ""
+        function preview(row) { return { greeting: "", remark: "", error: "" } }
         function appendEmptyRecord() { return -1 }
         function clearRecords() { clear(); selectedCount = 0; return true }
         function removeRecord() { return false }
@@ -40,7 +42,8 @@ TestCase {
     QtObject {
         id: friendBackend
         property string defaultGreeting: "你好"
-        property string defaultRemark: "新联系人"
+        property string defaultRelationship: "妈妈"
+        property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property real intervalMax: 30
         property real intervalMin: 15
         property var model: friendModel

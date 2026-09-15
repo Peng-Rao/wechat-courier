@@ -37,14 +37,14 @@ def render(output: Path, workspace: int = 0) -> int:
             "detail": "微信版本已验证",
         }
     )
-    backend.message.recipientsText = "25届初二-郑子轩妈妈\n张永琪爸爸\n王小明"
+    backend.message.recipientsText = "25届初二-郑子轩妈妈\n王小明爸爸\n王小明"
     backend.message.templateText = (
         "{name}，您好！\n\n本周六上午 9:30 将举行家长交流会，请您提前十分钟到场。"
     )
     backend.friends.model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
+                ["账号", "打招呼语", "姓名"],
                 ["18896904196", "你好，方便认识一下吗？", "王老师"],
                 ["wxid_demo_02", "", "李先生"],
                 ["19170745267", "你好，看到资料想认识一下", ""],

@@ -9,7 +9,7 @@ class TestExtractGreetingName:
         assert extract_greeting_name("25届初二-郑子轩妈妈") == "子轩妈妈"
 
     def test_two_char_name_with_suffix(self):
-        assert extract_greeting_name("张永琪爸爸") == "永琪爸爸"
+        assert extract_greeting_name("王小明爸爸") == "小明爸爸"
 
     def test_no_hyphen_full_name(self):
         # 3字无后缀：取后2字（认为首字是姓）

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .friend_templates import render_friend_content, split_name
+
 
 ACCOUNT_HEADER = "账号"
+NAME_HEADER = "姓名"
 GREETING_HEADER = "打招呼语"
 REMARK_HEADER = "备注"
 PHONE_PATTERN = re.compile(r"^(?:\+?86)?1[3-9]\d{9}$")
@@ -28,6 +32,12 @@ class FriendRecord:
     error: str = ""
     status: str = "pending"
     selected: bool = False
+    name: str = ""
+    # None = follow global; "" = explicitly no relationship.
+    relationship: str | None = None
+    relationship_source: str = "global"
+    source_row: int = 0
+    rendered_greeting: str | None = None
 
 
 def _cell_text(value: Any) -> str:
@@ -60,29 +70,48 @@ def account_error(value: str) -> str:
     return "账号必须是微信号或手机号，不能使用昵称"
 
 
-def validate_records(records: Sequence[FriendRecord]) -> None:
+def validate_records(records: Sequence[FriendRecord], default_greeting: str = "",
+                     default_relationship: str = "妈妈") -> None:
     seen: set[str] = set()
-    for record in records:
+    for row_number, record in enumerate(records, start=1):
         record.account = _cell_text(record.account)
+        errors = []
         error = account_error(record.account)
         normalized = normalize_account(record.account)
         if not error and normalized in seen:
             error = "账号重复"
         if not error:
             seen.add(normalized)
-        record.valid = not error
-        record.error = error
         if error:
+            errors.append(error)
+        if not record.name.strip():
+            errors.append("姓名不能为空（后缀前需有姓名）")
+        try:
+            record.rendered_greeting, record.remark = render_friend_content(
+                record.name, record.relationship, record.greeting, default_greeting, default_relationship)
+        except ValueError as exc:
+            record.rendered_greeting = None
+            _, record.remark = render_friend_content(record.name, record.relationship, "", "", default_relationship)
+            errors.append(str(exc))
+        record.valid = not errors
+        record.error = f"第 {record.source_row or row_number} 行：" + "；".join(errors) if errors else ""
+        if errors:
             record.selected = False
 
 
-def _records_from_rows(rows: Iterable[Sequence[Any]]) -> list[FriendRecord]:
+def _records_from_rows(rows: Iterable[Sequence[Any]], warnings: list[str] | None = None) -> list[FriendRecord]:
     materialized = [list(row) for row in rows]
     if not materialized:
         raise FriendImportError("导入文件为空")
     headers = [_cell_text(value) for value in materialized[0]]
-    if ACCOUNT_HEADER not in headers:
-        raise FriendImportError("首行必须包含“账号”列")
+    missing = [name for name in (NAME_HEADER, ACCOUNT_HEADER) if name not in headers]
+    if missing:
+        raise FriendImportError("首行缺少必填列：" + "、".join(missing) + "；请下载新模板并补充")
+    duplicates = sorted({name for name in headers if name and headers.count(name) > 1})
+    if duplicates:
+        raise FriendImportError("首行存在重复表头：" + "、".join(duplicates))
+    if REMARK_HEADER in headers and warnings is not None:
+        warnings.append("已忽略旧“备注”列；备注将由姓名和后缀自动生成")
     index = {name: headers.index(name) for name in headers if name}
 
     def value_at(row: Sequence[Any], header: str) -> str:
@@ -96,12 +125,16 @@ def _records_from_rows(rows: Iterable[Sequence[Any]]) -> list[FriendRecord]:
         values = [value_at(row, name) for name in headers]
         if not any(values):
             continue
+        name, relationship = split_name(value_at(row, NAME_HEADER))
         records.append(
             FriendRecord(
                 item_id=f"row-{row_number}",
                 account=value_at(row, ACCOUNT_HEADER),
                 greeting=value_at(row, GREETING_HEADER),
-                remark=value_at(row, REMARK_HEADER),
+                name=name,
+                relationship=relationship,
+                relationship_source="auto" if relationship is not None else "global",
+                source_row=row_number,
             )
         )
     validate_records(records)
@@ -124,7 +157,10 @@ def _csv_rows(path: Path) -> list[list[str]]:
             continue
     if text is None:
         raise FriendImportError("CSV 编码必须为 UTF-8 BOM 或 GB18030")
-    return [list(row) for row in csv.reader(text.splitlines())]
+    try:
+        return [list(row) for row in csv.reader(io.StringIO(text, newline=""), strict=True)]
+    except csv.Error as exc:
+        raise FriendImportError(f"CSV 格式损坏：{exc}") from exc
 
 
 def _xlsx_rows(path: Path) -> list[list[Any]]:
@@ -143,7 +179,7 @@ def _xlsx_rows(path: Path) -> list[list[Any]]:
         workbook.close()
 
 
-def load_friend_records(source) -> list[FriendRecord]:
+def load_friend_records(source, *, warnings: list[str] | None = None) -> list[FriendRecord]:
     if isinstance(source, (str, Path)):
         path = Path(source)
         suffix = path.suffix.casefold()
@@ -153,8 +189,8 @@ def load_friend_records(source) -> list[FriendRecord]:
             rows = _xlsx_rows(path)
         else:
             raise FriendImportError("仅支持 CSV 或 XLSX 文件")
-        return _records_from_rows(rows)
-    return _records_from_rows(source)
+        return _records_from_rows(rows, warnings)
+    return _records_from_rows(source, warnings)
 
 
 __all__ = [

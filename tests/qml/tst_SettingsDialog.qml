@@ -21,7 +21,8 @@ TestCase {
     QtObject {
         id: mockFriends
         property string defaultGreeting: ""
-        property string defaultRemark: ""
+        property string defaultRelationship: "妈妈"
+        property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property int intervalMin: 15
         property int intervalMax: 30
     }

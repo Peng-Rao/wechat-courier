@@ -17,7 +17,7 @@ def write_csv(path, rows, encoding="utf-8-sig"):
 
 def test_csv_import_supports_bom_and_gb18030(tmp_path):
     rows = [
-        ["账号", "打招呼语", "备注", "忽略列"],
+        ["账号", "打招呼语", "姓名", "忽略列"],
         ["18896904196", "你好", "测试一", "x"],
         ["wxid_test01", "", "测试二", "y"],
     ]
@@ -40,7 +40,7 @@ def test_xlsx_import_reads_first_sheet_and_preserves_numeric_phone(tmp_path):
     path = tmp_path / "friends.xlsx"
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["账号", "打招呼语", "备注"])
+    sheet.append(["账号", "打招呼语", "姓名"])
     sheet.append([18896904196, "你好", "手机号"])
     other = workbook.create_sheet("ignored")
     other.append(["账号"])
@@ -66,9 +66,9 @@ def test_import_requires_account_header_and_rejects_unknown_formats(tmp_path):
 
 
 def test_model_marks_invalid_and_duplicate_accounts_and_selects_first_20(qapp):
-    rows = [["账号", "打招呼语", "备注"]]
-    rows.extend([[f"wxid_valid{i:02d}", "", ""] for i in range(22)])
-    rows.extend([["wxid_valid00", "duplicate", ""], ["张三", "", ""]])
+    rows = [["账号", "打招呼语", "姓名"]]
+    rows.extend([[f"wxid_valid{i:02d}", "", "示例学生"] for i in range(22)])
+    rows.extend([["wxid_valid00", "duplicate", "示例学生"], ["张三", "", "示例学生"]])
 
     model = FriendImportModel()
     model.replace_records(load_friend_records(rows))
@@ -87,9 +87,9 @@ def test_editing_an_account_revalidates_duplicates(qapp):
     model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
-                ["wxid_first1", "", ""],
-                ["wxid_second", "", ""],
+                ["账号", "打招呼语", "姓名"],
+                ["wxid_first1", "", "示例学生"],
+                ["wxid_second", "", "示例学生"],
             ]
         )
     )
@@ -107,22 +107,22 @@ def test_selected_payload_applies_row_then_global_then_preserve_defaults(qapp):
     model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
+                ["账号", "打招呼语", "姓名"],
                 ["wxid_first1", "行内问候", "行内备注"],
-                ["wxid_second", "", ""],
+                ["wxid_second", "", "示例学生"],
             ]
         )
     )
 
-    payload = model.selected_payload("全局问候", "全局备注")
+    payload = model.selected_payload("全局问候", "姐姐")
     assert payload[0]["greeting"] == "行内问候"
-    assert payload[0]["remark"] == "行内备注"
+    assert payload[0]["remark"] == "行内备注姐姐"
     assert payload[1]["greeting"] == "全局问候"
-    assert payload[1]["remark"] == "全局备注"
+    assert payload[1]["remark"] == "示例学生姐姐"
 
     payload = model.selected_payload("", "")
     assert payload[1]["greeting"] is None
-    assert payload[1]["remark"] == ""
+    assert payload[1]["remark"] == "示例学生"
 
 
 def test_manual_rows_are_blank_invalid_and_have_unique_ids(qapp):
@@ -139,7 +139,8 @@ def test_manual_rows_are_blank_invalid_and_have_unique_ids(qapp):
     assert first.item_id != second.item_id
     assert (first.account, first.greeting, first.remark) == ("", "", "")
     assert first.valid is False
-    assert first.error == "账号不能为空"
+    assert "账号不能为空" in first.error
+    assert "姓名" in first.error
     assert first.selected is False
     assert (model.count, model.validCount, model.selectedCount) == (2, 0, 0)
 
@@ -147,6 +148,7 @@ def test_manual_rows_are_blank_invalid_and_have_unique_ids(qapp):
 def test_manual_row_auto_selects_only_when_it_first_becomes_valid(qapp):
     model = FriendImportModel()
     row = model.appendEmptyRecord()
+    model.setCell(row, "name", "示例学生")
 
     assert model.setCell(row, "account", "张三")
     assert model.record_at(row).selected is False
@@ -161,12 +163,13 @@ def test_manual_row_auto_selects_only_when_it_first_becomes_valid(qapp):
 
 
 def test_manual_row_stays_unselected_when_twenty_rows_are_already_selected(qapp):
-    rows = [["账号", "打招呼语", "备注"]]
-    rows.extend([[f"wxid_limit{i:02d}", "", ""] for i in range(20)])
+    rows = [["账号", "打招呼语", "姓名"]]
+    rows.extend([[f"wxid_limit{i:02d}", "", "示例学生"] for i in range(20)])
     model = FriendImportModel()
     model.replace_records(load_friend_records(rows))
 
     row = model.appendEmptyRecord()
+    model.setCell(row, "name", "示例学生")
     assert model.setCell(row, "account", "wxid_overlimit")
 
     assert model.record_at(row).valid is True
@@ -179,9 +182,9 @@ def test_removing_a_row_revalidates_the_remaining_duplicate(qapp):
     model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
-                ["wxid_first1", "", ""],
-                ["wxid_second", "", ""],
+                ["账号", "打招呼语", "姓名"],
+                ["wxid_first1", "", "示例学生"],
+                ["wxid_second", "", "示例学生"],
             ]
         )
     )
@@ -204,12 +207,13 @@ def test_deleting_duplicate_selects_manual_row_on_first_valid_transition(qapp):
     model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
-                ["wxid_existing", "", ""],
+                ["账号", "打招呼语", "姓名"],
+                ["wxid_existing", "", "示例学生"],
             ]
         )
     )
     manual_row = model.appendEmptyRecord()
+    model.setCell(manual_row, "name", "示例学生")
     assert model.setCell(manual_row, "account", "wxid_existing")
     assert model.record_at(manual_row).valid is False
     assert model.record_at(manual_row).selected is False
@@ -226,12 +230,13 @@ def test_editing_other_duplicate_consumes_manual_rows_first_valid_selection(qapp
     model.replace_records(
         load_friend_records(
             [
-                ["账号", "打招呼语", "备注"],
-                ["wxid_existing", "", ""],
+                ["账号", "打招呼语", "姓名"],
+                ["wxid_existing", "", "示例学生"],
             ]
         )
     )
     manual_row = model.appendEmptyRecord()
+    model.setCell(manual_row, "name", "示例学生")
     assert model.setCell(manual_row, "account", "wxid_existing")
     assert model.record_at(manual_row).valid is False
 
@@ -248,12 +253,14 @@ def test_editing_other_duplicate_consumes_manual_rows_first_valid_selection(qapp
 def test_replacing_records_clears_pending_manual_auto_selection(qapp):
     model = FriendImportModel()
     row = model.appendEmptyRecord()
+    model.setCell(row, "name", "示例学生")
     manual_id = model.record_at(row).item_id
     model.replace_records(
         [
             FriendRecord(
                 item_id=manual_id,
                 account="",
+                name="示例学生",
                 valid=False,
                 error="账号不能为空",
             )
@@ -271,6 +278,7 @@ def test_clear_records_resets_table_counts_pending_selection_and_import_error(
 ):
     model = FriendImportModel()
     first_row = model.appendEmptyRecord()
+    model.setCell(first_row, "name", "示例学生")
     assert model.setCell(first_row, "account", "wxid_manual1")
     model.appendEmptyRecord()
     assert model.importFile(str(tmp_path / "missing.csv")) is False
@@ -285,5 +293,6 @@ def test_clear_records_resets_table_counts_pending_selection_and_import_error(
     assert model.clearRecords() is False
 
     row = model.appendEmptyRecord()
+    model.setCell(row, "name", "示例学生")
     assert model.setCell(row, "account", "wxid_after_clear")
     assert model.record_at(row).selected is True

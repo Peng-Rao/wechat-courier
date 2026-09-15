@@ -50,7 +50,6 @@ def test_friend_workspace_exposes_right_click_add_and_delete_actions():
     assert "removeRecord(root.contextRow)" in source
     assert "新增一行" in source
     assert "删除此行" in source
-    assert "可导入或右键新增/删除，单元格可直接编辑" in source
 
 
 def test_active_task_locks_navigation_settings_and_configuration_controls():
@@ -134,7 +133,7 @@ def test_default_greeting_field_has_room_for_the_full_text():
     source = qml("SettingsDialog.qml")
 
     greeting_start = source.index('title: "默认打招呼语"')
-    greeting_end = source.index('title: "默认备注"')
+    greeting_end = source.index('title: "默认后缀"')
     greeting_row = source[greeting_start:greeting_end]
     assert "width: 360" in greeting_row
 
