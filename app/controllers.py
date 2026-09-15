@@ -278,8 +278,16 @@ class FriendController(QObject):
         self._default_remark = str(
             settings.value("friends/defaultRemark", self.DEFAULT_REMARK)
         )
-        self._interval_min = float(settings.value("friends/intervalMin", 15.0))
-        self._interval_max = float(settings.value("friends/intervalMax", 30.0))
+        raw_interval_min = float(settings.value("friends/intervalMin", 15.0))
+        raw_interval_max = float(settings.value("friends/intervalMax", 30.0))
+        bounded_min = max(1.0, min(300.0, raw_interval_min))
+        bounded_max = max(1.0, min(300.0, raw_interval_max))
+        self._interval_min = min(bounded_min, bounded_max)
+        self._interval_max = max(bounded_min, bounded_max)
+        if self._interval_min != raw_interval_min:
+            settings.setValue("friends/intervalMin", self._interval_min)
+        if self._interval_max != raw_interval_max:
+            settings.setValue("friends/intervalMax", self._interval_max)
 
     @Property(QObject, constant=True)
     def model(self):
@@ -317,7 +325,7 @@ class FriendController(QObject):
         return self._interval_min
 
     def _set_interval_min(self, value):
-        value = max(5.0, min(300.0, float(value)))
+        value = max(1.0, min(300.0, float(value)))
         value = min(value, self._interval_max)
         if value == self._interval_min:
             return
@@ -333,7 +341,7 @@ class FriendController(QObject):
         return self._interval_max
 
     def _set_interval_max(self, value):
-        value = max(5.0, min(300.0, float(value)))
+        value = max(1.0, min(300.0, float(value)))
         value = max(value, self._interval_min)
         if value == self._interval_max:
             return
@@ -794,6 +802,7 @@ class AgentController(QObject):
 class TaskController(QObject):
     phaseChanged = Signal()
     activeChanged = Signal()
+    kindChanged = Signal()
     progressChanged = Signal()
     currentStepChanged = Signal()
     errorChanged = Signal()
@@ -870,7 +879,7 @@ class TaskController(QObject):
         self._agent.rpcErrorReceived.connect(self._on_agent_rpc_error)
         self._agent.inspectionChanged.connect(self.executionStateChanged.emit)
         for signal in (
-            self.activeChanged, self.phaseChanged, self.progressChanged, self.executionStateChanged,
+            self.activeChanged, self.phaseChanged, self.kindChanged, self.progressChanged, self.executionStateChanged,
             message.recipientsTextChanged, message.templateTextChanged, message.filePathsChanged,
             message.useForwardChanged, message.intervalMinChanged, message.intervalMaxChanged,
             friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRemarkChanged,
@@ -963,7 +972,7 @@ class TaskController(QObject):
     def active(self):
         return self._active
 
-    @Property(str, notify=phaseChanged)
+    @Property(str, notify=kindChanged)
     def kind(self):
         return self._kind
 
@@ -1100,6 +1109,11 @@ class TaskController(QObject):
             self._active = active
             self.activeChanged.emit()
 
+    def _set_kind(self, kind: str) -> None:
+        if kind != self._kind:
+            self._kind = kind
+            self.kindChanged.emit()
+
     @Slot(str)
     def _set_error(self, error: str) -> None:
         self._error = error
@@ -1116,7 +1130,7 @@ class TaskController(QObject):
             self._set_error("没有可执行的数据")
             return False
         self._task_id = uuid.uuid4().hex
-        self._kind = kind
+        self._set_kind(kind)
         self._done = 0
         self._total = len(items)
         self._current_step = ""

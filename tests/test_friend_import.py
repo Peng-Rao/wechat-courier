@@ -264,3 +264,26 @@ def test_replacing_records_clears_pending_manual_auto_selection(qapp):
 
     assert model.record_at(0).valid is True
     assert model.record_at(0).selected is False
+
+
+def test_clear_records_resets_table_counts_pending_selection_and_import_error(
+    tmp_path, qapp
+):
+    model = FriendImportModel()
+    first_row = model.appendEmptyRecord()
+    assert model.setCell(first_row, "account", "wxid_manual1")
+    model.appendEmptyRecord()
+    assert model.importFile(str(tmp_path / "missing.csv")) is False
+    assert model.importError
+    assert (model.count, model.validCount, model.selectedCount) == (2, 1, 1)
+
+    assert hasattr(model, "clearRecords"), "好友模型必须暴露清空表格接口"
+    assert model.clearRecords() is True
+
+    assert (model.count, model.validCount, model.selectedCount) == (0, 0, 0)
+    assert model.importError == ""
+    assert model.clearRecords() is False
+
+    row = model.appendEmptyRecord()
+    assert model.setCell(row, "account", "wxid_after_clear")
+    assert model.record_at(row).selected is True

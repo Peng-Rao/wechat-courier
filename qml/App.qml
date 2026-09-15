@@ -41,6 +41,15 @@ Rectangle {
         settingsDialog.open()
     }
 
+    function showActiveTaskWorkspace() {
+        if (!root.interactionLocked || !root.appBackend || !root.appBackend.task)
+            return
+        if (root.appBackend.task.kind === "message_send")
+            root.workspaceIndex = 0
+        else if (root.appBackend.task.kind === "friend_add")
+            root.workspaceIndex = 1
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -121,6 +130,10 @@ Rectangle {
         ignoreUnknownSignals: true
         function onActiveChanged() {
             if (root.interactionLocked && settingsDialog.opened) settingsDialog.close()
+            root.showActiveTaskWorkspace()
+        }
+        function onKindChanged() {
+            root.showActiveTaskWorkspace()
         }
     }
 

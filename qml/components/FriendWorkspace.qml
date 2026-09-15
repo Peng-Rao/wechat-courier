@@ -6,6 +6,7 @@ import "../theme"
 
 Item {
     id: root
+    objectName: "friendWorkspace"
     property var appBackend: null
     readonly property var friendBackend: appBackend ? appBackend.friends : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
@@ -15,12 +16,33 @@ Item {
         || appBackend && appBackend.agent
             && appBackend.agent.friendSubmitEnabled === true
     )
-    property bool monitorVisible: taskBackend && taskBackend.kind === "friend_add"
+    readonly property bool ownsTask: !!(
+        taskBackend && taskBackend.kind === "friend_add"
+    )
+    property bool monitorDismissed: false
+    readonly property bool monitorVisible: root.ownsTask && !root.monitorDismissed
     property int contextRow: -1
 
     function startTask() {
         if (root.interactionLocked) return
-        if (taskBackend && taskBackend.startFriends()) monitorVisible = true
+        if (taskBackend) taskBackend.startFriends()
+    }
+
+    function dismissMonitor() {
+        root.monitorDismissed = true
+    }
+
+    Connections {
+        target: root.taskBackend
+        ignoreUnknownSignals: true
+        function onActiveChanged() {
+            if (root.taskBackend.active && root.ownsTask)
+                root.monitorDismissed = false
+        }
+        function onKindChanged() {
+            if (root.taskBackend.active && root.ownsTask)
+                root.monitorDismissed = false
+        }
     }
 
     function requestFriendStart() {
@@ -62,6 +84,15 @@ Item {
         var removed = root.friendBackend.model.removeRecord(root.contextRow)
         root.contextRow = -1
         return removed
+    }
+
+    function clearFriendTable() {
+        if (root.interactionLocked || !root.friendBackend
+                || root.friendBackend.model.count === 0)
+            return false
+        friendContextMenu.close()
+        root.contextRow = -1
+        return root.friendBackend.model.clearRecords()
     }
 
     function openTableContextMenu(row) {
@@ -197,6 +228,15 @@ Item {
                             onClicked: {
                                 if (!root.interactionLocked && root.friendBackend)
                                     root.friendBackend.model.selectFirstValid()
+                            }
+                        }
+                        Button {
+                            objectName: "clearFriendTableButton"
+                            text: "清空表格"
+                            enabled: root.friendBackend && root.friendBackend.model.count > 0
+                                && !root.interactionLocked
+                            onClicked: {
+                                if (!root.interactionLocked) root.clearFriendTable()
                             }
                         }
                     }
@@ -531,7 +571,7 @@ Item {
             taskBackend: root.taskBackend
             agentBackend: root.appBackend ? root.appBackend.agent : null
             taskKind: "friend_add"
-            onRequestEdit: root.monitorVisible = false
+            onRequestEdit: root.dismissMonitor()
         }
     }
 

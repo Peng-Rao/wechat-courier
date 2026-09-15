@@ -6,16 +6,36 @@ import "../theme"
 
 Item {
     id: root
+    objectName: "messageWorkspace"
     property var appBackend: null
     readonly property var messageBackend: appBackend ? appBackend.message : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
     readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
-    property bool monitorVisible: taskBackend && taskBackend.kind === "message_send"
+    readonly property bool ownsTask: !!(
+        taskBackend && taskBackend.kind === "message_send"
+    )
+    property bool monitorDismissed: false
+    readonly property bool monitorVisible: root.ownsTask && !root.monitorDismissed
+
+    function dismissMonitor() {
+        root.monitorDismissed = true
+    }
 
     function startTask() {
         if (root.interactionLocked) return
-        if (taskBackend && taskBackend.startMessage()) {
-            monitorVisible = true
+        if (taskBackend) taskBackend.startMessage()
+    }
+
+    Connections {
+        target: root.taskBackend
+        ignoreUnknownSignals: true
+        function onActiveChanged() {
+            if (root.taskBackend.active && root.ownsTask)
+                root.monitorDismissed = false
+        }
+        function onKindChanged() {
+            if (root.taskBackend.active && root.ownsTask)
+                root.monitorDismissed = false
         }
     }
 
@@ -602,7 +622,7 @@ Item {
             taskBackend: root.taskBackend
             agentBackend: root.appBackend ? root.appBackend.agent : null
             taskKind: "message_send"
-            onRequestEdit: root.monitorVisible = false
+            onRequestEdit: root.dismissMonitor()
         }
     }
 

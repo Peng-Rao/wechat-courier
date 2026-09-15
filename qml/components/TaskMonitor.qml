@@ -437,14 +437,17 @@ Item {
                                 && (root.taskBackend.currentOutcome === "error"
                                     || root.taskBackend.currentOutcome === "unknown")
                             Rectangle {
+                                objectName: "taskStepConnector-" + index
                                 x: 5
-                                y: 0
+                                y: stepNode.y + stepNode.height / 2
                                 width: 1
                                 height: parent.height
                                 visible: index < root.steps.length - 1
                                 color: completed ? WxTheme.clPrimary : WxTheme.clSurfaceBorder
                             }
                             Rectangle {
+                                id: stepNode
+                                objectName: "taskStepNode-" + index
                                 x: 0
                                 y: 10
                                 width: 11

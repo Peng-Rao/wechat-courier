@@ -284,6 +284,39 @@ def test_friend_task_refuses_agent_without_submit_capability(tmp_path, qapp):
     assert not any(method == "task.start" for _id, method, _payload in client.calls)
 
 
+def test_task_kind_has_its_own_notify_signal(tmp_path, qapp, qtbot):
+    backend, _client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+
+    assert hasattr(backend.task, "kindChanged"), "kind 不能继续借用 phaseChanged"
+    with qtbot.waitSignal(backend.task.kindChanged, timeout=1000):
+        assert backend.task.startMessage() is True
+    assert backend.task.kind == "message_send"
+
+
+def test_friend_interval_accepts_one_second_and_normalizes_persisted_bounds(
+    tmp_path, qapp
+):
+    stored = settings(tmp_path)
+    stored.setValue("friends/intervalMin", 0)
+    stored.setValue("friends/intervalMax", 999)
+    client = FakeAgentClient()
+    backend = BackendController(
+        version="0.3.3-test",
+        settings=stored,
+        agent_client=client,
+    )
+
+    assert backend.friends.intervalMin == 1.0
+    assert backend.friends.intervalMax == 300.0
+
+    backend.friends.intervalMax = 1
+    backend.friends.intervalMin = 1
+    assert backend.friends.intervalMin == 1.0
+    assert backend.friends.intervalMax == 1.0
+
+
 def test_acceptance_mode_keeps_friend_task_as_non_submitting_preflight(
     tmp_path, qapp, monkeypatch
 ):

@@ -154,6 +154,26 @@ class FriendImportModel(QAbstractListModel):
         self.countsChanged.emit()
         return True
 
+    @Slot(result=bool)
+    def clearRecords(self) -> bool:
+        changed = bool(
+            self._records
+            or self._manual_rows_pending_selection
+            or self._import_error
+        )
+        if not changed:
+            return False
+
+        self.beginResetModel()
+        self._records.clear()
+        self._manual_rows_pending_selection.clear()
+        self.endResetModel()
+        if self._import_error:
+            self._import_error = ""
+            self.importErrorChanged.emit("")
+        self.countsChanged.emit()
+        return True
+
     @Slot(str, result=bool)
     def importFile(self, path: str) -> bool:
         if path.startswith("file:///"):

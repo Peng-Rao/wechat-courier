@@ -19,6 +19,13 @@ TestCase {
             return count - 1
         }
         function removeRecord(row) { remove(row); return true }
+        function clearRecords() {
+            if (count === 0 && importError === "") return false
+            clear()
+            importError = ""
+            selectedCount = 0
+            return true
+        }
         function setSelected(row, selected) { setProperty(row, "selected", selected); return true }
         function setCell(row, field, value) { setProperty(row, field, value); return true }
         function selectFirstValid() {}
@@ -41,7 +48,12 @@ TestCase {
         property string error: ""
         property bool acceptanceEnabled: false
         property int startCalls: 0
-        function startFriends() { ++startCalls; return true }
+        function startFriends() {
+            ++startCalls
+            kind = "friend_add"
+            active = true
+            return true
+        }
     }
     QtObject {
         id: agentBackend
@@ -74,6 +86,7 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
+    function clearButton() { return findChild(workspace, "clearFriendTableButton") }
     function startButton() { return findChild(workspace, "startFriendsButton") }
     function submitDialog() { return findChild(workspace, "friendSubmitConfirmDialog") }
     function submitConfirmButton() { return findChild(workspace, "friendSubmitConfirmButton") }
@@ -85,10 +98,11 @@ TestCase {
     }
     function init() {
         taskBackend.active = false
+        taskBackend.kind = ""
         taskBackend.startCalls = 0
         taskBackend.acceptanceEnabled = false
         agentBackend.friendSubmitEnabled = true
-        workspace.monitorVisible = false
+        workspace.monitorDismissed = false
         if (submitDialog() !== null)
             submitDialog().close()
         menu().close()
@@ -166,6 +180,25 @@ TestCase {
         mouseClick(removeAction(), 10, Math.floor(removeAction().height / 2), Qt.LeftButton)
         tryCompare(friendModel, "count", 1)
         compare(friendModel.get(0).account, "wxid_second")
+    }
+
+    function test_clear_button_removes_all_rows_and_is_disabled_while_locked() {
+        friendModel.append({ account: "wxid_second", greeting: "", remark: "", valid: true,
+                             error: "", status: "pending", selected: false })
+        verify(clearButton() !== null)
+        verify(clearButton().enabled)
+
+        taskBackend.active = true
+        tryCompare(clearButton(), "enabled", false)
+        compare(workspace.clearFriendTable(), false)
+        compare(friendModel.count, 2)
+
+        taskBackend.active = false
+        tryCompare(clearButton(), "enabled", true)
+        mouseClick(clearButton(), 10, Math.floor(clearButton().height / 2), Qt.LeftButton)
+        tryCompare(friendModel, "count", 0)
+        compare(friendModel.selectedCount, 0)
+        compare(clearButton().enabled, false)
     }
 
     function test_active_task_blocks_open_menu_actions_and_callbacks() {

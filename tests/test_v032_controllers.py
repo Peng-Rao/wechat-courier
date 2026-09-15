@@ -492,8 +492,8 @@ Window {
     StackLayout {
         anchors.top: title.bottom; anchors.bottom: parent.bottom; width: parent.width
         objectName: "pages"
-        MessageWorkspace { appBackend: backend; monitorVisible: false }
-        FriendWorkspace { appBackend: backend; monitorVisible: false }
+        MessageWorkspace { appBackend: backend; monitorDismissed: true }
+        FriendWorkspace { appBackend: backend; monitorDismissed: true }
         TaskMonitor { taskBackend: backend.task; agentBackend: backend.agent }
     }
 }''', QUrl.fromLocalFile(str(base)))
