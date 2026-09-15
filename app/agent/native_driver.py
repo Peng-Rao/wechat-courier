@@ -61,6 +61,8 @@ CHAT_TITLE_AUTOMATION_ID = (
     "content_view.top_content_view.title_h_view.left_v_view."
     "left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label"
 )
+SEARCH_EMPTY_STABLE_SECONDS = 0.5
+SEARCH_DESTINATION_TIMEOUT_SECONDS = 2.0
 
 
 class WindowBlockedError(AutomationRetryError):
@@ -90,6 +92,30 @@ class SearchResultRow:
 
     candidate: SearchCandidate
     control: Any = field(compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class MessageBubbleSnapshot:
+    """In-memory evidence for one top-level Weixin message bubble."""
+
+    identity: tuple[Any, ...]
+    runtime_id: tuple[int, ...]
+    class_name: str
+    automation_id: str
+    accessible_names: tuple[str, ...]
+    bounds: tuple[int, int, int, int] | None
+    order: int = field(compare=False)
+    outgoing: bool | None = field(compare=False)
+
+
+@dataclass(frozen=True)
+class FriendSubmitReceipt:
+    """Proof that the one-way friend-submit mouse injection returned."""
+
+    triggered: bool
+    method: str
+    control_reference: tuple[Any, ...]
+    point: tuple[int, int]
 
 
 def _runtime_id(control: Any) -> tuple[int, ...]:
@@ -2481,12 +2507,14 @@ class NativeWeixinDriver:
             "signature": None,
             "stable": 0,
             "last_state_valid": False,
+            "empty_since": None,
         }
 
         def reset_stability() -> None:
             holder["signature"] = None
             holder["stable"] = 0
             holder["last_state_valid"] = False
+            holder["empty_since"] = None
 
         def collect_results():
             if self._actions.read_text(self._search_edit) != target:
@@ -2508,7 +2536,16 @@ class NativeWeixinDriver:
             if not candidates:
                 holder["signature"] = None
                 holder["stable"] = 0
-                return False
+                now = time.monotonic()
+                if holder["empty_since"] is None:
+                    holder["empty_since"] = now
+                    return False
+                return (
+                    refresh_state["cleared"]
+                    and now - holder["empty_since"]
+                    >= SEARCH_EMPTY_STABLE_SECONDS
+                )
+            holder["empty_since"] = None
             return refresh_state["cleared"] and holder["stable"] >= 2
 
         if not self._wait_for(
@@ -2582,9 +2619,15 @@ class NativeWeixinDriver:
     def select_search_result(self, candidate: SearchCandidate) -> None:
         if not isinstance(candidate, SearchCandidate):
             raise TypeError("select_search_result requires SearchCandidate")
+        observed = self._resolve_search_candidate(candidate)
+        if observed is None:
+            raise RuntimeError("无法解析唯一搜索结果控件")
+        # Resolve once more immediately before the reversible navigation click.
+        # This rejects a newly duplicated result and avoids retaining the row
+        # wrapper while the result list is animating.
         control = self._resolve_search_candidate(candidate)
         if control is None:
-            raise RuntimeError("无法解析唯一搜索结果控件")
+            raise RuntimeError("点击前无法重新解析唯一搜索结果控件")
         self._selected_target = self._search_query or candidate.display_name
         self._selected_identities = candidate.identities
 
@@ -2598,57 +2641,17 @@ class NativeWeixinDriver:
         def destination_verified() -> bool:
             return self.composer_ready() and selected_chat_verified()
 
-        try:
-            self._actions.select(
-                control,
-                destination_verified,
-                pre_resolve_control=lambda: self._resolve_search_candidate(candidate),
-                resolve_control=lambda: self._resolve_search_candidate(candidate),
-                source_present=lambda: self._search_candidate_present(candidate),
-                wake_event=self._wake_event,
+        self._click_search_candidate(control)
+        if not self._wait_for(
+            destination_verified,
+            min(self._timeout, SEARCH_DESTINATION_TIMEOUT_SECONDS),
+            hwnd=safe_attr(self._session, "hwnd", 0) or None,
+        ):
+            source_state = "仍存在" if self._search_candidate_present(candidate) else "已消失"
+            raise ActionVerificationError(
+                "点击精确搜索结果后，聊天标题或输入框仍未就绪；"
+                f"source={source_state}"
             )
-            return
-        except ActionVerificationError as initial_error:
-            if destination_verified():
-                return
-            try:
-                source_still_present = self._search_candidate_present(candidate)
-            except _STOP_ERRORS:
-                raise
-            except Exception:
-                source_still_present = True
-            if source_still_present:
-                raise
-
-            target = self._selected_target
-            refreshed = self.search_contacts(target)
-            expected = normalize_identity(target)
-            exact = [
-                item
-                for item in refreshed
-                if expected
-                in {normalize_identity(value) for value in item.identities}
-            ]
-            if len(exact) != 1:
-                raise RuntimeError(
-                    "搜索结果切换后无法重新确认唯一精确目标"
-                ) from initial_error
-            refreshed_candidate = exact[0]
-            refreshed_control = self._resolve_search_candidate(refreshed_candidate)
-            if refreshed_control is None:
-                raise RuntimeError(
-                    "搜索结果切换后无法重新解析精确目标控件"
-                ) from initial_error
-            self._selected_identities = refreshed_candidate.identities
-            self._click_search_candidate(refreshed_control)
-            if not self._wait_for(
-                destination_verified,
-                self._timeout,
-                hwnd=safe_attr(self._session, "hwnd", 0) or None,
-            ):
-                raise ActionVerificationError(
-                    "重新搜索并点击精确结果后，聊天标题或输入框仍未就绪"
-                ) from initial_error
 
     def current_chat_title(self) -> str:
         if not self._selected_target:
@@ -2802,6 +2805,209 @@ class NativeWeixinDriver:
             self._message_identity(control) for control in self._message_controls()
         )
 
+    def _attachment_snapshot_controls(self):
+        profile = self._session.profile
+        matches = self._find_scoped_controls(
+            hwnd=self._session.hwnd,
+            automation_id=profile.chat_message_list_automation_id,
+            enabled=False,
+        )
+        if len(matches) != 1:
+            return None, [], []
+        message_list = matches[0]
+        rectangle = safe_attr(message_list, "BoundingRectangle")
+        controls = self._find_scoped_controls(
+            hwnd=self._session.hwnd,
+            root=message_list,
+            enabled=False,
+        )
+        accepted_classes = set(profile.chat_message_classes)
+        bubbles = [
+            control
+            for control in controls
+            if str(safe_attr(control, "ClassName", "")) in accepted_classes
+        ]
+        return rectangle, bubbles, controls
+
+    @staticmethod
+    def _rectangle_tuple(rectangle: Any) -> tuple[int, int, int, int] | None:
+        if not NativeWeixinDriver._rect_valid(rectangle):
+            return None
+        return (
+            int(rectangle.left),
+            int(rectangle.top),
+            int(rectangle.right),
+            int(rectangle.bottom),
+        )
+
+    def attachment_snapshot(self) -> tuple[MessageBubbleSnapshot, ...]:
+        """Capture top-level bubble evidence without persisting message content."""
+
+        message_rectangle, bubbles, controls = self._attachment_snapshot_controls()
+        accepted_classes = set(self._session.profile.chat_message_classes)
+        snapshots = []
+        for order, bubble in enumerate(bubbles):
+            values = []
+            outer_name = str(safe_attr(bubble, "Name", "")).strip()
+            if outer_name:
+                values.append(outer_name)
+            bubble_rectangle = safe_attr(bubble, "BoundingRectangle")
+            for control in controls:
+                if control is bubble or str(
+                    safe_attr(control, "ClassName", "")
+                ) in accepted_classes:
+                    continue
+                control_rectangle = safe_attr(control, "BoundingRectangle")
+                if (
+                    not self._rect_valid(bubble_rectangle)
+                    or not self._rect_valid(control_rectangle)
+                ):
+                    continue
+                midpoint = (
+                    (control_rectangle.left + control_rectangle.right) // 2,
+                    (control_rectangle.top + control_rectangle.bottom) // 2,
+                )
+                if not self._point_in_rect(midpoint, bubble_rectangle):
+                    continue
+                value = str(safe_attr(control, "Name", "")).strip()
+                if value and value not in values:
+                    values.append(value)
+
+            rectangle = bubble_rectangle
+            outgoing = None
+            if self._rect_valid(message_rectangle) and self._rect_valid(rectangle):
+                message_width = message_rectangle.right - message_rectangle.left
+                bubble_width = rectangle.right - rectangle.left
+                # Weixin's Qt provider exposes many message rows at the full
+                # viewport width.  Such geometry carries no sender direction;
+                # only genuinely aligned cards may be classified left/right.
+                if message_width > 0 and bubble_width < message_width * 0.8:
+                    message_midpoint = (
+                        message_rectangle.left + message_rectangle.right
+                    ) / 2
+                    bubble_midpoint = (rectangle.left + rectangle.right) / 2
+                    outgoing = bubble_midpoint > message_midpoint
+
+            runtime_id = _runtime_id(bubble)
+            identity = _stable_message_control_identity(bubble)
+            if not runtime_id and values:
+                identity = (
+                    "fallback-bubble",
+                    str(safe_attr(bubble, "ClassName", "")),
+                    str(safe_attr(bubble, "AutomationId", "")),
+                    tuple(normalize_identity(value) for value in values),
+                )
+            snapshots.append(
+                MessageBubbleSnapshot(
+                    identity=identity,
+                    runtime_id=runtime_id,
+                    class_name=str(safe_attr(bubble, "ClassName", "")),
+                    automation_id=str(safe_attr(bubble, "AutomationId", "")),
+                    accessible_names=tuple(values),
+                    bounds=self._rectangle_tuple(rectangle),
+                    order=order,
+                    outgoing=outgoing,
+                )
+            )
+        return tuple(snapshots)
+
+    def _attachment_draft_visible(self, filename: str) -> bool | None:
+        """Return whether a pasted attachment draft is exposed near the composer."""
+
+        composer = self._find_composer()
+        if composer is None:
+            return None
+        try:
+            parent = composer.GetParentControl()
+        except _STOP_ERRORS:
+            raise
+        except Exception:
+            return None
+        if parent is None:
+            return None
+        composer_rectangle = safe_attr(composer, "BoundingRectangle")
+        try:
+            controls = self._find_scoped_controls(
+                hwnd=self._session.hwnd,
+                root=parent,
+                enabled=False,
+            )
+        except _STOP_ERRORS:
+            raise
+        except Exception:
+            return None
+        expected = normalize_identity(filename)
+        for control in controls:
+            if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
+                continue
+            if str(safe_attr(control, "ClassName", "")) in set(
+                self._session.profile.chat_message_classes
+            ):
+                continue
+            rectangle = safe_attr(control, "BoundingRectangle")
+            if not self._rect_valid(rectangle):
+                continue
+            if not self._rect_valid(composer_rectangle) or (
+                rectangle.bottom >= composer_rectangle.top
+            ):
+                return True
+        return False
+
+    def verify_attachment_sent(
+        self,
+        before: Sequence[MessageBubbleSnapshot],
+        filename: str,
+        timeout: float,
+        *,
+        draft_was_visible: bool | None,
+    ) -> bool | None:
+        prior_identities = {snapshot.identity for snapshot in before}
+        previous_tail = before[-1].identity if before else None
+        expected = normalize_identity(filename)
+        file_class = "mmui::ChatFileItemView"
+
+        def filename_tokens(snapshot: MessageBubbleSnapshot) -> set[str]:
+            return {
+                normalize_identity(line)
+                for value in snapshot.accessible_names
+                for line in str(value).splitlines()
+                if normalize_identity(line)
+            }
+
+        def appended() -> bool:
+            current = self.attachment_snapshot()
+            if not current:
+                return False
+            tail = current[-1]
+            if (
+                tail.identity == previous_tail
+                or tail.identity in prior_identities
+                or tail.outgoing is False
+            ):
+                return False
+            exact_filename = expected in filename_tokens(tail)
+            if tail.class_name != file_class and not exact_filename:
+                return False
+            # A full-width Qt row has no usable direction.  In that layout the
+            # exact filename token is required to bind the new tail bubble to
+            # this one paste/Enter action.
+            if tail.outgoing is None and not exact_filename:
+                return False
+            if self.read_composer_text() != "":
+                return False
+            return self._attachment_draft_visible(filename) is False
+
+        if self._wait_for(
+            appended,
+            timeout,
+            hwnd=safe_attr(self._session, "hwnd", 0) or None,
+        ):
+            return True
+        self._raise_scoped_risk(
+            hwnd=safe_attr(self._session, "hwnd", 0) or None
+        )
+        return None
+
     def _invoke_once_or_key(
         self, _button_names: Sequence[str], key_control
     ) -> str:
@@ -2885,16 +3091,24 @@ class NativeWeixinDriver:
                     {"path": path, "outcome": "error", "detail": "文件不存在"}
                 )
                 continue
-            before = self.message_snapshot()
+            before = self.attachment_snapshot()
             if not set_files_to_clipboard([path]):
                 results.append(
                     {"path": path, "outcome": "error", "detail": "剪贴板写入失败"}
                 )
                 continue
+            self._report_progress("attachment_paste")
             self._click_bounds(self._composer)
             self._composer = self._send_keys(self._composer, "{Ctrl}v", wait_time=0.1)
+            draft_was_visible = self._attachment_draft_visible(Path(path).name)
             self._invoke_once_or_key(("发送", "发送(S)"), self._composer)
-            verified = self.verify_sent(before, Path(path).name, self._timeout)
+            self._report_progress("attachment_verify")
+            verified = self.verify_attachment_sent(
+                before,
+                Path(path).name,
+                self._timeout,
+                draft_was_visible=draft_was_visible,
+            )
             results.append(
                 {
                     "path": path,
@@ -3811,28 +4025,167 @@ class NativeWeixinDriver:
             "remark": self._actions.read_text(remark_edit) or "",
         }
 
-    def submit_friend_request(self) -> str:
-        confirm = self._wait_control(
-            hwnd=self._verify_hwnd,
+    def _resolve_unique_friend_submit_control(self):
+        """Resolve the irreversible submit target from a fresh verified root."""
+
+        hwnd = int(self._verify_hwnd or 0)
+        session = self._session
+        if not hwnd or session is None or self._uia is None:
+            raise RuntimeError("好友申请窗口未绑定，拒绝提交")
+        expected_pid = int(safe_attr(session, "pid", 0) or 0)
+        expected_class = str(
+            safe_attr(session.profile, "verify_friend_root_class", "") or ""
+        )
+        if not expected_pid or not expected_class:
+            raise RuntimeError("好友申请窗口身份不完整，拒绝提交")
+
+        verify_windows = self._process_windows(
+            (expected_class,), visible=True, strict=True
+        )
+        if len(verify_windows) != 1 or int(verify_windows[0]) != hwnd:
+            raise RuntimeError(
+                "好友申请窗口未唯一保持可见，拒绝提交："
+                f"expectedHwnd={hwnd}, matches={verify_windows}"
+            )
+
+        self.ensure_window_responsive(hwnd)
+        root = self._uia.ControlFromHandle(hwnd)
+        root_class = str(safe_attr(root, "ClassName", "") or "")
+        root_type = str(safe_attr(root, "ControlTypeName", "") or "")
+        root_hwnd = int(safe_attr(root, "NativeWindowHandle", 0) or 0)
+        root_pid = int(safe_attr(root, "ProcessId", 0) or 0)
+        if (
+            root is None
+            or root_class != expected_class
+            or root_type != "WindowControl"
+            or root_hwnd != hwnd
+            or root_pid != expected_pid
+        ):
+            raise RuntimeError(
+                "好友申请窗口身份已变化，拒绝提交："
+                f"hwnd={root_hwnd}, pid={root_pid}, class={root_class!r}, "
+                f"type={root_type!r}"
+            )
+        if bool(safe_attr(root, "IsOffscreen", True)):
+            raise RuntimeError("好友申请窗口不可见，拒绝提交")
+        if not bool(safe_attr(root, "IsEnabled", False)):
+            raise RuntimeError("好友申请窗口未启用，拒绝提交")
+
+        self._raise_scoped_risk(hwnd=hwnd, root=root)
+        matches = self._find_scoped_controls(
+            hwnd=hwnd,
+            root=root,
             name="确定",
             control_type="ButtonControl",
+            visible=True,
         )
+        if len(matches) != 1:
+            raise RuntimeError(
+                "好友申请的“确定”按钮未唯一出现，拒绝提交："
+                f"matches={len(matches)}"
+            )
+        confirm = matches[0]
+        if not bool(safe_attr(confirm, "IsEnabled", False)):
+            raise RuntimeError("好友申请的“确定”按钮未启用，拒绝提交")
+        if bool(safe_attr(confirm, "IsOffscreen", True)):
+            raise RuntimeError("好友申请的“确定”按钮不可见，拒绝提交")
+
+        owner, _owner_bounds = self._owning_window(confirm)
+        owner_hwnd = int(safe_attr(owner, "NativeWindowHandle", 0) or 0)
+        owner_pid = int(safe_attr(owner, "ProcessId", 0) or 0)
+        owner_class = str(safe_attr(owner, "ClassName", "") or "")
+        if (
+            owner_hwnd != hwnd
+            or owner_pid != expected_pid
+            or owner_class != expected_class
+        ):
+            raise RuntimeError(
+                "好友申请确认控件不属于当前申请窗口，拒绝提交："
+                f"ownerHwnd={owner_hwnd}, ownerPid={owner_pid}, "
+                f"ownerClass={owner_class!r}"
+            )
+        return confirm
+
+    def submit_friend_request(self) -> FriendSubmitReceipt:
+        """Hit-test and click the exact fresh confirmation control once.
+
+        Weixin 4.1.13.65 exposes an InvokePattern that can return success while
+        doing nothing.  The irreversible boundary therefore uses one guarded
+        physical click and returns a typed receipt only after injection returns.
+        Exceptions carry ``destructive_triggered`` so the workflow never claims
+        a click occurred when validation actually failed before injection.
+        """
+
         try:
-            pattern = confirm.GetInvokePattern()
-        except _STOP_ERRORS:
-            raise
-        except Exception:
-            pattern = None
-        if pattern is not None:
+            observed = self._resolve_unique_friend_submit_control()
+            observed_reference = _control_reference(observed)
+            confirm = self._resolve_unique_friend_submit_control()
+            confirm_reference = _control_reference(confirm)
+            if confirm_reference != observed_reference:
+                raise RuntimeError("好友申请确认控件在提交前发生变化，拒绝提交")
+
+            window_root, window_rectangle = self._owning_window(confirm)
+            rectangle = safe_attr(confirm, "BoundingRectangle")
+            if not self._rect_valid(rectangle):
+                raise RuntimeError("好友申请的“确定”按钮边界无效，拒绝提交")
+            point = self._clickable_point(confirm)
+            if (
+                point is None
+                or not self._point_in_rect(point, rectangle)
+                or not self._point_in_rect(point, window_rectangle)
+            ):
+                point = (
+                    (rectangle.left + rectangle.right) // 2,
+                    (rectangle.top + rectangle.bottom) // 2,
+                )
+            if not self._point_in_rect(point, window_rectangle):
+                raise RuntimeError("好友申请确认点击点不在申请窗口内，拒绝提交")
+
+            self._prepare_click_window(window_root, confirm, point)
+            hit = self._uia.ControlFromPoint(*point)
+            current = hit
+            hit_matches = False
+            for _depth in range(16):
+                if current is None:
+                    break
+                if _control_reference(current) == confirm_reference:
+                    hit_matches = True
+                    break
+                try:
+                    parent = current.GetParentControl()
+                except _STOP_ERRORS:
+                    raise
+                except Exception:
+                    break
+                if parent is current:
+                    break
+                current = parent
+            if not hit_matches:
+                raise RuntimeError(
+                    "好友申请确认点击点未命中当前“确定”按钮，拒绝提交；"
+                    f"hit={describe_control(hit)}"
+                )
+        except Exception as exc:
             try:
-                result = pattern.Invoke(waitTime=0)
-            except TypeError:
-                result = pattern.Invoke()
-            if result is False:
-                raise RuntimeError("好友申请 InvokePattern 返回失败")
-            return "invoke_pattern"
-        self._click_bounds(confirm)
-        return "uia_bounds_click"
+                exc.destructive_triggered = False
+            except Exception:
+                pass
+            raise
+
+        try:
+            self._uia.Click(*point)
+        except Exception as exc:
+            try:
+                exc.destructive_triggered = None
+            except Exception:
+                pass
+            raise
+        return FriendSubmitReceipt(
+            triggered=True,
+            method="uia_bounds_click",
+            control_reference=confirm_reference,
+            point=point,
+        )
 
     def cancel_friend_request(self) -> bool:
         import win32gui
@@ -3903,6 +4256,8 @@ class NativeWeixinDriver:
     def verify_friend_request(self, timeout: float) -> bool | None:
         import win32gui
 
+        submitted_form_hwnd = int(self._verify_hwnd or 0)
+
         def explicitly_confirmed():
             self._raise_process_risk()
             handles = [self._add_hwnd] if self._add_hwnd else []
@@ -3918,6 +4273,25 @@ class NativeWeixinDriver:
                     hwnd=hwnd,
                     name=FRIEND_SUBMIT_SUCCESS_NAMES,
                     enabled=False,
+                ):
+                    return True
+            # The verified confirmation window is modal.  After the exact
+            # hit-tested “确定” click, its destruction/hide while a same-session
+            # Weixin owner remains visible is an explicit UI transition, not a
+            # timeout guess.  Risk controls are checked above before accepting it.
+            if submitted_form_hwnd and (
+                not win32gui.IsWindow(submitted_form_hwnd)
+                or not win32gui.IsWindowVisible(submitted_form_hwnd)
+            ):
+                owner_handles = {
+                    int(self._add_hwnd or 0),
+                    int(safe_attr(self._session, "hwnd", 0) or 0),
+                }
+                if any(
+                    hwnd
+                    and win32gui.IsWindow(hwnd)
+                    and win32gui.IsWindowVisible(hwnd)
+                    for hwnd in owner_handles
                 ):
                     return True
             return False
@@ -3961,6 +4335,8 @@ class NativeWeixinDriver:
 
 
 __all__ = [
+    "FriendSubmitReceipt",
+    "MessageBubbleSnapshot",
     "NativeWeixinDriver",
     "RiskControlError",
     "SearchCandidate",

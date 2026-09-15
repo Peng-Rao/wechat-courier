@@ -471,6 +471,9 @@ def render_fake_health_states(output):
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")
         app.setFont(QFont("Microsoft YaHei", 10))
     backend, client = make_backend(output)
+    client.helloReceived.emit(
+        {"capabilities": {"friendSubmitEnabled": True}}
+    )
     backend.message.recipientsText = "Alice"
     backend.message.templateText = "hello"
     backend.friends.model.appendEmptyRecord()
@@ -489,8 +492,8 @@ Window {
     StackLayout {
         anchors.top: title.bottom; anchors.bottom: parent.bottom; width: parent.width
         objectName: "pages"
-        MessageWorkspace { appBackend: backend; monitorVisible: false }
-        FriendWorkspace { appBackend: backend; monitorVisible: false }
+        MessageWorkspace { appBackend: backend; monitorDismissed: true }
+        FriendWorkspace { appBackend: backend; monitorDismissed: true }
         TaskMonitor { taskBackend: backend.task; agentBackend: backend.agent }
     }
 }''', QUrl.fromLocalFile(str(base)))

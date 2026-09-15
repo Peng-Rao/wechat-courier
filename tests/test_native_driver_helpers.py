@@ -11,6 +11,8 @@ from app.agent.actions import ActionVerificationError
 from app.agent.gate import AccessibilitySafetyError
 from app.agent.native_driver import (
     _control_reference,
+    FriendSubmitReceipt,
+    MessageBubbleSnapshot,
     NativeWeixinDriver,
     RiskControlError,
     SearchCandidate,
@@ -23,7 +25,7 @@ from app.agent.native_driver import (
     resolve_friend_form_fields,
 )
 from app.agent.retry import StaleElementError, WeixinUnresponsiveError
-from app.agent.profile import UnsupportedWeixinVersion
+from app.agent.profile import get_weixin_profile, UnsupportedWeixinVersion
 
 
 @dataclass
@@ -349,7 +351,7 @@ def test_search_does_not_accept_transient_empty_rows_before_delayed_results():
     assert driver.search_contacts("Alice") == [alice]
 
 
-def test_search_returns_empty_only_after_bounded_no_match_wait():
+def test_search_returns_after_stable_empty_result_instead_of_full_timeout(monkeypatch):
     class SearchEdit(FakeControl):
         value = "old"
 
@@ -362,11 +364,16 @@ def test_search_returns_empty_only_after_bounded_no_match_wait():
         def read_text(control):
             return control.value
 
-    class ExhaustingWaiter:
+    class ObservingWaiter:
+        def __init__(self):
+            self.outcomes = []
+
         def wait(self, predicate, *_args, **_kwargs):
-            for _ in range(5):
+            for _ in range(10):
                 if predicate():
+                    self.outcomes.append(True)
                     return True
+            self.outcomes.append(False)
             return False
 
     old = SearchCandidate(
@@ -377,10 +384,17 @@ def test_search_returns_empty_only_after_bounded_no_match_wait():
     driver.ensure_search_ready = lambda: True
     driver._search_edit = SearchEdit()
     driver._actions = Actions()
-    driver._waiter = ExhaustingWaiter()
+    waiter = ObservingWaiter()
+    driver._waiter = waiter
     driver._search_rows = lambda: next(snapshots, ([], []))
+    clock = iter((0.0, 0.2, 0.55, 0.8, 1.0))
+    monkeypatch.setattr(
+        "app.agent.native_driver.time.monotonic",
+        lambda: next(clock, 1.0),
+    )
 
     assert driver.search_contacts("missing") == []
+    assert waiter.outcomes == [True, True]
 
 
 def test_open_exact_chat_supports_repeated_file_transfer_helper_searches():
@@ -813,7 +827,7 @@ def test_select_search_result_re_resolves_row_after_pattern_failure():
     assert clicked == [(130, 120)]
 
 
-def test_select_reopens_search_once_when_pattern_hides_results_without_navigation():
+def test_select_uses_one_direct_fresh_row_click_without_reopening_search():
     candidate = SearchCandidate(
         "Alice", frozenset({"Alice"}), "contact", "search_item_1", 0, 1
     )
@@ -839,21 +853,8 @@ def test_select_reopens_search_once_when_pattern_hides_results_without_navigatio
     driver = NativeWeixinDriver(gate_backend=object())
     driver._search_query = "Alice"
     driver._root = FakeControl(BoundingRectangle=FakeRect(0, 0, 200, 200))
-    driver._resolve_search_candidate = lambda value: (
-        stale if value is candidate else fresh
-    )
-    driver._search_candidate_present = lambda _candidate: False
-    driver._actions = type(
-        "Actions",
-        (),
-        {
-            "select": staticmethod(
-                lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    ActionVerificationError("source disappeared")
-                )
-            )
-        },
-    )()
+    resolutions = iter((stale, fresh))
+    driver._resolve_search_candidate = lambda _value: next(resolutions, fresh)
     driver.search_contacts = lambda target: searches.append(target) or [refreshed]
     driver._click_search_candidate = lambda control: clicks.append(control)
     driver.composer_ready = lambda: bool(clicks)
@@ -864,8 +865,40 @@ def test_select_reopens_search_once_when_pattern_hides_results_without_navigatio
 
     driver.select_search_result(candidate)
 
-    assert searches == ["Alice"]
+    assert searches == []
     assert clicks == [fresh]
+
+
+def test_select_caps_destination_wait_after_one_direct_click():
+    candidate = SearchCandidate(
+        "Alice", frozenset({"Alice"}), "contact", "search_item_1", 0, 1
+    )
+    row = FakeControl(
+        "Alice",
+        "ListItemControl",
+        "mmui::SearchContentCellView",
+        "search_item_1",
+        BoundingRectangle=FakeRect(20, 20, 80, 50),
+    )
+    clicked = []
+    waits = []
+    driver = NativeWeixinDriver(gate_backend=object(), timeout=5.0)
+    driver._search_query = "Alice"
+    driver._resolve_search_candidate = lambda _candidate: row
+    driver._click_search_candidate = lambda control: clicked.append(control)
+    driver.composer_ready = lambda: bool(clicked)
+    driver.current_chat_title = lambda: "Alice" if clicked else ""
+
+    def bounded_wait(predicate, timeout, **_kwargs):
+        waits.append(timeout)
+        return predicate()
+
+    driver._wait_for = bounded_wait
+
+    driver.select_search_result(candidate)
+
+    assert clicked == [row]
+    assert waits == [pytest.approx(2.0)]
 
 
 def test_add_friend_navigation_ignores_same_named_top_level_window():
@@ -975,6 +1008,7 @@ def test_select_accepts_remark_chat_title_for_nickname_query():
     )
     driver._find_composer = lambda: object()
     driver.composer_ready = lambda: True
+    driver._click_search_candidate = lambda _control: None
 
     driver.select_search_result(candidate)
 
@@ -1573,6 +1607,237 @@ def test_message_verification_requires_explicit_current_composer_empty_readback(
     driver._find_composer = lambda: stale
 
     assert driver.verify_sent(before, "hello", timeout=0.1) is None
+
+
+def _bubble_snapshot(
+    identity,
+    *,
+    class_name="mmui::ChatFileItemView",
+    names=(),
+    order=0,
+    outgoing=True,
+):
+    runtime_id = tuple(identity[-1]) if identity and identity[0] == "runtime" else ()
+    return MessageBubbleSnapshot(
+        identity=identity,
+        runtime_id=runtime_id,
+        class_name=class_name,
+        automation_id="",
+        accessible_names=tuple(names),
+        bounds=(500, 100, 700, 160),
+        order=order,
+        outgoing=outgoing,
+    )
+
+
+def test_attachment_snapshot_reads_filename_from_empty_named_file_bubble_descendants():
+    profile = get_weixin_profile("4.1.13.65")
+    bubble = FakeControl(
+        "",
+        "CustomControl",
+        "mmui::ChatFileItemView",
+        BoundingRectangle=FakeRect(500, 100, 700, 160),
+    )
+    bubble.GetRuntimeId = lambda: (42, 9)
+    filename = FakeControl(
+        "report.pdf",
+        "TextControl",
+        "mmui::XTextView",
+        BoundingRectangle=FakeRect(520, 110, 620, 130),
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1, "profile": profile})()
+    driver._attachment_snapshot_controls = lambda: (
+        FakeRect(100, 50, 750, 500),
+        [bubble],
+        [bubble, filename],
+    )
+
+    snapshot = driver.attachment_snapshot()
+
+    assert len(snapshot) == 1
+    assert snapshot[0].accessible_names == ("report.pdf",)
+    assert snapshot[0].class_name == "mmui::ChatFileItemView"
+    assert snapshot[0].outgoing is True
+
+
+def test_attachment_snapshot_uses_one_message_subtree_query_for_all_bubbles():
+    profile = get_weixin_profile("4.1.13.65")
+    message_list = FakeControl(
+        AutomationId="chat_message_list",
+        BoundingRectangle=FakeRect(100, 50, 750, 500),
+    )
+    first = FakeControl(
+        "",
+        "CustomControl",
+        "mmui::ChatFileItemView",
+        BoundingRectangle=FakeRect(500, 100, 700, 160),
+    )
+    second = FakeControl(
+        "",
+        "CustomControl",
+        "mmui::ChatFileItemView",
+        BoundingRectangle=FakeRect(500, 180, 700, 240),
+    )
+    first.GetRuntimeId = lambda: (42, 1)
+    second.GetRuntimeId = lambda: (42, 2)
+    first_name = FakeControl(
+        "one.pdf", "TextControl", BoundingRectangle=FakeRect(520, 110, 620, 130)
+    )
+    second_name = FakeControl(
+        "two.pdf", "TextControl", BoundingRectangle=FakeRect(520, 190, 620, 210)
+    )
+    calls = []
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1, "profile": profile})()
+    driver.ensure_window_responsive = lambda *_args, **_kwargs: None
+    driver._message_bubbles = lambda: [first, second]
+
+    def find_controls(**selector):
+        calls.append(selector)
+        if selector.get("automation_id") == "chat_message_list":
+            return [message_list]
+        if selector.get("root") is message_list:
+            return [first, first_name, second, second_name]
+        if selector.get("root") is first:
+            return [first_name]
+        if selector.get("root") is second:
+            return [second_name]
+        return []
+
+    driver._find_scoped_controls = find_controls
+
+    snapshot = driver.attachment_snapshot()
+
+    assert [item.accessible_names for item in snapshot] == [
+        ("one.pdf",),
+        ("two.pdf",),
+    ]
+    assert len(calls) == 2
+
+
+def test_attachment_snapshot_does_not_misclassify_full_width_row_as_incoming():
+    profile = get_weixin_profile("4.1.13.65")
+    message_rect = FakeRect(663, 304, 1288, 822)
+    bubble = FakeControl(
+        "文件\nv033-attachment-confirmation-20260915.txt\n157B\n微信电脑版",
+        "ListItemControl",
+        "mmui::ChatBubbleItemView",
+        "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+        BoundingRectangle=FakeRect(663, 701, 1288, 822),
+    )
+    bubble.GetRuntimeId = lambda: (42, 99)
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1, "profile": profile})()
+    driver._attachment_snapshot_controls = lambda: (
+        message_rect,
+        [bubble],
+        [bubble],
+    )
+
+    snapshot = driver.attachment_snapshot()
+
+    assert snapshot[0].outgoing is None
+
+
+def test_attachment_verification_accepts_new_outgoing_file_bubble_and_cleared_draft():
+    old = _bubble_snapshot(("runtime", (42, 1)), names=("old.pdf",))
+    new = _bubble_snapshot(
+        ("runtime", (42, 2)), names=("report.pdf",), order=1
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver.attachment_snapshot = lambda: (old, new)
+    driver.read_composer_text = lambda: ""
+    driver._attachment_draft_visible = lambda _filename: False
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    driver._raise_scoped_risk = lambda **_kwargs: None
+
+    assert driver.verify_attachment_sent(
+        (old,), "report.pdf", timeout=0.1, draft_was_visible=True
+    ) is True
+
+
+def test_attachment_verification_accepts_real_full_row_bubble_with_filename_token():
+    old = _bubble_snapshot(("runtime", (42, 1)), names=("old.pdf",))
+    new = _bubble_snapshot(
+        ("runtime", (42, 2)),
+        class_name="mmui::ChatBubbleItemView",
+        names=("文件\nreport.pdf\n157B\n微信电脑版",),
+        order=1,
+        outgoing=None,
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver.attachment_snapshot = lambda: (old, new)
+    driver.read_composer_text = lambda: ""
+    driver._attachment_draft_visible = lambda _filename: False
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    driver._raise_scoped_risk = lambda **_kwargs: None
+
+    assert driver.verify_attachment_sent(
+        (old,), "report.pdf", timeout=0.1, draft_was_visible=False
+    ) is True
+
+
+def test_attachment_verification_rejects_new_incoming_file_bubble():
+    old = _bubble_snapshot(("runtime", (42, 1)), names=("old.pdf",))
+    incoming = _bubble_snapshot(
+        ("runtime", (42, 2)), names=("report.pdf",), order=1, outgoing=False
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver.attachment_snapshot = lambda: (old, incoming)
+    driver.read_composer_text = lambda: ""
+    driver._attachment_draft_visible = lambda _filename: False
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    driver._raise_scoped_risk = lambda **_kwargs: None
+
+    assert driver.verify_attachment_sent(
+        (old,), "report.pdf", timeout=0.1, draft_was_visible=True
+    ) is None
+
+
+def test_send_files_uses_attachment_snapshot_and_never_text_name_verification(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "report.pdf"
+    path.write_bytes(b"test")
+    composer = object()
+    calls = []
+    before = (_bubble_snapshot(("runtime", (42, 1))),)
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver._composer = composer
+    driver.attachment_snapshot = lambda: before
+    driver.message_snapshot = lambda: pytest.fail(
+        "attachments must not rely on outer text-control names"
+    )
+    driver.verify_sent = lambda *_args, **_kwargs: pytest.fail(
+        "attachments need file-bubble verification"
+    )
+    driver._click_bounds = lambda control: calls.append(("click", control))
+    driver._send_keys = lambda control, keys, **_kwargs: (
+        calls.append(("keys", keys)) or control
+    )
+    driver._attachment_draft_visible = lambda _filename: True
+    driver._invoke_once_or_key = lambda *_args, **_kwargs: (
+        calls.append(("send", "enter")) or "keyboard_enter"
+    )
+
+    def verify(before_arg, filename, timeout, *, draft_was_visible):
+        assert before_arg == before
+        assert filename == "report.pdf"
+        assert draft_was_visible is True
+        return True
+
+    driver.verify_attachment_sent = verify
+    monkeypatch.setattr(
+        "src.utils.clipboard_utils.set_files_to_clipboard", lambda _paths: True
+    )
+
+    assert driver.send_files((str(path),))[0]["outcome"] == "success"
+    assert [entry[0] for entry in calls] == ["click", "keys", "send"]
 
 
 def test_forward_candidates_require_one_exact_interactive_identity():
@@ -3011,6 +3276,30 @@ def test_friend_submit_requires_an_explicit_success_status(monkeypatch):
     assert driver.verify_friend_request(timeout=0.1) is None
 
 
+def test_friend_submit_accepts_confirm_window_close_with_visible_weixin_owner(
+    monkeypatch,
+):
+    class ImmediateWaiter:
+        def wait(self, predicate, *_args, **_kwargs):
+            return bool(predicate())
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._waiter = ImmediateWaiter()
+    driver._verify_hwnd = 303
+    driver._add_hwnd = 100
+    driver._session = type("Session", (), {"hwnd": 101})()
+    driver._raise_process_risk = lambda: None
+    driver._raise_scoped_risk = lambda **_kwargs: None
+    driver._find_scoped_controls = lambda **_kwargs: []
+    monkeypatch.setattr("win32gui.IsWindow", lambda hwnd: hwnd != 303)
+    monkeypatch.setattr(
+        "win32gui.IsWindowVisible", lambda hwnd: hwnd in {100, 101}
+    )
+
+    assert driver.verify_friend_request(timeout=0.1) is True
+    assert driver._verify_hwnd == 0
+
+
 def test_friend_preflight_closes_the_request_form_with_invoke_pattern(monkeypatch):
     state = {"visible": True}
 
@@ -3033,6 +3322,182 @@ def test_friend_preflight_closes_the_request_form_with_invoke_pattern(monkeypatc
 
     assert driver.cancel_friend_request() is True
     assert driver._verify_hwnd == 0
+
+
+def _friend_submit_fixture(monkeypatch, controls, *, root_class=None, root_pid=202):
+    profile = get_weixin_profile("4.1.13.65")
+    root = FakeControl(
+        "发送添加朋友申请",
+        "WindowControl",
+        root_class or profile.verify_friend_root_class,
+        BoundingRectangle=FakeRect(100, 100, 700, 600),
+    )
+    root.NativeWindowHandle = 303
+    root.ProcessId = root_pid
+    root.GetTopLevelControl = lambda: root
+    for control in controls:
+        control.GetTopLevelControl = lambda owner=root: owner
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type(
+        "Session",
+        (),
+        {"hwnd": 101, "pid": 202, "profile": profile},
+    )()
+    driver._verify_hwnd = 303
+    clicks = []
+    hit_control = controls[0] if controls else root
+    driver._uia = type(
+        "Uia",
+        (),
+        {
+            "ControlFromHandle": staticmethod(lambda _hwnd: root),
+            "ControlFromPoint": staticmethod(lambda _x, _y: hit_control),
+            "Click": staticmethod(lambda x, y: clicks.append((x, y))),
+        },
+    )()
+    driver._process_windows = lambda *_args, **_kwargs: [303]
+    driver._find_scoped_controls = lambda **_selector: list(controls)
+    driver._raise_scoped_risk = lambda **_selector: None
+    driver.ensure_window_responsive = lambda *_args, **_kwargs: None
+    driver._prepare_click_window = lambda *_args, **_kwargs: None
+    driver._test_submit_clicks = clicks
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd == 303)
+    monkeypatch.setattr(
+        "win32process.GetWindowThreadProcessId", lambda _hwnd: (1, 202)
+    )
+    return driver, root
+
+
+def _friend_confirm(*, runtime_id=(42, 1), offscreen=False, enabled=True):
+    calls = []
+
+    class Pattern:
+        @staticmethod
+        def Invoke(**_kwargs):
+            calls.append("invoke")
+            return True
+
+    control = FakeControl(
+        "确定",
+        "ButtonControl",
+        "mmui::XOutlineButton",
+        IsEnabled=enabled,
+        IsOffscreen=offscreen,
+        BoundingRectangle=FakeRect(500, 520, 580, 560),
+    )
+    control.GetRuntimeId = lambda: runtime_id
+    control.GetInvokePattern = lambda: Pattern()
+    return control, calls
+
+
+def test_friend_submit_uses_one_hit_tested_bounds_click_not_false_invoke(monkeypatch):
+    confirm, calls = _friend_confirm()
+    driver, _root = _friend_submit_fixture(monkeypatch, [confirm])
+
+    receipt = driver.submit_friend_request()
+
+    assert isinstance(receipt, FriendSubmitReceipt)
+    assert receipt.triggered is True
+    assert receipt.method == "uia_bounds_click"
+    assert driver._test_submit_clicks == [(540, 540)]
+    assert calls == []
+
+
+def test_friend_submit_rejects_a_hit_test_from_another_control_before_click(
+    monkeypatch,
+):
+    confirm, calls = _friend_confirm()
+    driver, root = _friend_submit_fixture(monkeypatch, [confirm])
+    covered = FakeControl(
+        "取消",
+        "ButtonControl",
+        "mmui::XOutlineButton",
+        BoundingRectangle=FakeRect(500, 520, 580, 560),
+    )
+    covered.GetTopLevelControl = lambda: root
+    driver._uia.ControlFromPoint = lambda _x, _y: covered
+
+    with pytest.raises(RuntimeError) as raised:
+        driver.submit_friend_request()
+
+    assert getattr(raised.value, "destructive_triggered", "missing") is False
+    assert driver._test_submit_clicks == []
+    assert calls == []
+
+
+def test_friend_submit_marks_click_transport_failure_as_unknown(monkeypatch):
+    confirm, calls = _friend_confirm()
+    driver, _root = _friend_submit_fixture(monkeypatch, [confirm])
+    driver._uia.Click = lambda _x, _y: (_ for _ in ()).throw(
+        RuntimeError("click transport disconnected")
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        driver.submit_friend_request()
+
+    assert getattr(raised.value, "destructive_triggered", "missing") is None
+    assert calls == []
+
+
+def test_friend_submit_rejects_ambiguous_confirm_buttons_without_invoking(
+    monkeypatch,
+):
+    first, first_calls = _friend_confirm(runtime_id=(42, 1))
+    second, second_calls = _friend_confirm(runtime_id=(42, 2))
+    driver, _root = _friend_submit_fixture(monkeypatch, [first, second])
+
+    with pytest.raises(RuntimeError, match="唯一"):
+        driver.submit_friend_request()
+
+    assert first_calls == []
+    assert second_calls == []
+
+
+def test_friend_submit_rejects_offscreen_confirm_without_invoking(monkeypatch):
+    confirm, calls = _friend_confirm(offscreen=True)
+    driver, _root = _friend_submit_fixture(monkeypatch, [confirm])
+
+    with pytest.raises(RuntimeError, match="不可见"):
+        driver.submit_friend_request()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("root_class", "root_pid"),
+    [("mmui::MainWindow", 202), ("mmui::VerifyFriendWindow", 999)],
+)
+def test_friend_submit_rejects_wrong_verification_window_identity(
+    monkeypatch, root_class, root_pid
+):
+    confirm, calls = _friend_confirm()
+    driver, _root = _friend_submit_fixture(
+        monkeypatch,
+        [confirm],
+        root_class=root_class,
+        root_pid=root_pid,
+    )
+
+    with pytest.raises(RuntimeError, match="申请窗口"):
+        driver.submit_friend_request()
+
+    assert calls == []
+
+
+def test_friend_submit_rejects_recycled_confirm_between_resolutions(monkeypatch):
+    first, first_calls = _friend_confirm(runtime_id=(42, 1))
+    replacement, replacement_calls = _friend_confirm(runtime_id=(42, 2))
+    driver, root = _friend_submit_fixture(monkeypatch, [first])
+    replacement.GetTopLevelControl = lambda: root
+    snapshots = iter(([first], [replacement]))
+    driver._find_scoped_controls = lambda **_selector: list(next(snapshots))
+
+    with pytest.raises(RuntimeError, match="变化"):
+        driver.submit_friend_request()
+
+    assert first_calls == []
+    assert replacement_calls == []
 
 
 def test_friend_preflight_falls_back_to_window_close_after_false_invoke(

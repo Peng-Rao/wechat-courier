@@ -83,7 +83,7 @@ class WeixinWorkflowEngine:
         self._sleep = sleep
         self._journal = journal
         self._diagnostics = diagnostics
-        self._friend_submit_enabled = bool(friend_submit_enabled)
+        self._friend_submit_enabled = friend_submit_enabled is True
         self._progress_emit = None
         self._active_task_id = ""
         self._active_item_id = ""
@@ -898,6 +898,20 @@ class WeixinWorkflowEngine:
             current = current.__cause__ or current.__context__
         return None
 
+    @staticmethod
+    def _destructive_trigger_state(exc: BaseException) -> bool | None:
+        """Read the closest driver's pre/in/post-injection classification."""
+
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if hasattr(current, "destructive_triggered"):
+                value = getattr(current, "destructive_triggered")
+                return value if value is True or value is False else None
+            current = current.__cause__ or current.__context__
+        return None
+
     def _session_generation(self) -> int:
         return int(getattr(self._driver, "_session_generation", 0) or 0)
 
@@ -1227,8 +1241,17 @@ class WeixinWorkflowEngine:
         emit,
         control,
     ) -> str:
+        submit_enabled = (
+            self._friend_submit_enabled
+            and request.options.submit_friend_request is True
+        )
         self._run_pre_boundary_with_retry(
-            lambda: self._prepare_friend_item(driver, item, control),
+            lambda: self._prepare_friend_item(
+                driver,
+                item,
+                control,
+                submit_enabled=submit_enabled,
+            ),
             driver=driver,
             request=request,
             item=item,
@@ -1247,7 +1270,7 @@ class WeixinWorkflowEngine:
         ):
             self._success_step(emit, request, item, step, detail, index)
 
-        if not self._friend_submit_enabled:
+        if not submit_enabled:
             self._event(
                 emit,
                 request,
@@ -1263,10 +1286,42 @@ class WeixinWorkflowEngine:
         self._mark_boundary(request, item, "submit_triggered", index)
         try:
             self._driver_action(
-                "submit_verified",
+                "submit_triggered",
                 "submit_friend_request",
                 driver.submit_friend_request,
             )
+        except Exception as exc:
+            if self._destructive_trigger_state(exc) is False:
+                self._clear_boundary(request, item)
+                self._event(
+                    emit,
+                    request,
+                    item,
+                    "submit_triggered",
+                    "error",
+                    f"未点击确定：{exc}",
+                    index + 1,
+                    recoverable=False,
+                    destructive_boundary_crossed=False,
+                    error_code=getattr(exc, "error_code", "")
+                    or "SUBMIT_NOT_TRIGGERED",
+                )
+                return "error"
+            return self._boundary_exception(
+                emit,
+                request,
+                item,
+                "submit_verified",
+                f"确定点击状态无法判定：{exc}；不会再次提交",
+                index,
+                control,
+                cause=exc,
+            )
+
+        self._success_step(
+            emit, request, item, "submit_triggered", "已点击确定", index
+        )
+        try:
             verified = self._driver_action(
                 "submit_verified",
                 "verify_friend_request",
@@ -1278,7 +1333,7 @@ class WeixinWorkflowEngine:
                 request,
                 item,
                 "submit_verified",
-                f"已点击确定，但自动化连接中断：{exc}；不会再次提交",
+                f"已点击确定，但结果核对中断：{exc}；不会再次提交",
                 index,
                 control,
                 cause=exc,
@@ -1316,7 +1371,14 @@ class WeixinWorkflowEngine:
             control,
         )
 
-    def _prepare_friend_item(self, driver, item: TaskItem, control) -> None:
+    def _prepare_friend_item(
+        self,
+        driver,
+        item: TaskItem,
+        control,
+        *,
+        submit_enabled: bool,
+    ) -> None:
         self._driver_action("window_bound", "bind_window", driver.bind_window)
         self._safe_point(control)
 
@@ -1384,7 +1446,7 @@ class WeixinWorkflowEngine:
                 "备注回读不一致",
                 error_code="REMARK_READBACK_MISMATCH",
             )
-        if not self._friend_submit_enabled:
+        if not submit_enabled:
             cancelled = self._driver_action(
                 "preflight_completed",
                 "cancel_friend_request",

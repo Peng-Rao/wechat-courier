@@ -86,4 +86,17 @@ TestCase {
 
         compare(mockMessage.intervalMin, 7)
     }
+
+    function test_friend_interval_editor_accepts_one_second() {
+        var intervalField = findChild(settingsDialog, "settingsFriendIntervalMin")
+        verify(intervalField !== null)
+        compare(intervalField.validator.bottom, 1)
+        intervalField.forceActiveFocus()
+        tryCompare(intervalField, "activeFocus", true)
+        intervalField.text = "1"
+
+        settingsDialog.close()
+
+        compare(mockFriends.intervalMin, 1)
+    }
 }

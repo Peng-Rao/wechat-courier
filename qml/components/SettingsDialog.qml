@@ -260,21 +260,23 @@ Popup {
                         }
                         SettingsRow {
                             title: "请求间隔"
-                            description: "可配置 5 至 300 秒"
+                            description: "可配置 1 至 300 秒"
                             RowLayout {
                                 TextField {
+                                    objectName: "settingsFriendIntervalMin"
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.friends.intervalMin : "15"
-                                    validator: IntValidator { bottom: 5; top: 300 }
+                                    validator: IntValidator { bottom: 1; top: 300 }
                                     onEditingFinished: root.applyIfUnlocked(function() {
                                         root.appBackend.friends.intervalMin = Number(text)
                                     })
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
                                 TextField {
+                                    objectName: "settingsFriendIntervalMax"
                                     Layout.preferredWidth: 72
                                     text: root.appBackend ? root.appBackend.friends.intervalMax : "30"
-                                    validator: IntValidator { bottom: 5; top: 300 }
+                                    validator: IntValidator { bottom: 1; top: 300 }
                                     onEditingFinished: root.applyIfUnlocked(function() {
                                         root.appBackend.friends.intervalMax = Number(text)
                                     })

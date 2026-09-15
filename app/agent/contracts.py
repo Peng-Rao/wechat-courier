@@ -28,6 +28,7 @@ FRIEND_STEPS = (
     "request_form_ready",
     "fields_verified",
     "preflight_completed",
+    "submit_triggered",
     "submit_verified",
 )
 
@@ -43,6 +44,7 @@ class TaskOptions:
     unknown_policy: str = "continue"
     use_forward: bool = False
     file_paths: tuple[str, ...] = ()
+    submit_friend_request: bool = False
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "TaskOptions":
@@ -54,12 +56,16 @@ class TaskOptions:
         policy = str(data.get("unknownPolicy", "continue"))
         if policy not in {"continue", "stop"}:
             raise ContractError("unknownPolicy must be continue or stop")
+        submit_friend_request = data.get("submitFriendRequest", False)
+        if type(submit_friend_request) is not bool:
+            raise ContractError("submitFriendRequest must be a boolean")
         return cls(
             interval_min=minimum,
             interval_max=maximum,
             unknown_policy=policy,
             use_forward=bool(data.get("useForward", False)),
             file_paths=tuple(str(path) for path in data.get("filePaths", ())),
+            submit_friend_request=submit_friend_request,
         )
 
 

@@ -19,6 +19,13 @@ TestCase {
             return count - 1
         }
         function removeRecord(row) { remove(row); return true }
+        function clearRecords() {
+            if (count === 0 && importError === "") return false
+            clear()
+            importError = ""
+            selectedCount = 0
+            return true
+        }
         function setSelected(row, selected) { setProperty(row, "selected", selected); return true }
         function setCell(row, field, value) { setProperty(row, field, value); return true }
         function selectFirstValid() {}
@@ -39,9 +46,21 @@ TestCase {
         property bool active: false
         property string kind: ""
         property string error: ""
-        function startFriends() { return false }
+        property bool acceptanceEnabled: false
+        property int startCalls: 0
+        function startFriends() {
+            ++startCalls
+            kind = "friend_add"
+            active = true
+            return true
+        }
     }
-    QtObject { id: agentBackend; property bool automationReady: false }
+    QtObject {
+        id: agentBackend
+        property bool automationReady: true
+        property bool canStartTask: true
+        property bool friendSubmitEnabled: true
+    }
     QtObject {
         id: appBackend
         property var friends: friendBackend
@@ -67,6 +86,11 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
+    function clearButton() { return findChild(workspace, "clearFriendTableButton") }
+    function startButton() { return findChild(workspace, "startFriendsButton") }
+    function submitDialog() { return findChild(workspace, "friendSubmitConfirmDialog") }
+    function submitConfirmButton() { return findChild(workspace, "friendSubmitConfirmButton") }
+    function submitCancelButton() { return findChild(workspace, "friendSubmitCancelButton") }
     function accountField() {
         // TableView may retain pooled delegates with the same objectName.
         var cell = table().itemAtCell(Qt.point(0, 0))
@@ -74,14 +98,57 @@ TestCase {
     }
     function init() {
         taskBackend.active = false
+        taskBackend.kind = ""
+        taskBackend.startCalls = 0
+        taskBackend.acceptanceEnabled = false
+        agentBackend.friendSubmitEnabled = true
+        workspace.monitorDismissed = false
+        if (submitDialog() !== null)
+            submitDialog().close()
         menu().close()
         tryCompare(menu(), "visible", false)
         friendModel.clear()
         friendModel.append({ account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
+        friendModel.selectedCount = 1
         wait(100)
         workspaceWindow.requestActivate()
         tryCompare(workspaceWindow, "active", true)
+    }
+
+    function test_start_requires_explicit_confirmation_and_cancel_is_safe() {
+        verify(startButton() !== null)
+        verify(startButton().enabled)
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+        compare(taskBackend.startCalls, 0)
+
+        verify(submitCancelButton() !== null)
+        mouseClick(submitCancelButton(), 20,
+                   Math.floor(submitCancelButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", false)
+        compare(taskBackend.startCalls, 0)
+    }
+
+    function test_confirmation_starts_exactly_one_friend_task() {
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+
+        verify(submitConfirmButton() !== null)
+        mouseClick(submitConfirmButton(), 20,
+                   Math.floor(submitConfirmButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", false)
+        compare(taskBackend.startCalls, 1)
+        compare(workspace.monitorVisible, true)
+    }
+
+    function test_confirmation_rechecks_task_lock_before_starting() {
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+        taskBackend.active = true
+
+        workspace.confirmFriendSubmission()
+        compare(taskBackend.startCalls, 0)
     }
 
     function test_row_right_click_adds_a_row() {
@@ -113,6 +180,25 @@ TestCase {
         mouseClick(removeAction(), 10, Math.floor(removeAction().height / 2), Qt.LeftButton)
         tryCompare(friendModel, "count", 1)
         compare(friendModel.get(0).account, "wxid_second")
+    }
+
+    function test_clear_button_removes_all_rows_and_is_disabled_while_locked() {
+        friendModel.append({ account: "wxid_second", greeting: "", remark: "", valid: true,
+                             error: "", status: "pending", selected: false })
+        verify(clearButton() !== null)
+        verify(clearButton().enabled)
+
+        taskBackend.active = true
+        tryCompare(clearButton(), "enabled", false)
+        compare(workspace.clearFriendTable(), false)
+        compare(friendModel.count, 2)
+
+        taskBackend.active = false
+        tryCompare(clearButton(), "enabled", true)
+        mouseClick(clearButton(), 10, Math.floor(clearButton().height / 2), Qt.LeftButton)
+        tryCompare(friendModel, "count", 0)
+        compare(friendModel.selectedCount, 0)
+        compare(clearButton().enabled, false)
     }
 
     function test_active_task_blocks_open_menu_actions_and_callbacks() {

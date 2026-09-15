@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 
+import pytest
 from PySide6.QtCore import QObject, QSettings, Signal
 
 from app.backend import BackendController
@@ -247,6 +248,7 @@ def test_supported_version_without_explicit_uia_readiness_still_blocks_start(
 
 def test_friend_task_uses_default_precedence_and_limits(tmp_path, qapp):
     backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": True}})
     backend.friends.model.replace_records(
         __import__("app.friend_import", fromlist=["load_friend_records"])
         .load_friend_records(
@@ -264,6 +266,143 @@ def test_friend_task_uses_default_precedence_and_limits(tmp_path, qapp):
     assert payload["kind"] == "friend_add"
     assert payload["items"][0]["greeting"] == "行内问候"
     assert payload["items"][0]["remark"] == "默认备注"
+    assert payload["options"]["submitFriendRequest"] is True
+
+
+def test_friend_task_refuses_agent_without_submit_capability(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": False}})
+    backend.friends.model.replace_records(
+        __import__("app.friend_import", fromlist=["load_friend_records"])
+        .load_friend_records(
+            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+        )
+    )
+
+    assert backend.task.startFriends() is False
+    assert "提交能力" in backend.task.error
+    assert not any(method == "task.start" for _id, method, _payload in client.calls)
+
+
+def test_task_kind_has_its_own_notify_signal(tmp_path, qapp, qtbot):
+    backend, _client = make_backend(tmp_path)
+    backend.message.recipientsText = "Alice"
+    backend.message.templateText = "hello"
+
+    assert hasattr(backend.task, "kindChanged"), "kind 不能继续借用 phaseChanged"
+    with qtbot.waitSignal(backend.task.kindChanged, timeout=1000):
+        assert backend.task.startMessage() is True
+    assert backend.task.kind == "message_send"
+
+
+def test_friend_interval_accepts_one_second_and_normalizes_persisted_bounds(
+    tmp_path, qapp
+):
+    stored = settings(tmp_path)
+    stored.setValue("friends/intervalMin", 0)
+    stored.setValue("friends/intervalMax", 999)
+    client = FakeAgentClient()
+    backend = BackendController(
+        version="0.3.3-test",
+        settings=stored,
+        agent_client=client,
+    )
+
+    assert backend.friends.intervalMin == 1.0
+    assert backend.friends.intervalMax == 300.0
+
+    backend.friends.intervalMax = 1
+    backend.friends.intervalMin = 1
+    assert backend.friends.intervalMin == 1.0
+    assert backend.friends.intervalMax == 1.0
+
+
+def test_acceptance_mode_keeps_friend_task_as_non_submitting_preflight(
+    tmp_path, qapp, monkeypatch
+):
+    monkeypatch.setenv("WECHAT_COURIER_ACCEPTANCE", "1")
+    backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": False}})
+    backend.friends.model.replace_records(
+        __import__("app.friend_import", fromlist=["load_friend_records"])
+        .load_friend_records(
+            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+        )
+    )
+
+    assert backend.task.startFriends() is True
+    payload = client.calls[-1][2]
+    assert payload["kind"] == "friend_add"
+    assert payload["options"]["submitFriendRequest"] is False
+
+
+@pytest.mark.parametrize("capabilities", [{"friendSubmitEnabled": False}, {}])
+def test_friend_task_recovery_refuses_replacement_agent_without_submit_capability(
+    tmp_path, qapp, capabilities
+):
+    backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": True}})
+    backend.friends.model.replace_records(
+        __import__("app.friend_import", fromlist=["load_friend_records"])
+        .load_friend_records(
+            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+        )
+    )
+    assert backend.task.startFriends() is True
+    assert len([call for call in client.calls if call[1] == "task.start"]) == 1
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    assert backend.task.phase == "recovering"
+    fire_scheduled_agent_restart(backend)
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.helloReceived.emit({"recovery": None, "capabilities": capabilities})
+
+    assert len([call for call in client.calls if call[1] == "task.start"]) == 1
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert "提交能力" in backend.task.error
+
+
+def test_friend_task_rechecks_submit_capability_immediately_before_resume(
+    tmp_path, qapp
+):
+    backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": True}})
+    backend.friends.model.replace_records(
+        __import__("app.friend_import", fromlist=["load_friend_records"])
+        .load_friend_records(
+            [["账号", "打招呼语", "备注"], ["18896904196", "你好", ""]]
+        )
+    )
+    assert backend.task.startFriends() is True
+
+    client.connected = False
+    client.connectedChanged.emit(False)
+    fire_scheduled_agent_restart(backend)
+    client.connected = True
+    client.connectedChanged.emit(True)
+    client.helloReceived.emit(
+        {"recovery": None, "capabilities": {"friendSubmitEnabled": True}}
+    )
+    assert backend.task._pending_resume is True
+
+    backend.agent._friend_submit_enabled = False
+    backend.agent.applyInspection(
+        {
+            "connected": True,
+            "version": "4.1.13.65",
+            "supported": True,
+            "uiaReady": True,
+            "detail": "ready",
+        }
+    )
+
+    assert len([call for call in client.calls if call[1] == "task.start"]) == 1
+    assert backend.task.active is False
+    assert backend.task.phase == "error"
+    assert "提交能力" in backend.task.error
 
 
 def test_task_events_update_monitor_and_release_global_lock(tmp_path, qapp):
