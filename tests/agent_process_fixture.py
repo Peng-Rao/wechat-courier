@@ -4,6 +4,7 @@ import time
 
 from PySide6.QtCore import QCoreApplication
 
+from app.agent.journal import GateLeaseJournal
 from app.agent.runtime import AgentRuntime
 from app.agent.server import AgentServer
 
@@ -12,6 +13,20 @@ class ProcessEngine:
     def __init__(self):
         self.generation = 1
         self.sequence = 0
+        self.gate_lease = None
+        if os.environ.get("PROCESS_FIXTURE_GATE_LEASE") == "1":
+            self.gate_lease = GateLeaseJournal.from_environment()
+            self.gate_lease.mark(
+                pid=os.getpid(),
+                process_start_time="fixture-start",
+                version="4.1.13.65",
+                gate_rva=0x0AE2B0C8,
+                original_gate=0,
+                original_screen_reader=False,
+                gate_owned=True,
+                screen_reader_owned=True,
+                session_generation=1,
+            )
 
     def inspect(self):
         self.sequence += 1
@@ -39,7 +54,8 @@ class ProcessEngine:
                 "cleanup": {"success": True}, "health": health}
 
     def close(self):
-        pass
+        if self.gate_lease is not None:
+            self.gate_lease.clear()
 
 
 def main():

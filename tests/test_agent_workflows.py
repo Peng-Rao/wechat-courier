@@ -9,7 +9,7 @@ from app.agent.gate import AccessibilitySafetyError
 from app.agent.native_driver import SearchCandidate
 from app.agent.profile import UnsupportedWeixinVersion
 from app.agent.runtime import TaskControl
-from app.agent.retry import WeixinUnresponsiveError
+from app.agent.retry import UiaTreeNotReadyError, WeixinUnresponsiveError
 from app.agent.workflows import RiskControlError, WeixinWorkflowEngine
 
 
@@ -188,6 +188,32 @@ def test_engine_reuses_one_driver_for_inspection_and_tasks_until_closed():
     assert created[0].closed is True
 
 
+def test_cleanup_false_receipt_is_logged_as_failure_without_leaking_detail(tmp_path):
+    import json
+    from app.agent.diagnostics import UiaDiagnostics
+
+    driver = FakeDriver()
+    driver.search_results["Alice"] = ["Alice"]
+    driver.finish_task = lambda: {"success": False, "reasonCode": "WINDOW_BLOCKED",
+                                  "detail": "private contact 18896904196"}
+    diagnostics = UiaDiagnostics(log_dir=tmp_path)
+    engine = WeixinWorkflowEngine(driver_factory=lambda: driver, diagnostics=diagnostics)
+    result = engine.run(request("message_send", [TaskItem("one", target="Alice", message="hello")]),
+                        TaskControl(), lambda *_: None)
+    diagnostics.close()
+    assert result["cleanup"]["success"] is False
+    raw = (tmp_path / "uia-diagnostics.jsonl").read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in raw.splitlines()]
+    finish = [entry for entry in entries if entry["action"] == "finish_task"
+              and entry["outcome"] != "started"][-1]
+    assert finish["outcome"] == "error"
+    assert finish["error"]["code"] == "WINDOW_BLOCKED"
+    assert finish["postcondition"] is False
+    assert finish["result"]["success"] is False
+    assert "18896904196" not in raw
+    assert "private contact" not in raw
+
+
 def test_engine_records_privacy_safe_action_metrics_and_retry_decisions():
     class RecordingDiagnostics:
         def __init__(self):
@@ -322,6 +348,10 @@ def test_weixin_unresponsive_after_send_marks_unknown_and_stops_batch():
     [
         (UnsupportedWeixinVersion("unsupported"), "UNSUPPORTED_VERSION"),
         (AccessibilitySafetyError("unsafe gate"), "GATE_SAFETY"),
+        (
+            UiaTreeNotReadyError("accessibility broadcast did not materialize tree"),
+            "UIA_TREE_NOT_READY_AFTER_REFRESH",
+        ),
     ],
 )
 def test_non_retryable_session_safety_failures_stop_the_batch(

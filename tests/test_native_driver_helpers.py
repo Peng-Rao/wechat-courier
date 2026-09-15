@@ -2247,6 +2247,83 @@ def test_new_weixin_session_adopts_the_restart_screen_reader_lease(monkeypatch):
     assert driver._session_generation == 1
 
 
+def test_soft_refresh_materializes_provider_with_true_broadcast_without_gate_toggle():
+    from types import SimpleNamespace
+
+    calls = []
+    def broadcast():
+        calls.append("broadcast_true")
+        return True
+
+    driver = NativeWeixinDriver(gate_backend=SimpleNamespace(
+        broadcast_screen_reader_enabled=broadcast))
+    driver._session = SimpleNamespace(hwnd=101)
+    driver._uia = SimpleNamespace(ControlFromHandle=lambda _: object())
+    driver.ensure_window_responsive = lambda *_: None
+    driver._tree_materialized = lambda: calls == ["broadcast_true"]
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+
+    assert driver.soft_refresh_session() == 1
+    assert calls == ["broadcast_true"]
+
+
+def test_reused_weixin_session_rebroadcasts_before_rebinding_the_uia_tree():
+    calls = []
+
+    class Backend:
+        @staticmethod
+        def broadcast_screen_reader_enabled():
+            calls.append("broadcast")
+            return True
+
+    class Session:
+        hwnd = 101
+        pid = 202
+        version = "4.1.13.65"
+
+    class Uia:
+        @staticmethod
+        def ControlFromHandle(hwnd):
+            assert hwnd == 101
+            calls.append("root")
+            return object()
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+    driver._lease_checked = True
+    driver._uia_initialized = True
+    driver._uia = Uia()
+    driver._session = Session()
+    driver._wait_for = (
+        lambda *_args, **_kwargs: calls.append("wait") or True
+    )
+
+    driver._ensure_session()
+
+    assert calls == ["broadcast", "root", "wait"]
+    assert driver._session is not None
+    assert driver._session_generation == 1
+
+
+def test_reused_weixin_session_fails_closed_when_rebroadcast_is_rejected():
+    class Backend:
+        @staticmethod
+        def broadcast_screen_reader_enabled():
+            return False
+
+    class Session:
+        hwnd = 101
+        pid = 202
+        version = "4.1.13.65"
+
+    driver = NativeWeixinDriver(gate_backend=Backend())
+    driver._lease_checked = True
+    driver._uia_initialized = True
+    driver._session = Session()
+
+    with pytest.raises(AccessibilitySafetyError, match="refresh.*broadcast"):
+        driver._ensure_session()
+
+
 def test_wechat_restart_discovers_the_old_process_without_opening_uia():
     class Module:
         path = "Weixin.dll"
@@ -2388,6 +2465,8 @@ def test_wechat_restart_restores_a_hidden_supported_window_before_waiting_again(
 
 
 def test_inspection_distinguishes_supported_version_from_uia_readiness(monkeypatch):
+    from app.agent.retry import UiaTreeNotReadyError
+
     class Module:
         path = "Weixin.dll"
 
@@ -2408,7 +2487,9 @@ def test_inspection_distinguishes_supported_version_from_uia_readiness(monkeypat
     monkeypatch.setattr(
         driver,
         "_ensure_session",
-        lambda: (_ for _ in ()).throw(RuntimeError("tree has only 2 nodes")),
+        lambda: (_ for _ in ()).throw(
+            UiaTreeNotReadyError("tree has only 2 nodes")
+        ),
     )
 
     inspection = driver.inspect()
@@ -2419,7 +2500,7 @@ def test_inspection_distinguishes_supported_version_from_uia_readiness(monkeypat
     assert inspection["versionSupported"] is True
     assert inspection["sessionReady"] is False
     assert inspection["windowResponsive"] is True
-    assert inspection["degradedReason"] == "UIA_NOT_READY"
+    assert inspection["degradedReason"] == "UIA_TREE_NOT_READY_AFTER_REFRESH"
     assert "2 nodes" in inspection["detail"]
 
 
@@ -3113,6 +3194,8 @@ def test_driver_close_attempts_gate_cleanup_when_subscription_close_fails():
 def test_transient_tree_materialization_failure_keeps_one_gate_session(
     monkeypatch,
 ):
+    from app.agent.retry import UiaTreeNotReadyError
+
     instances = []
     initialization_calls = []
 
@@ -3160,7 +3243,7 @@ def test_transient_tree_materialization_failure_keeps_one_gate_session(
     readiness = iter((False, True))
     driver._wait_for = lambda *_args, **_kwargs: next(readiness)
 
-    with pytest.raises(RuntimeError, match="UIA 控件树未就绪"):
+    with pytest.raises(UiaTreeNotReadyError, match="UIA 控件树未就绪"):
         driver._ensure_session()
 
     assert len(instances) == 1

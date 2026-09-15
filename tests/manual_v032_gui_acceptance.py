@@ -447,6 +447,25 @@ def find_named(root, name, max_nodes=MAX_NODES):
     return matches[0]
 
 
+def file_dialog_open_control(root):
+    """Resolve the classic button or Windows 11 split-button Open control."""
+
+    classic = root.ButtonControl(AutomationId="1", searchDepth=8)
+    if classic.Exists(1, 0.1):
+        return classic
+    # AutomationId is only unique among siblings: file-list entries also use 1.
+    modern = root.SplitButtonControl(AutomationId="1", searchDepth=8)
+    if (
+        modern.Exists(1, 0.1)
+        and modern.ControlTypeName == "SplitButtonControl"
+        and modern.AutomationId == "1"
+    ):
+        return modern
+    raise LookupError(
+        "Native file dialog Open AutomationId=1 Button/SplitButton unavailable"
+    )
+
+
 class AcceptanceTimeout(TimeoutError):
     def __init__(self, stage, timeout):
         self.stage, self.timeout = stage, timeout
@@ -750,7 +769,8 @@ class Desktop:
         root = self.root(windows[0].hwnd)
         title_id = ("content_view.top_content_view.title_h_view.left_v_view."
                     "left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label")
-        title = self.uia.Control(searchFromControl=root, AutomationId=title_id, searchDepth=20)
+        # 4.1.13.65 nests the title label at depth 22 beneath the main window.
+        title = self.uia.Control(searchFromControl=root, AutomationId=title_id, searchDepth=24)
         if not title.Exists(1, 0.1) or title.Name != SEND_TARGET:
             raise ValueError("Delivery audit requires File Transfer Assistant already selected")
         message_list = self.uia.Control(searchFromControl=root, AutomationId="chat_message_list", searchDepth=20)
@@ -1108,9 +1128,11 @@ class GuiAdapter:
             raise LookupError("Native file dialog filename AutomationId=1148 unavailable")
         self.notice({"stage": "gui.file_dialog.filename"})
         self.desktop.fill(filename, str(path.resolve()))
-        open_button = root.ButtonControl(AutomationId="1", searchDepth=8)
-        if not open_button.Exists(1, 0.1):
-            raise LookupError("Native file dialog Open AutomationId=1 unavailable")
+        open_button = wait_until(
+            lambda: file_dialog_open_control(self.desktop.root(dialog)),
+            3,
+            stage="gui.file_dialog.open_control",
+        )
         self.notice({"stage": "gui.file_dialog.open"})
         self.desktop.invoke(open_button)
         wait_until(lambda: not self.desktop.win.IsWindowVisible(dialog), 5, stage="gui.file_dialog.closed")

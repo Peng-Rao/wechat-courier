@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.agent.gate import (
@@ -7,9 +9,10 @@ from app.agent.gate import (
     IMAGE_SCN_MEM_WRITE,
     ProcessModule,
     WeixinAccessibilitySession,
+    restore_legacy_gate_leases,
     restore_gate_lease,
 )
-from app.agent.journal import GateLeaseJournal
+from app.agent.journal import GateLeaseJournal, default_gate_lease_path
 
 
 class LeaseBackend:
@@ -23,6 +26,7 @@ class LeaseBackend:
         self.memory = {self.address: 0}
         self.screen_reader = False
         self.writes: list[tuple[int, int]] = []
+        self.broadcasts = 0
 
     def find_main_window(self):
         return self.hwnd
@@ -32,6 +36,9 @@ class LeaseBackend:
 
     def process_start_time(self, _pid):
         return self.started
+
+    def process_exists(self, pid):
+        return int(pid) == self.pid
 
     def find_module(self, _pid, _name):
         return self.module
@@ -63,6 +70,28 @@ class LeaseBackend:
         self.screen_reader = bool(enabled)
         return True
 
+    def broadcast_screen_reader_enabled(self):
+        self.broadcasts += 1
+        return self.set_screen_reader(True)
+
+
+@pytest.mark.parametrize("alive", [True, False])
+def test_foreign_windows_session_lease_is_never_restored(tmp_path, alive):
+    backend = LeaseBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    record = _stale_lease(journal, backend)
+    record["windowsSessionId"] = 2
+    journal.path.write_text(json.dumps(record), encoding="utf-8")
+    backend.memory[backend.address] = 1
+    backend.screen_reader = True
+    backend.process_session_id = lambda _: 1
+    backend.process_exists = lambda _: alive
+    with pytest.raises(AccessibilitySafetyError, match="Windows session"):
+        restore_gate_lease(backend, journal)
+    assert backend.writes == []
+    assert backend.screen_reader is True
+    assert journal.load() == record
+
 
 def _stale_lease(journal: GateLeaseJournal, backend: LeaseBackend):
     return journal.mark(
@@ -87,6 +116,30 @@ def test_gate_lease_is_atomic_and_separate_from_task_safety_journal(tmp_path):
     assert GateLeaseJournal(journal.path).load() == record
     assert record["pid"] == 202
     assert record["sessionGeneration"] == 7
+
+
+def test_default_gate_lease_path_is_stable_across_gui_processes(
+    tmp_path, monkeypatch
+):
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("WECHAT_AGENT_GATE_LEASE", raising=False)
+    monkeypatch.setenv(
+        "WECHAT_AGENT_JOURNAL", str(tmp_path / "random-task-journal.json")
+    )
+
+    first = GateLeaseJournal.from_environment()
+    monkeypatch.setenv(
+        "WECHAT_AGENT_JOURNAL", str(tmp_path / "another-task-journal.json")
+    )
+    second = GateLeaseJournal.from_environment()
+
+    expected = (
+        local_app_data / "WxAuto" / "state" / "weixin-uia-gate-v1.json"
+    )
+    assert default_gate_lease_path() == expected
+    assert first.path == expected
+    assert second.path == expected
 
 
 def test_stale_lease_restores_gate_and_screen_reader_without_uia(tmp_path):
@@ -226,8 +279,137 @@ def test_screen_reader_ownership_transfers_across_a_weixin_process_restart(tmp_p
 
     assert journal.load()["pid"] == 303
     assert journal.load()["screenReaderOwned"] is True
+    assert backend.broadcasts == 2
     second.close()
 
     assert backend.memory[backend.address] == 0
     assert backend.screen_reader is False
     assert journal.load() is None
+
+
+def test_invalid_stable_gate_lease_fails_closed_without_deleting_it(tmp_path):
+    path = tmp_path / "stable-gate.json"
+    path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(AccessibilitySafetyError, match="invalid gate lease"):
+        restore_gate_lease(LeaseBackend(), GateLeaseJournal(path))
+
+    assert path.read_text(encoding="utf-8") == "{}"
+
+
+def test_legacy_random_gate_lease_is_safely_restored_once(tmp_path):
+    legacy_path = (
+        tmp_path
+        / "wuge-wechat-agent-123-deadbeef-safety.json.gate"
+    )
+    legacy = GateLeaseJournal(legacy_path)
+    backend = LeaseBackend()
+    _stale_lease(legacy, backend)
+    backend.memory[backend.address] = 1
+    backend.screen_reader = True
+
+    restored = restore_legacy_gate_leases(
+        backend,
+        temp_dir=tmp_path,
+        other_agent_pids=lambda: (),
+    )
+
+    assert restored == [
+        {
+            "path": str(legacy_path),
+            "reason": "stale_lease_recovered",
+        }
+    ]
+    assert backend.memory[backend.address] == 0
+    assert backend.screen_reader is False
+    assert not legacy_path.exists()
+
+
+def test_legacy_gate_lease_is_not_touched_while_another_agent_is_alive(
+    tmp_path,
+):
+    legacy_path = (
+        tmp_path
+        / "wuge-wechat-agent-123-deadbeef-safety.json.gate"
+    )
+    legacy = GateLeaseJournal(legacy_path)
+    backend = LeaseBackend()
+    _stale_lease(legacy, backend)
+    backend.memory[backend.address] = 1
+    backend.screen_reader = True
+
+    with pytest.raises(AccessibilitySafetyError, match="another Agent"):
+        restore_legacy_gate_leases(
+            backend,
+            temp_dir=tmp_path,
+            other_agent_pids=lambda: (999,),
+        )
+
+    assert backend.writes == []
+    assert backend.screen_reader is True
+    assert legacy.load() is not None
+
+
+def test_legacy_gate_lease_is_preserved_when_recorded_process_has_exited(
+    tmp_path,
+):
+    legacy_path = (
+        tmp_path
+        / "wuge-wechat-agent-123-deadbeef-safety.json.gate"
+    )
+    legacy = GateLeaseJournal(legacy_path)
+    backend = LeaseBackend()
+    _stale_lease(legacy, backend)
+    backend.pid = 303
+    backend.started = "134000000000000999"
+    backend.screen_reader = True
+
+    with pytest.raises(AccessibilitySafetyError, match="recorded process"):
+        restore_legacy_gate_leases(
+            backend,
+            temp_dir=tmp_path,
+            other_agent_pids=lambda: (),
+        )
+
+    assert backend.writes == []
+    assert backend.screen_reader is True
+    assert legacy.load() is not None
+
+
+def test_invalid_legacy_gate_lease_fails_closed_without_deleting_it(tmp_path):
+    legacy_path = (
+        tmp_path
+        / "wuge-wechat-agent-123-deadbeef-safety.json.gate"
+    )
+    legacy_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(AccessibilitySafetyError, match="invalid legacy"):
+        restore_legacy_gate_leases(
+            LeaseBackend(),
+            temp_dir=tmp_path,
+            other_agent_pids=lambda: (),
+        )
+
+    assert legacy_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_legacy_gate_lease_rejects_stringified_ownership_flags(tmp_path):
+    legacy_path = (
+        tmp_path
+        / "wuge-wechat-agent-123-deadbeef-safety.json.gate"
+    )
+    legacy = GateLeaseJournal(legacy_path)
+    backend = LeaseBackend()
+    record = _stale_lease(legacy, backend)
+    record["gateOwned"] = "false"
+    legacy_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(AccessibilitySafetyError, match="invalid legacy"):
+        restore_legacy_gate_leases(
+            backend,
+            temp_dir=tmp_path,
+            other_agent_pids=lambda: (),
+        )
+
+    assert backend.writes == []
+    assert legacy_path.is_file()

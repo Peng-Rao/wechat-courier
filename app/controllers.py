@@ -76,6 +76,10 @@ ERROR_RECOVERY_HINTS = {
     "WECHAT_UNRESPONSIVE": "微信窗口无响应；请先检测恢复，仍无响应时再重启微信。",
     "UNSUPPORTED_VERSION": "当前微信版本未通过验证，不能执行自动化。",
     "GATE_SAFETY": "微信自动化安全门禁校验失败；任务已停止，请导出诊断包。",
+    "UIA_TREE_NOT_READY_AFTER_REFRESH": (
+        "可访问性广播已刷新，但微信仍未生成完整 UIA 树；"
+        "请导出诊断包检查重复 Agent 或微信可访问性提供程序。"
+    ),
     "RISK_CONTROL": "检测到验证码、频率或账号限制，任务已停止，请勿立即重试。",
     "TARGET_NOT_FOUND": "未找到精确目标；请检查微信名后再开始新任务。",
     "TARGET_NOT_UNIQUE": "搜索结果不唯一；请改用可唯一识别的微信号。",
@@ -1438,6 +1442,12 @@ class TaskController(QObject):
     @Slot()
     def _check_reconnect_inspection(self) -> None:
         if not self._pending_resume or not self._active or self._agent.canStartTask:
+            return
+        if self._agent.degradedReason == "UIA_TREE_NOT_READY_AFTER_REFRESH":
+            self._fail_recovery(
+                "可访问性广播已刷新，但微信仍未生成完整 UIA 控件树；"
+                "为避免无效重启循环，任务已停止，请导出诊断包"
+            )
             return
         mode = self._settings.wechatRecoveryMode
         if mode == "manual":

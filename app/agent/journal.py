@@ -32,6 +32,18 @@ GATE_LEASE_FIELDS = {
 }
 
 
+def default_gate_lease_path() -> Path:
+    """Return the cross-GUI lease used by the one Windows automation session."""
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base = (
+        Path(local_app_data)
+        if local_app_data
+        else Path.home() / "AppData" / "Local"
+    )
+    return base / "WxAuto" / "state" / "weixin-uia-gate-v1.json"
+
+
 def _write_atomic(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -134,13 +146,7 @@ class GateLeaseJournal:
         configured = os.environ.get("WECHAT_AGENT_GATE_LEASE", "").strip()
         if configured:
             return cls(configured)
-        safety_path = os.environ.get("WECHAT_AGENT_JOURNAL", "").strip()
-        if safety_path:
-            return cls(safety_path + ".gate")
-        return cls(
-            Path(tempfile.gettempdir())
-            / f"wuge-wechat-agent-{os.getppid()}-gate.json"
-        )
+        return cls(default_gate_lease_path())
 
     def load(self) -> dict[str, Any] | None:
         with self._lock:
@@ -150,23 +156,36 @@ class GateLeaseJournal:
                 return None
             if not isinstance(payload, dict) or not GATE_LEASE_FIELDS <= payload.keys():
                 return None
-            try:
-                payload["pid"] = int(payload["pid"])
-                payload["gateRva"] = int(payload["gateRva"])
-                payload["originalGate"] = int(payload["originalGate"])
-                payload["sessionGeneration"] = int(payload["sessionGeneration"])
-                payload["processStartTime"] = str(payload["processStartTime"])
-                payload["version"] = str(payload["version"])
-                payload["originalScreenReader"] = bool(
-                    payload["originalScreenReader"]
-                )
-                payload["gateOwned"] = bool(payload["gateOwned"])
-                payload["screenReaderOwned"] = bool(
-                    payload["screenReaderOwned"]
-                )
-            except (TypeError, ValueError):
+            integer_fields = (
+                "pid",
+                "gateRva",
+                "originalGate",
+                "sessionGeneration",
+            )
+            boolean_fields = (
+                "originalScreenReader",
+                "gateOwned",
+                "screenReaderOwned",
+            )
+            if not all(type(payload[field]) is int for field in integer_fields):
                 return None
-            if payload["originalGate"] not in (0, 1):
+            if not all(type(payload[field]) is bool for field in boolean_fields):
+                return None
+            if "windowsSessionId" in payload and (
+                type(payload["windowsSessionId"]) is not int or payload["windowsSessionId"] < 0
+            ):
+                return None
+            if not all(
+                isinstance(payload[field], str) and payload[field].strip()
+                for field in ("processStartTime", "version", "timestamp")
+            ):
+                return None
+            if (
+                payload["pid"] <= 0
+                or payload["gateRva"] < 0
+                or payload["sessionGeneration"] < 0
+                or payload["originalGate"] not in (0, 1)
+            ):
                 return None
             return payload
 
@@ -182,6 +201,7 @@ class GateLeaseJournal:
         gate_owned: bool,
         screen_reader_owned: bool,
         session_generation: int,
+        windows_session_id: int | None = None,
     ) -> dict[str, Any]:
         record = {
             "pid": int(pid),
@@ -195,6 +215,8 @@ class GateLeaseJournal:
             "sessionGeneration": int(session_generation),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        if windows_session_id is not None:
+            record["windowsSessionId"] = int(windows_session_id)
         with self._lock:
             _write_atomic(self.path, record)
         return record
@@ -208,4 +230,4 @@ class GateLeaseJournal:
             return True
 
 
-__all__ = ["GateLeaseJournal", "SafetyJournal"]
+__all__ = ["GateLeaseJournal", "SafetyJournal", "default_gate_lease_path"]

@@ -216,7 +216,7 @@ def test_build_spec_packages_one_generated_manifest_for_gui_and_agent(tmp_path, 
     assert manifest_sources[0] == manifest_sources[1]
 
 
-def test_product_versions_and_installer_upgrade_contract_are_v033():
+def test_product_versions_and_installer_upgrade_contract_are_v034():
     app_version = (ROOT / "app" / "_version.py").read_text(encoding="utf-8")
     library_version = (ROOT / "src" / "_version.py").read_text(encoding="utf-8")
     backend = (ROOT / "app" / "backend.py").read_text(encoding="utf-8")
@@ -225,10 +225,10 @@ def test_product_versions_and_installer_upgrade_contract_are_v033():
     )
     installer = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
 
-    assert '__version__ = "0.3.3"' in app_version
-    assert '__version__ = "0.3.3"' in library_version
+    assert '__version__ = "0.3.4"' in app_version
+    assert '__version__ = "0.3.4"' in library_version
     assert '!define PRODUCT_NAME "五阿哥微信助手"' in installer
-    assert '!define PRODUCT_VERSION "0.3.3"' in installer
+    assert '!define PRODUCT_VERSION "0.3.4"' in installer
     assert '!define OLD_PRODUCT_NAME "五阿哥群发助手"' in installer
     assert "taskkill" in installer
     assert "OLD_PRODUCT_NAME" in installer

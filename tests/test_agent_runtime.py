@@ -109,6 +109,18 @@ def test_runtime_runs_automation_off_the_rpc_thread(qapp, qtbot):
     runtime.close()
 
 
+def test_default_inspection_watchdog_outlives_the_five_second_tree_diagnostic(
+    qapp,
+):
+    runtime = AgentRuntime(engine_factory=RecordingEngine)
+
+    try:
+        assert runtime._inspection_watchdog.interval() == 7_500
+        assert runtime._inspect_timeout == 7.5
+    finally:
+        runtime.close()
+
+
 def test_runtime_closes_engine_on_the_automation_thread(qapp):
     engine = ClosableEngine()
     runtime = AgentRuntime(engine_factory=lambda: engine)
@@ -361,6 +373,34 @@ def test_client_rotates_and_redacts_agent_stderr(tmp_path, qapp):
     assert (tmp_path / "agent-stderr.log.1").exists()
 
 
+def test_client_uses_one_stable_gate_lease_across_gui_instances(
+    tmp_path, qapp, monkeypatch
+):
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    first = AgentClient(diagnostics_log_dir=tmp_path)
+    second = AgentClient(diagnostics_log_dir=tmp_path)
+
+    expected = str(
+        local_app_data / "WxAuto" / "state" / "weixin-uia-gate-v1.json"
+    )
+    assert first._journal_path != second._journal_path
+    assert first._gate_lease_path == expected
+    assert second._gate_lease_path == expected
+
+
+def test_client_accepts_an_isolated_gate_lease_for_tests(tmp_path, qapp):
+    gate_path = tmp_path / "isolated-gate.json"
+
+    client = AgentClient(
+        gate_lease_path=str(gate_path),
+        diagnostics_log_dir=tmp_path,
+    )
+
+    assert client._gate_lease_path == str(gate_path)
+
+
 def test_unexpected_agent_exit_runs_gate_recovery_even_without_active_task(
     tmp_path, qapp
 ):
@@ -380,6 +420,29 @@ def test_unexpected_agent_exit_runs_gate_recovery_even_without_active_task(
 
     assert recovery_calls == ["recover"]
     assert client._process is None
+
+
+def test_existing_agent_exit_code_is_clear_and_never_runs_gate_recovery(
+    tmp_path, qapp
+):
+    client = AgentClient(diagnostics_log_dir=tmp_path)
+    recoveries = []
+    errors = []
+    client._start_gate_recovery_async = lambda: recoveries.append("recover")
+    client.processError.connect(errors.append)
+    client._state = "starting"
+    client._process = type(
+        "FinishedProcess",
+        (),
+        {"readAllStandardError": staticmethod(lambda: b"already running")},
+    )()
+
+    client._on_process_finished(5, None)
+
+    assert recoveries == []
+    assert client._process is None
+    assert client.state == "error"
+    assert errors == ["已有自动化 Agent 正在操作微信，请先关闭其他助手实例后重试"]
 
 
 def test_expected_agent_exit_does_not_spawn_recovery_helper(tmp_path, qapp):
@@ -450,6 +513,26 @@ def test_failed_async_gate_recovery_blocks_the_deferred_agent_start(
     assert client._recovery_process is None
     assert client.state == "error"
     assert errors == ["gate restore failed"]
+
+
+def test_gate_recovery_allows_mutex_wait_before_cleanup(monkeypatch, tmp_path, qapp):
+    from app.agent import client as client_module
+
+    class ContendedRecovery:
+        def setProcessEnvironment(self, *_): pass
+        def setProgram(self, *_): pass
+        def setArguments(self, *_): pass
+        def start(self): pass
+        def kill(self): self.killed = True
+        def waitForFinished(self, timeout): return timeout >= 5_500
+        def exitCode(self): return 0
+
+    process = ContendedRecovery()
+    process.killed = False
+    monkeypatch.setattr(client_module, "QProcess", lambda: process)
+    client = AgentClient(diagnostics_log_dir=tmp_path)
+    assert client._run_gate_recovery() is True
+    assert process.killed is False
 
 
 def test_async_gate_recovery_timeout_fails_closed(tmp_path, qapp):

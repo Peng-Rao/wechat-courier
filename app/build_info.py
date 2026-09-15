@@ -60,7 +60,9 @@ def create_build_manifest(source_root: str | os.PathLike[str] | None = None) -> 
     for path in paths:
         # Length prefixes distinguish both path/content boundaries and empty files.
         name = path.relative_to(root).as_posix().encode("utf-8")
-        content = path.read_bytes()
+        content = (
+            path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        )
         digest.update(len(name).to_bytes(8, "big"))
         digest.update(name)
         digest.update(len(content).to_bytes(8, "big"))

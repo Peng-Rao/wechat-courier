@@ -160,3 +160,74 @@ def test_local_server_round_trip_requires_authentication(qapp, qtbot):
 
     socket.disconnectFromServer()
     server.close()
+
+
+def _authenticate_socket(name, qtbot):
+    from app.agent.rpc import JsonLineDecoder, encode_frame
+
+    socket = QLocalSocket()
+    socket.connectToServer(name)
+    assert socket.waitForConnected(2_000)
+    socket.write(
+        encode_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "agent.hello",
+                "params": {"token": "secret"},
+            }
+        )
+    )
+    socket.flush()
+    qtbot.waitUntil(lambda: socket.bytesAvailable() > 0, timeout=2_000)
+    assert JsonLineDecoder().feed(bytes(socket.readAll()))[0]["id"] == 1
+    return socket
+
+
+def test_authenticated_disconnect_allows_a_short_reconnect(qapp, qtbot):
+    from app.agent.server import AgentServer
+
+    runtime = FakeRuntime()
+    name = "wechat-courier-grace-reconnect-" + uuid.uuid4().hex
+    server = AgentServer(
+        name,
+        "secret",
+        runtime,
+        heartbeat_interval_ms=60_000,
+        disconnect_grace_ms=250,
+    )
+    assert server.listen()
+    first = _authenticate_socket(name, qtbot)
+    first.abort()
+    qtbot.wait(75)
+
+    second = _authenticate_socket(name, qtbot)
+    qtbot.wait(300)
+
+    assert ("agent.shutdown", None) not in runtime.calls
+    second.abort()
+    server.close()
+
+
+def test_authenticated_disconnect_expires_into_safe_agent_shutdown(qapp, qtbot):
+    from app.agent.server import AgentServer
+
+    runtime = FakeRuntime()
+    name = "wechat-courier-grace-expiry-" + uuid.uuid4().hex
+    server = AgentServer(
+        name,
+        "secret",
+        runtime,
+        heartbeat_interval_ms=60_000,
+        disconnect_grace_ms=100,
+    )
+    assert server.listen()
+    socket = _authenticate_socket(name, qtbot)
+
+    socket.abort()
+    qtbot.waitUntil(
+        lambda: ("agent.shutdown", None) in runtime.calls,
+        timeout=1_000,
+    )
+
+    server.close()

@@ -21,6 +21,7 @@ class AgentServer(QObject):
         runtime,
         *,
         heartbeat_interval_ms: int = 1_000,
+        disconnect_grace_ms: int = 1_000,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -35,6 +36,13 @@ class AgentServer(QObject):
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(heartbeat_interval_ms)
         self._heartbeat.timeout.connect(self._send_heartbeat)
+        self._disconnect_grace = QTimer(self)
+        self._disconnect_grace.setSingleShot(True)
+        self._disconnect_grace.setInterval(max(1, int(disconnect_grace_ms)))
+        self._disconnect_grace.timeout.connect(
+            self._expire_disconnected_client
+        )
+        self._closing = False
         if hasattr(runtime, "set_notification_sink"):
             runtime.set_notification_sink(self.send_notification)
 
@@ -51,7 +59,11 @@ class AgentServer(QObject):
         return ok
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         self._heartbeat.stop()
+        self._disconnect_grace.stop()
         socket = self._socket
         self._socket = None
         if socket is not None:
@@ -73,7 +85,14 @@ class AgentServer(QObject):
         incoming.readyRead.connect(self._read_available)
         incoming.disconnected.connect(self._on_disconnected)
 
-    def _on_disconnected(self) -> None:
+    def _on_disconnected(self, socket: QLocalSocket | None = None) -> None:
+        if socket is None:
+            sender = self.sender()
+            socket = sender if isinstance(sender, QLocalSocket) else None
+        if socket is not None and self._socket is not socket:
+            socket.deleteLater()
+            return
+        was_authenticated = self.authenticated
         if self._socket is not None:
             self._socket.deleteLater()
             self._socket = None
@@ -81,6 +100,15 @@ class AgentServer(QObject):
         stop = getattr(self.runtime, "stop_task", None)
         if callable(stop):
             stop()
+        if was_authenticated and not self._closing:
+            self._disconnect_grace.start()
+
+    def _expire_disconnected_client(self) -> None:
+        if self._closing or self.authenticated:
+            return
+        shutdown = getattr(self.runtime, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     def _read_available(self) -> None:
         if self._socket is None:
@@ -95,7 +123,10 @@ class AgentServer(QObject):
                 ):
                     self._start_inspection(message.get("id"))
                     continue
+                was_authenticated = self.authenticated
                 response = self._router.handle(message)
+                if not was_authenticated and self.authenticated:
+                    self._disconnect_grace.stop()
                 if response is not None:
                     self._write(response)
         except Exception as exc:

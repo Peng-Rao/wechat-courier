@@ -233,6 +233,105 @@ def test_name_lookup_is_exact_unique_and_bounded(harness):
         harness.find_named(Node("root", [Node(str(i)) for i in range(10)]), "missing", 3)
 
 
+def test_delivery_audit_reaches_real_weixin_title_depth(harness, monkeypatch):
+    # Live 4.1.13.65 title is at depth 22 (outside the former 20-level query).
+    monkeypatch.setitem(sys.modules, "src.core.win32", SimpleNamespace(
+        find_wechat_window_refs=lambda: [SimpleNamespace(hwnd=100)]))
+    bubble = SimpleNamespace(ClassName="mmui::ChatTextItemView", Name="unique-marker",
+                             GetRuntimeId=lambda: [1, 2, 3], GetChildren=lambda: [])
+    message_list = SimpleNamespace(Exists=lambda *_: True, ClassName="List",
+                                   GetChildren=lambda: [bubble])
+
+    def control(**kwargs):
+        if kwargs["AutomationId"] == "chat_message_list":
+            return message_list
+        return SimpleNamespace(Name=harness.SEND_TARGET,
+                               Exists=lambda *_: kwargs["searchDepth"] >= 22)
+
+    desktop = object.__new__(harness.Desktop)
+    desktop.notice = lambda _: None
+    desktop.root = lambda _: object()
+    desktop.uia = SimpleNamespace(Control=control)
+    rows = desktop.delivery_snapshot()
+    assert len(rows) == 1
+    assert rows[0]["text"] == "unique-marker"
+
+
+def test_file_dialog_open_control_ignores_file_item_with_same_automation_id(harness):
+    missing_button = SimpleNamespace(Exists=lambda *_args: False)
+    split_button = SimpleNamespace(
+        Exists=lambda *_args: True,
+        ControlTypeName="SplitButtonControl",
+        AutomationId="1",
+    )
+
+    class Root:
+        def ButtonControl(self, **kwargs):
+            assert kwargs == {"AutomationId": "1", "searchDepth": 8}
+            return missing_button
+
+        def Control(self, **kwargs):
+            return SimpleNamespace(Exists=lambda *_args: True,
+                                   ControlTypeName="ListItemControl", AutomationId="1")
+
+        def SplitButtonControl(self, **kwargs):
+            assert kwargs == {"AutomationId": "1", "searchDepth": 8}
+            return split_button
+
+    assert harness.file_dialog_open_control(Root()) is split_button
+
+
+def test_choose_file_reacquires_dialog_root_after_filename_write(harness, tmp_path):
+    filename = SimpleNamespace(Exists=lambda *_args: True)
+    missing = SimpleNamespace(Exists=lambda *_args: False)
+    split_button = SimpleNamespace(
+        Exists=lambda *_args: True,
+        ControlTypeName="SplitButtonControl",
+        AutomationId="1",
+    )
+
+    class InitialRoot:
+        def EditControl(self, **kwargs):
+            assert kwargs == {"AutomationId": "1148", "searchDepth": 8}
+            return filename
+
+        def ButtonControl(self, **_kwargs):
+            return missing
+
+        def Control(self, **_kwargs):
+            return missing
+
+
+    class RefreshedRoot:
+        def ButtonControl(self, **kwargs):
+            assert kwargs == {"AutomationId": "1", "searchDepth": 8}
+            return missing
+
+        def Control(self, **kwargs):
+            assert kwargs == {"AutomationId": "1", "searchDepth": 8}
+            return split_button
+
+        SplitButtonControl = Control
+
+    roots = iter((InitialRoot(), RefreshedRoot()))
+    visible = {"value": True}
+    invoked = []
+    adapter = object.__new__(harness.GuiAdapter)
+    adapter.process = SimpleNamespace(pid=7)
+    adapter.notice = lambda _value: None
+    adapter.desktop = SimpleNamespace(
+        windows=lambda **kwargs: [101],
+        root=lambda _hwnd: next(roots),
+        fill=lambda control, value: None,
+        invoke=lambda control: (invoked.append(control), visible.update(value=False)),
+        win=SimpleNamespace(IsWindowVisible=lambda _hwnd: visible["value"]),
+    )
+
+    adapter.choose_file(tmp_path / "friend.csv")
+
+    assert invoked == [split_button]
+
+
 @pytest.mark.parametrize("name", ["acceptanceEditorState", "acceptanceTaskState"])
 @pytest.mark.parametrize("description,help_text,expected", [
     ('{"active": false}', '', {"active": False}),

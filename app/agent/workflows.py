@@ -1025,7 +1025,7 @@ class WeixinWorkflowEngine:
                 }
                 fatal_batch = fatal_batch or error_code in {
                     "ACTION_DEADLINE_EXCEEDED", "WINDOW_BLOCKED", "CLEANUP_FAILED",
-                    "EVENT_CLEANUP_FAILED",
+                    "EVENT_CLEANUP_FAILED", "UIA_TREE_NOT_READY_AFTER_REFRESH",
                 }
                 self._record_diagnostic(
                     stage=step,
@@ -1056,12 +1056,27 @@ class WeixinWorkflowEngine:
                 result_summary["value"] = result
             elif isinstance(result, (str, list, tuple, dict)):
                 result_summary["length"] = len(result)
+            postcondition = result if isinstance(result, bool) else None
+            cleanup_error_code = None
+            if action == "finish_task" and isinstance(result, dict):
+                postcondition = result.get("success") is True
+                result_summary["success"] = postcondition
+                recorded_outcome = "success" if postcondition else "error"
+                if not postcondition:
+                    reason = result.get("reasonCode", "")
+                    # Only stable internal codes enter logs; never cleanup detail.
+                    cleanup_error_code = (
+                        reason if isinstance(reason, str) and reason.isascii()
+                        and reason.replace("_", "").isalnum() and len(reason) <= 80
+                        else "CLEANUP_FAILED"
+                    )
             self._record_diagnostic(
                 stage=step,
                 action=action,
                 outcome=recorded_outcome,
                 result=result_summary,
-                postcondition=result if isinstance(result, bool) else None,
+                postcondition=postcondition,
+                error_code=cleanup_error_code,
                 duration_ms=(time.monotonic() - started) * 1000,
                 query_count=self._query_count() - query_before,
                 session_generation=self._session_generation(),
@@ -1146,7 +1161,12 @@ class WeixinWorkflowEngine:
                 retry_level=exc.retry_level,
                 error_code=error_code,
                 fatal_batch=error_code
-                in {"GATE_SAFETY", "RISK_CONTROL", "UNSUPPORTED_VERSION"},
+                in {
+                    "GATE_SAFETY",
+                    "RISK_CONTROL",
+                    "UNSUPPORTED_VERSION",
+                    "UIA_TREE_NOT_READY_AFTER_REFRESH",
+                },
             ) from cause
 
     def _prepare_message_item(self, driver, item: TaskItem, control) -> None:
