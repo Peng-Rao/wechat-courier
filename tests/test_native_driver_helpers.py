@@ -1716,6 +1716,30 @@ def test_attachment_snapshot_uses_one_message_subtree_query_for_all_bubbles():
     assert len(calls) == 2
 
 
+def test_attachment_snapshot_does_not_misclassify_full_width_row_as_incoming():
+    profile = get_weixin_profile("4.1.13.65")
+    message_rect = FakeRect(663, 304, 1288, 822)
+    bubble = FakeControl(
+        "文件\nv033-attachment-confirmation-20260915.txt\n157B\n微信电脑版",
+        "ListItemControl",
+        "mmui::ChatBubbleItemView",
+        "chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view",
+        BoundingRectangle=FakeRect(663, 701, 1288, 822),
+    )
+    bubble.GetRuntimeId = lambda: (42, 99)
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1, "profile": profile})()
+    driver._attachment_snapshot_controls = lambda: (
+        message_rect,
+        [bubble],
+        [bubble],
+    )
+
+    snapshot = driver.attachment_snapshot()
+
+    assert snapshot[0].outgoing is None
+
+
 def test_attachment_verification_accepts_new_outgoing_file_bubble_and_cleared_draft():
     old = _bubble_snapshot(("runtime", (42, 1)), names=("old.pdf",))
     new = _bubble_snapshot(
@@ -1731,6 +1755,28 @@ def test_attachment_verification_accepts_new_outgoing_file_bubble_and_cleared_dr
 
     assert driver.verify_attachment_sent(
         (old,), "report.pdf", timeout=0.1, draft_was_visible=True
+    ) is True
+
+
+def test_attachment_verification_accepts_real_full_row_bubble_with_filename_token():
+    old = _bubble_snapshot(("runtime", (42, 1)), names=("old.pdf",))
+    new = _bubble_snapshot(
+        ("runtime", (42, 2)),
+        class_name="mmui::ChatBubbleItemView",
+        names=("文件\nreport.pdf\n157B\n微信电脑版",),
+        order=1,
+        outgoing=None,
+    )
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type("Session", (), {"hwnd": 1})()
+    driver.attachment_snapshot = lambda: (old, new)
+    driver.read_composer_text = lambda: ""
+    driver._attachment_draft_visible = lambda _filename: False
+    driver._wait_for = lambda predicate, *_args, **_kwargs: predicate()
+    driver._raise_scoped_risk = lambda **_kwargs: None
+
+    assert driver.verify_attachment_sent(
+        (old,), "report.pdf", timeout=0.1, draft_was_visible=False
     ) is True
 
 

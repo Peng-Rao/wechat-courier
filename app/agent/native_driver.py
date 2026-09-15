@@ -2876,11 +2876,17 @@ class NativeWeixinDriver:
             rectangle = bubble_rectangle
             outgoing = None
             if self._rect_valid(message_rectangle) and self._rect_valid(rectangle):
-                message_midpoint = (
-                    message_rectangle.left + message_rectangle.right
-                ) / 2
-                bubble_midpoint = (rectangle.left + rectangle.right) / 2
-                outgoing = bubble_midpoint > message_midpoint
+                message_width = message_rectangle.right - message_rectangle.left
+                bubble_width = rectangle.right - rectangle.left
+                # Weixin's Qt provider exposes many message rows at the full
+                # viewport width.  Such geometry carries no sender direction;
+                # only genuinely aligned cards may be classified left/right.
+                if message_width > 0 and bubble_width < message_width * 0.8:
+                    message_midpoint = (
+                        message_rectangle.left + message_rectangle.right
+                    ) / 2
+                    bubble_midpoint = (rectangle.left + rectangle.right) / 2
+                    outgoing = bubble_midpoint > message_midpoint
 
             runtime_id = _runtime_id(bubble)
             identity = _stable_message_control_identity(bubble)
@@ -2960,6 +2966,14 @@ class NativeWeixinDriver:
         expected = normalize_identity(filename)
         file_class = "mmui::ChatFileItemView"
 
+        def filename_tokens(snapshot: MessageBubbleSnapshot) -> set[str]:
+            return {
+                normalize_identity(line)
+                for value in snapshot.accessible_names
+                for line in str(value).splitlines()
+                if normalize_identity(line)
+            }
+
         def appended() -> bool:
             current = self.attachment_snapshot()
             if not current:
@@ -2968,19 +2982,20 @@ class NativeWeixinDriver:
             if (
                 tail.identity == previous_tail
                 or tail.identity in prior_identities
-                or tail.outgoing is not True
+                or tail.outgoing is False
             ):
                 return False
-            names = {
-                normalize_identity(value) for value in tail.accessible_names
-            }
-            if tail.class_name != file_class and expected not in names:
+            exact_filename = expected in filename_tokens(tail)
+            if tail.class_name != file_class and not exact_filename:
+                return False
+            # A full-width Qt row has no usable direction.  In that layout the
+            # exact filename token is required to bind the new tail bubble to
+            # this one paste/Enter action.
+            if tail.outgoing is None and not exact_filename:
                 return False
             if self.read_composer_text() != "":
                 return False
-            if draft_was_visible is True:
-                return self._attachment_draft_visible(filename) is False
-            return True
+            return self._attachment_draft_visible(filename) is False
 
         if self._wait_for(
             appended,
