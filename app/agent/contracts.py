@@ -28,6 +28,7 @@ FRIEND_STEPS = (
     "request_form_ready",
     "fields_verified",
     "preflight_completed",
+    "submit_triggered",
     "submit_verified",
 )
 

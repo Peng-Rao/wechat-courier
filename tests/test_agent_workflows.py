@@ -1036,6 +1036,10 @@ def test_friend_request_verifies_fields_and_submits_once():
 
     assert result["success"] == 1
     assert driver.friend_submit_count == 1
+    assert any(
+        event["step"] == "submit_triggered" and event["outcome"] == "success"
+        for event in events
+    )
     assert events[-1]["step"] == "submit_verified"
     assert events[-1]["outcome"] == "success"
 
@@ -1057,6 +1061,62 @@ def test_friend_unknown_submit_is_not_clicked_again():
     assert driver.friend_submit_count == 1
     assert result["unknown"] == 1
     assert events[-1]["outcome"] == "unknown"
+
+
+def test_friend_submit_pretrigger_failure_is_error_not_false_clicked_unknown():
+    class NotTriggered(RuntimeError):
+        destructive_triggered = False
+
+    driver = FakeDriver()
+    driver.submit_friend_request = lambda: (_ for _ in ()).throw(
+        NotTriggered("hit-test did not match confirm")
+    )
+    item = TaskItem("friend-1", account="18896904196")
+
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [item],
+            TaskOptions(submit_friend_request=True),
+        ),
+    )
+
+    assert result["error"] == 1
+    assert result["unknown"] == 0
+    assert events[-1]["step"] == "submit_triggered"
+    assert events[-1]["outcome"] == "error"
+    assert "未点击确定" in events[-1]["detail"]
+    assert events[-1]["destructiveBoundaryCrossed"] is False
+
+
+def test_friend_submit_click_transport_failure_stays_unknown_without_retry():
+    class TriggerUnknown(RuntimeError):
+        destructive_triggered = None
+
+    calls = []
+    driver = FakeDriver()
+
+    def uncertain_click():
+        calls.append("click")
+        raise TriggerUnknown("transport disconnected during click")
+
+    driver.submit_friend_request = uncertain_click
+    item = TaskItem("friend-1", account="18896904196")
+
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [item],
+            TaskOptions(submit_friend_request=True),
+        ),
+    )
+
+    assert calls == ["click"]
+    assert result["unknown"] == 1
+    assert events[-1]["outcome"] == "unknown"
+    assert events[-1]["destructiveBoundaryCrossed"] is True
 
 
 def test_risk_control_stops_the_entire_friend_batch():

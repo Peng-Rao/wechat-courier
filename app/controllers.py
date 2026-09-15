@@ -46,6 +46,7 @@ FRIEND_STEP_LABELS = {
     "request_form_ready": "申请窗口已就绪",
     "fields_verified": "申请内容已核对",
     "preflight_completed": "表单预检已完成",
+    "submit_triggered": "已点击确定",
     "submit_verified": "提交结果已确认",
 }
 
@@ -65,6 +66,7 @@ FAILED_STEP_LABELS = {
     "request_form_ready": "打开申请窗口失败",
     "fields_verified": "申请内容核对失败",
     "preflight_completed": "表单预检失败",
+    "submit_triggered": "点击确定失败",
     "submit_verified": "提交结果核对失败",
 }
 
@@ -79,6 +81,7 @@ ERROR_RECOVERY_HINTS = {
     "TARGET_NOT_UNIQUE": "搜索结果不唯一；请改用可唯一识别的微信号。",
     "RESULT_UNKNOWN": "动作已经触发但结果无法确认；为防止重复，本条不能重试。",
     "RESULT_VERIFICATION_FAILED": "动作已经触发但结果核对失败；本条不能重试。",
+    "SUBMIT_NOT_TRIGGERED": "未能安全命中“确定”按钮，本条未提交；请检查微信窗口后重新开始。",
     "DESTRUCTIVE_BOUNDARY_UNKNOWN": "动作已越过发送边界但结果未知；不会自动重发，请人工核对微信记录。",
     "AUTOMATION_ERROR": "自动化步骤失败，请导出诊断包后检查具体原因。",
 }

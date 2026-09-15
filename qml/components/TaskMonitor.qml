@@ -41,6 +41,7 @@ Item {
             ["profile_verified", "资料核对通过"],
             ["request_form_ready", "申请窗口已就绪"],
             ["fields_verified", "申请内容已核对"],
+            ["submit_triggered", "已点击确定"],
             ["submit_verified", "提交结果已确认"]
         ]
     readonly property var steps: taskKind === "message_send" ? messageSteps : friendSteps
