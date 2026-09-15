@@ -10,6 +10,8 @@ Item {
     property var agentBackend: null
     property string taskKind: "message_send"
     signal requestEdit()
+    readonly property bool friendPreflightMode: taskKind === "friend_add"
+        && taskBackend && taskBackend.acceptanceEnabled
 
     readonly property var messageSteps: [
         ["window_bound", "已绑定微信窗口"],
@@ -21,16 +23,26 @@ Item {
         ["send_triggered", "已触发发送"],
         ["send_verified", "发送结果已确认"]
     ]
-    readonly property var friendSteps: [
-        ["window_bound", "已绑定微信窗口"],
-        ["add_friend_window_ready", "添加好友窗口已就绪"],
-        ["account_inserted", "账号已写入"],
-        ["account_searched", "已搜索账号"],
-        ["profile_verified", "资料核对通过"],
-        ["request_form_ready", "申请窗口已就绪"],
-        ["fields_verified", "申请内容已核对"],
-        ["preflight_completed", "表单预检已完成"]
-    ]
+    readonly property var friendSteps: friendPreflightMode
+        ? [
+            ["window_bound", "已绑定微信窗口"],
+            ["add_friend_window_ready", "添加好友窗口已就绪"],
+            ["account_inserted", "账号已写入"],
+            ["account_searched", "已搜索账号"],
+            ["profile_verified", "资料核对通过"],
+            ["request_form_ready", "申请窗口已就绪"],
+            ["fields_verified", "申请内容已核对"],
+            ["preflight_completed", "表单预检已完成"]
+        ] : [
+            ["window_bound", "已绑定微信窗口"],
+            ["add_friend_window_ready", "添加好友窗口已就绪"],
+            ["account_inserted", "账号已写入"],
+            ["account_searched", "已搜索账号"],
+            ["profile_verified", "资料核对通过"],
+            ["request_form_ready", "申请窗口已就绪"],
+            ["fields_verified", "申请内容已核对"],
+            ["submit_verified", "提交结果已确认"]
+        ]
     readonly property var steps: taskKind === "message_send" ? messageSteps : friendSteps
 
     function stepIndex(code) {
@@ -58,7 +70,8 @@ Item {
                 ColumnLayout {
                     spacing: 2
                     Text {
-                        text: taskKind === "message_send" ? "发送队列" : "好友表单预检队列"
+                        text: taskKind === "message_send" ? "发送队列"
+                            : root.friendPreflightMode ? "好友表单预检队列" : "好友申请队列"
                         color: WxTheme.clTextPrimary
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeTitle
@@ -255,7 +268,9 @@ Item {
                                     Text {
                                         anchors.centerIn: parent
                                         text: result === "success"
-                                            ? (taskKind === "friend_add" ? "预检完成" : "成功")
+                                            ? (taskKind === "friend_add"
+                                                ? (root.friendPreflightMode ? "预检完成" : "已提交")
+                                                : "成功")
                                             : result === "error" ? "异常"
                                             : result === "unknown" ? "结果未知"
                                             : result === "working" ? "执行中"
@@ -397,7 +412,8 @@ Item {
                     anchors.margins: 16
                     spacing: 14
                     Text {
-                        text: taskKind === "message_send" ? "消息发送状态" : "好友表单预检状态"
+                        text: taskKind === "message_send" ? "消息发送状态"
+                            : root.friendPreflightMode ? "好友表单预检状态" : "好友申请状态"
                         color: WxTheme.clTextPrimary
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeNormal
@@ -580,7 +596,9 @@ Item {
                     spacing: 1
                     Text {
                         text: root.taskBackend && root.taskBackend.active
-                            ? (taskKind === "message_send" ? "消息群发进行中" : "好友表单预检进行中")
+                            ? (taskKind === "message_send" ? "消息群发进行中"
+                                : root.friendPreflightMode
+                                    ? "好友表单预检进行中" : "好友申请提交进行中")
                             : (root.taskBackend && root.taskBackend.phase === "error"
                                 ? "任务失败" : "任务已结束")
                         color: WxTheme.clTextPrimary

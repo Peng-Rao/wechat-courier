@@ -83,7 +83,7 @@ class WeixinWorkflowEngine:
         self._sleep = sleep
         self._journal = journal
         self._diagnostics = diagnostics
-        self._friend_submit_enabled = bool(friend_submit_enabled)
+        self._friend_submit_enabled = friend_submit_enabled is True
         self._progress_emit = None
         self._active_task_id = ""
         self._active_item_id = ""
@@ -1227,8 +1227,17 @@ class WeixinWorkflowEngine:
         emit,
         control,
     ) -> str:
+        submit_enabled = (
+            self._friend_submit_enabled
+            and request.options.submit_friend_request is True
+        )
         self._run_pre_boundary_with_retry(
-            lambda: self._prepare_friend_item(driver, item, control),
+            lambda: self._prepare_friend_item(
+                driver,
+                item,
+                control,
+                submit_enabled=submit_enabled,
+            ),
             driver=driver,
             request=request,
             item=item,
@@ -1247,7 +1256,7 @@ class WeixinWorkflowEngine:
         ):
             self._success_step(emit, request, item, step, detail, index)
 
-        if not self._friend_submit_enabled:
+        if not submit_enabled:
             self._event(
                 emit,
                 request,
@@ -1316,7 +1325,14 @@ class WeixinWorkflowEngine:
             control,
         )
 
-    def _prepare_friend_item(self, driver, item: TaskItem, control) -> None:
+    def _prepare_friend_item(
+        self,
+        driver,
+        item: TaskItem,
+        control,
+        *,
+        submit_enabled: bool,
+    ) -> None:
         self._driver_action("window_bound", "bind_window", driver.bind_window)
         self._safe_point(control)
 
@@ -1384,7 +1400,7 @@ class WeixinWorkflowEngine:
                 "备注回读不一致",
                 error_code="REMARK_READBACK_MISMATCH",
             )
-        if not self._friend_submit_enabled:
+        if not submit_enabled:
             cancelled = self._driver_action(
                 "preflight_completed",
                 "cancel_friend_request",

@@ -1291,9 +1291,25 @@ class TaskController(QObject):
                 "Agent 在破坏性动作后中断，本条已标记为结果未知；当前批次不会自动恢复"
             )
             return
+        if not self._resume_agent_capabilities_match_payload():
+            self._fail_recovery(
+                "恢复好友任务失败：重启后的 Agent 未启用好友申请提交能力，任务已安全停止"
+            )
+            return
         self._pending_resume = True
         self._inspection_grace.start()
         self._resume_if_ready()
+
+    def _resume_agent_capabilities_match_payload(self) -> bool:
+        payload = self._original_payload
+        if not isinstance(payload, dict) or payload.get("kind") != "friend_add":
+            return True
+        options = payload.get("options")
+        submit_requested = (
+            isinstance(options, dict)
+            and options.get("submitFriendRequest") is True
+        )
+        return not submit_requested or self._agent.friendSubmitEnabled is True
 
     def _mark_boundary_item_unknown(self, recovery: dict[str, Any]) -> None:
         item_id = str(recovery.get("itemId", ""))
@@ -1340,6 +1356,11 @@ class TaskController(QObject):
     @Slot()
     def _resume_if_ready(self) -> None:
         if not self._pending_resume or not self._active:
+            return
+        if not self._resume_agent_capabilities_match_payload():
+            self._fail_recovery(
+                "恢复好友任务失败：当前 Agent 未启用好友申请提交能力，任务已安全停止"
+            )
             return
         if not self._agent.canStartTask or self._original_payload is None:
             return
@@ -1492,6 +1513,14 @@ class TaskController(QObject):
         if self._active:
             self._set_error("已有任务正在执行")
             return False
+        if (
+            not self._acceptance_enabled
+            and self._agent.friendSubmitEnabled is not True
+        ):
+            self._set_error(
+                "当前 Agent 未启用好友申请提交能力，请重新启动或重新安装匹配版本"
+            )
+            return False
         return self._start(
             "friend_add",
             self._friends.build_items(),
@@ -1499,6 +1528,7 @@ class TaskController(QObject):
                 "intervalMin": self._friends.intervalMin,
                 "intervalMax": self._friends.intervalMax,
                 "unknownPolicy": self._settings.unknownPolicy,
+                "submitFriendRequest": not self._acceptance_enabled,
             },
         )
 

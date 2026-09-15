@@ -102,3 +102,32 @@ def test_friend_request_item_keeps_optional_fields_nullable():
     assert request.items[0].remark == ""
     assert request.options.interval_min == 15
     assert request.options.interval_max == 30
+
+
+def test_friend_request_requires_literal_submission_intent_in_options():
+    from app.agent.contracts import TaskRequest
+
+    request = TaskRequest.from_payload(
+        {
+            "taskId": "friends-submit-1",
+            "kind": "friend_add",
+            "items": [{"itemId": "row-1", "account": "18896904196"}],
+            "options": {"submitFriendRequest": True},
+        }
+    )
+
+    assert request.options.submit_friend_request is True
+
+
+def test_friend_request_rejects_string_submission_intent():
+    from app.agent.contracts import ContractError, TaskRequest
+
+    with pytest.raises(ContractError, match="submitFriendRequest"):
+        TaskRequest.from_payload(
+            {
+                "taskId": "friends-submit-2",
+                "kind": "friend_add",
+                "items": [{"itemId": "row-1", "account": "18896904196"}],
+                "options": {"submitFriendRequest": "true"},
+            }
+        )

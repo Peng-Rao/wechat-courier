@@ -10,12 +10,38 @@ Item {
     readonly property var friendBackend: appBackend ? appBackend.friends : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
     readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
+    readonly property bool friendSubmitAvailable: !!(
+        taskBackend && taskBackend.acceptanceEnabled
+        || appBackend && appBackend.agent
+            && appBackend.agent.friendSubmitEnabled === true
+    )
     property bool monitorVisible: taskBackend && taskBackend.kind === "friend_add"
     property int contextRow: -1
 
     function startTask() {
         if (root.interactionLocked) return
         if (taskBackend && taskBackend.startFriends()) monitorVisible = true
+    }
+
+    function requestFriendStart() {
+        if (root.interactionLocked || !root.friendSubmitAvailable) return
+        if (root.taskBackend && root.taskBackend.acceptanceEnabled) {
+            root.startTask()
+            return
+        }
+        friendSubmitConfirmDialog.open()
+    }
+
+    function confirmFriendSubmission() {
+        if (root.interactionLocked || !root.friendSubmitAvailable
+                || !root.taskBackend || root.taskBackend.acceptanceEnabled)
+            return
+        root.startTask()
+    }
+
+    onInteractionLockedChanged: {
+        if (root.interactionLocked)
+            friendSubmitConfirmDialog.close()
     }
 
     function appendManualRecord() {
@@ -325,9 +351,13 @@ Item {
                                             anchors.centerIn: parent
                                             text: !valid ? error
                                                 : status === "working" ? "执行中"
-                                                : status === "success" ? "预检完成"
+                                                : status === "success"
+                                                    ? (root.taskBackend && root.taskBackend.acceptanceEnabled
+                                                        ? "预检完成" : "已提交")
                                                 : status === "error" ? "执行异常"
-                                                : status === "unknown" ? "结果未知" : "预检通过"
+                                                : status === "unknown" ? "结果未知"
+                                                : (root.taskBackend && root.taskBackend.acceptanceEnabled
+                                                    ? "预检通过" : "待提交")
                                             elide: Text.ElideRight
                                             color: !valid || status === "error" ? WxTheme.clDangerNew
                                                 : status === "working" ? WxTheme.clInfo
@@ -440,7 +470,8 @@ Item {
                         ColumnLayout {
                             spacing: 1
                             Text {
-                                text: "仅填写并核对表单"
+                                text: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                    ? "仅填写并核对表单" : "将实际提交好友申请"
                                 color: WxTheme.clWarningText
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeSmall
@@ -448,9 +479,14 @@ Item {
                                 Layout.alignment: Qt.AlignRight
                             }
                             Text {
-                                text: root.appBackend && root.appBackend.agent.canStartTask
-                                    && !root.appBackend.agent.automationReady
-                                    ? "会话待恢复 · 最终提交当前未开放" : "最终提交当前未开放"
+                                text: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                    ? "验收模式不会点击最终确定"
+                                    : !root.friendSubmitAvailable
+                                        ? "Agent 提交能力不可用"
+                                        : root.appBackend && root.appBackend.agent.canStartTask
+                                            && !root.appBackend.agent.automationReady
+                                            ? "会话待恢复 · 确认后将逐条提交"
+                                            : "确认后将逐条提交，提交后无法撤回"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
@@ -461,11 +497,14 @@ Item {
                             objectName: "startFriendsButton"
                             Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                                 ? "startFriendsButton" : text
-                            text: "开始表单预检 " + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
+                            text: (root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "开始表单预检 " : "开始添加好友 ")
+                                + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
                             enabled: root.appBackend && root.appBackend.agent.canStartTask
                                 && !root.interactionLocked
+                                && root.friendSubmitAvailable
                                 && root.friendBackend && root.friendBackend.model.selectedCount > 0
-                            onClicked: root.startTask()
+                            onClicked: root.requestFriendStart()
                             implicitHeight: 38
                             contentItem: Text {
                                 text: parent.text
@@ -494,6 +533,22 @@ Item {
             taskKind: "friend_add"
             onRequestEdit: root.monitorVisible = false
         }
+    }
+
+    ConfirmDialog {
+        id: friendSubmitConfirmDialog
+        objectName: "friendSubmitConfirmDialog"
+        z: 1000
+        message: "即将向选中的 "
+            + (root.friendBackend ? root.friendBackend.model.selectedCount : 0)
+            + " 个账号实际提交好友申请。提交后无法撤回，请确认账号和申请内容无误。"
+        confirmText: "确认提交"
+        cancelText: "取消"
+        isDanger: true
+        confirmEnabled: !root.interactionLocked && root.friendSubmitAvailable
+        confirmButtonObjectName: "friendSubmitConfirmButton"
+        cancelButtonObjectName: "friendSubmitCancelButton"
+        onConfirmed: root.confirmFriendSubmission()
     }
 
     WxContextMenu {

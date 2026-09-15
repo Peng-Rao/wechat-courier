@@ -471,6 +471,9 @@ def render_fake_health_states(output):
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")
         app.setFont(QFont("Microsoft YaHei", 10))
     backend, client = make_backend(output)
+    client.helloReceived.emit(
+        {"capabilities": {"friendSubmitEnabled": True}}
+    )
     backend.message.recipientsText = "Alice"
     backend.message.templateText = "hello"
     backend.friends.model.appendEmptyRecord()

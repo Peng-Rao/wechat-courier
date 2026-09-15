@@ -12,6 +12,9 @@ Rectangle {
     property string confirmText: "确认"
     property string cancelText: "取消"
     property bool isDanger: false
+    property bool confirmEnabled: true
+    property string confirmButtonObjectName: ""
+    property string cancelButtonObjectName: ""
 
     signal confirmed()
     signal cancelled()
@@ -75,6 +78,7 @@ Rectangle {
                 spacing: WxTheme.spMedium
 
                 Button {
+                    objectName: root.cancelButtonObjectName
                     text: root.cancelText
                     onClicked: {
                         root.cancelled()
@@ -101,7 +105,9 @@ Rectangle {
                 }
 
                 Button {
+                    objectName: root.confirmButtonObjectName
                     text: root.confirmText
+                    enabled: root.confirmEnabled
                     onClicked: {
                         root.confirmed()
                         root.close()

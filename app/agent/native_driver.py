@@ -3811,12 +3811,93 @@ class NativeWeixinDriver:
             "remark": self._actions.read_text(remark_edit) or "",
         }
 
-    def submit_friend_request(self) -> str:
-        confirm = self._wait_control(
-            hwnd=self._verify_hwnd,
+    def _resolve_unique_friend_submit_control(self):
+        """Resolve the irreversible submit target from a fresh verified root."""
+
+        hwnd = int(self._verify_hwnd or 0)
+        session = self._session
+        if not hwnd or session is None or self._uia is None:
+            raise RuntimeError("好友申请窗口未绑定，拒绝提交")
+        expected_pid = int(safe_attr(session, "pid", 0) or 0)
+        expected_class = str(
+            safe_attr(session.profile, "verify_friend_root_class", "") or ""
+        )
+        if not expected_pid or not expected_class:
+            raise RuntimeError("好友申请窗口身份不完整，拒绝提交")
+
+        verify_windows = self._process_windows(
+            (expected_class,), visible=True, strict=True
+        )
+        if len(verify_windows) != 1 or int(verify_windows[0]) != hwnd:
+            raise RuntimeError(
+                "好友申请窗口未唯一保持可见，拒绝提交："
+                f"expectedHwnd={hwnd}, matches={verify_windows}"
+            )
+
+        self.ensure_window_responsive(hwnd)
+        root = self._uia.ControlFromHandle(hwnd)
+        root_class = str(safe_attr(root, "ClassName", "") or "")
+        root_type = str(safe_attr(root, "ControlTypeName", "") or "")
+        root_hwnd = int(safe_attr(root, "NativeWindowHandle", 0) or 0)
+        root_pid = int(safe_attr(root, "ProcessId", 0) or 0)
+        if (
+            root is None
+            or root_class != expected_class
+            or root_type != "WindowControl"
+            or root_hwnd != hwnd
+            or root_pid != expected_pid
+        ):
+            raise RuntimeError(
+                "好友申请窗口身份已变化，拒绝提交："
+                f"hwnd={root_hwnd}, pid={root_pid}, class={root_class!r}, "
+                f"type={root_type!r}"
+            )
+        if bool(safe_attr(root, "IsOffscreen", True)):
+            raise RuntimeError("好友申请窗口不可见，拒绝提交")
+        if not bool(safe_attr(root, "IsEnabled", False)):
+            raise RuntimeError("好友申请窗口未启用，拒绝提交")
+
+        self._raise_scoped_risk(hwnd=hwnd, root=root)
+        matches = self._find_scoped_controls(
+            hwnd=hwnd,
+            root=root,
             name="确定",
             control_type="ButtonControl",
+            visible=True,
         )
+        if len(matches) != 1:
+            raise RuntimeError(
+                "好友申请的“确定”按钮未唯一出现，拒绝提交："
+                f"matches={len(matches)}"
+            )
+        confirm = matches[0]
+        if not bool(safe_attr(confirm, "IsEnabled", False)):
+            raise RuntimeError("好友申请的“确定”按钮未启用，拒绝提交")
+        if bool(safe_attr(confirm, "IsOffscreen", True)):
+            raise RuntimeError("好友申请的“确定”按钮不可见，拒绝提交")
+
+        owner, _owner_bounds = self._owning_window(confirm)
+        owner_hwnd = int(safe_attr(owner, "NativeWindowHandle", 0) or 0)
+        owner_pid = int(safe_attr(owner, "ProcessId", 0) or 0)
+        owner_class = str(safe_attr(owner, "ClassName", "") or "")
+        if (
+            owner_hwnd != hwnd
+            or owner_pid != expected_pid
+            or owner_class != expected_class
+        ):
+            raise RuntimeError(
+                "好友申请确认控件不属于当前申请窗口，拒绝提交："
+                f"ownerHwnd={owner_hwnd}, ownerPid={owner_pid}, "
+                f"ownerClass={owner_class!r}"
+            )
+        return confirm
+
+    def submit_friend_request(self) -> str:
+        observed = self._resolve_unique_friend_submit_control()
+        observed_reference = _control_reference(observed)
+        confirm = self._resolve_unique_friend_submit_control()
+        if _control_reference(confirm) != observed_reference:
+            raise RuntimeError("好友申请确认控件在提交前发生变化，拒绝提交")
         try:
             pattern = confirm.GetInvokePattern()
         except _STOP_ERRORS:

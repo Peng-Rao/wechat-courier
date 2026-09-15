@@ -185,6 +185,7 @@ class AgentRuntime(QObject):
         action_timeout_ms: int = 15_000,
         journal: SafetyJournal | None = None,
         diagnostics: UiaDiagnostics | None = None,
+        friend_submit_enabled: bool | None = None,
         fatal_exit: Callable[[int], Any] = os._exit,
         parent: QObject | None = None,
     ):
@@ -192,6 +193,11 @@ class AgentRuntime(QObject):
         self._journal = journal or SafetyJournal.from_environment()
         self._diagnostics = diagnostics
         self._gui_instance_id = gui_instance_id_from_environment()
+        self._friend_submit_enabled = (
+            os.environ.get("WECHAT_COURIER_ACCEPTANCE") != "1"
+            if friend_submit_enabled is None
+            else friend_submit_enabled is True
+        )
         if engine_factory is None:
             from .workflows import WeixinWorkflowEngine
 
@@ -200,6 +206,7 @@ class AgentRuntime(QObject):
             engine_factory = lambda: WeixinWorkflowEngine(
                 journal=self._journal,
                 diagnostics=self._diagnostics,
+                friend_submit_enabled=self._friend_submit_enabled,
             )
         self._notification_sink: Callable[[str, dict[str, Any]], Any] | None = None
         self._inspect_timeout = inspect_timeout_ms / 1000.0
@@ -259,7 +266,9 @@ class AgentRuntime(QObject):
             "protocolVersion": 1,
             "pid": os.getpid(),
             "supportedWeixinVersions": [SUPPORTED_WEIXIN_VERSION],
-            "capabilities": {"friendSubmitEnabled": False},
+            "capabilities": {
+                "friendSubmitEnabled": self._friend_submit_enabled,
+            },
             "recovery": self._journal.load(),
         }
 

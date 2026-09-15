@@ -34,11 +34,11 @@ def test_friend_workspace_has_editable_import_table_and_selection_limit():
     assert "/ 20" in source
     assert "startFriends" in source
     assert 'status === "working" ? "执行中"' in source
-    assert 'status === "success" ? "预检完成"' in source
-    assert "开始表单预检" in source
-    assert "最终提交当前未开放" in source
-    assert "开始添加" not in source
-    assert "已提交" not in source
+    assert '"预检完成" : "已提交"' in source
+    assert "开始添加好友" in source
+    assert "将实际提交好友申请" in source
+    assert "friendSubmitConfirmDialog" in source
+    assert "提交后无法撤回" in source
 
 
 def test_friend_workspace_exposes_right_click_add_and_delete_actions():
@@ -75,12 +75,12 @@ def test_active_task_locks_navigation_settings_and_configuration_controls():
 def test_monitor_uses_chinese_state_machine_and_runtime_log():
     source = qml("TaskMonitor.qml")
     assert "消息发送状态" in source
-    assert "好友表单预检状态" in source
+    assert "好友申请状态" in source
     assert "currentStepCode" in source
     assert "runtimeLogs" in source
     assert "发送结果已确认" in source
     assert "表单预检已完成" in source
-    assert "提交结果已确认" not in source
+    assert "提交结果已确认" in source
     assert "好友表单预检状态" in source
     assert 'result === "working" ? "执行中"' in source
 

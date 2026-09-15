@@ -39,9 +39,16 @@ TestCase {
         property bool active: false
         property string kind: ""
         property string error: ""
-        function startFriends() { return false }
+        property bool acceptanceEnabled: false
+        property int startCalls: 0
+        function startFriends() { ++startCalls; return true }
     }
-    QtObject { id: agentBackend; property bool automationReady: false }
+    QtObject {
+        id: agentBackend
+        property bool automationReady: true
+        property bool canStartTask: true
+        property bool friendSubmitEnabled: true
+    }
     QtObject {
         id: appBackend
         property var friends: friendBackend
@@ -67,6 +74,10 @@ TestCase {
     function menu() { return findChild(workspace, "friendContextMenu") }
     function addAction() { return findChild(workspace, "addFriendRowMenuItem") }
     function removeAction() { return findChild(workspace, "removeFriendRowMenuItem") }
+    function startButton() { return findChild(workspace, "startFriendsButton") }
+    function submitDialog() { return findChild(workspace, "friendSubmitConfirmDialog") }
+    function submitConfirmButton() { return findChild(workspace, "friendSubmitConfirmButton") }
+    function submitCancelButton() { return findChild(workspace, "friendSubmitCancelButton") }
     function accountField() {
         // TableView may retain pooled delegates with the same objectName.
         var cell = table().itemAtCell(Qt.point(0, 0))
@@ -74,14 +85,56 @@ TestCase {
     }
     function init() {
         taskBackend.active = false
+        taskBackend.startCalls = 0
+        taskBackend.acceptanceEnabled = false
+        agentBackend.friendSubmitEnabled = true
+        workspace.monitorVisible = false
+        if (submitDialog() !== null)
+            submitDialog().close()
         menu().close()
         tryCompare(menu(), "visible", false)
         friendModel.clear()
         friendModel.append({ account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
+        friendModel.selectedCount = 1
         wait(100)
         workspaceWindow.requestActivate()
         tryCompare(workspaceWindow, "active", true)
+    }
+
+    function test_start_requires_explicit_confirmation_and_cancel_is_safe() {
+        verify(startButton() !== null)
+        verify(startButton().enabled)
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+        compare(taskBackend.startCalls, 0)
+
+        verify(submitCancelButton() !== null)
+        mouseClick(submitCancelButton(), 20,
+                   Math.floor(submitCancelButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", false)
+        compare(taskBackend.startCalls, 0)
+    }
+
+    function test_confirmation_starts_exactly_one_friend_task() {
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+
+        verify(submitConfirmButton() !== null)
+        mouseClick(submitConfirmButton(), 20,
+                   Math.floor(submitConfirmButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", false)
+        compare(taskBackend.startCalls, 1)
+        compare(workspace.monitorVisible, true)
+    }
+
+    function test_confirmation_rechecks_task_lock_before_starting() {
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        tryCompare(submitDialog(), "visible", true)
+        taskBackend.active = true
+
+        workspace.confirmFriendSubmission()
+        compare(taskBackend.startCalls, 0)
     }
 
     function test_row_right_click_adds_a_row() {

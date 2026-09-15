@@ -186,10 +186,46 @@ def test_runtime_reports_and_requires_acknowledgement_of_recovery_record(
     runtime.close()
 
 
-def test_runtime_advertises_friend_submit_as_disabled(qapp):
+def test_runtime_advertises_friend_submit_in_normal_mode(qapp, monkeypatch):
+    monkeypatch.delenv("WECHAT_COURIER_ACCEPTANCE", raising=False)
+    runtime = AgentRuntime(engine_factory=RecordingEngine)
+
+    assert runtime.hello()["capabilities"]["friendSubmitEnabled"] is True
+
+    runtime.close()
+
+
+def test_runtime_disables_friend_submit_in_acceptance_mode(qapp, monkeypatch):
+    monkeypatch.setenv("WECHAT_COURIER_ACCEPTANCE", "1")
     runtime = AgentRuntime(engine_factory=RecordingEngine)
 
     assert runtime.hello()["capabilities"]["friendSubmitEnabled"] is False
+
+    runtime.close()
+
+
+def test_runtime_wires_advertised_submit_capability_into_default_engine(
+    tmp_path, qapp, monkeypatch
+):
+    captured = []
+
+    class CapturingEngine(RecordingEngine):
+        def __init__(self, **kwargs):
+            super().__init__()
+            captured.append(kwargs)
+
+    monkeypatch.delenv("WECHAT_COURIER_ACCEPTANCE", raising=False)
+    monkeypatch.setattr(
+        "app.agent.workflows.WeixinWorkflowEngine",
+        CapturingEngine,
+    )
+    runtime = AgentRuntime(
+        journal=SafetyJournal(tmp_path / "safety.json"),
+    )
+
+    assert runtime.inspect()["supported"] is True
+    assert captured[0]["friend_submit_enabled"] is True
+    assert runtime.hello()["capabilities"]["friendSubmitEnabled"] is True
 
     runtime.close()
 

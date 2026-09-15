@@ -23,7 +23,7 @@ from app.agent.native_driver import (
     resolve_friend_form_fields,
 )
 from app.agent.retry import StaleElementError, WeixinUnresponsiveError
-from app.agent.profile import UnsupportedWeixinVersion
+from app.agent.profile import get_weixin_profile, UnsupportedWeixinVersion
 
 
 @dataclass
@@ -3033,6 +3033,131 @@ def test_friend_preflight_closes_the_request_form_with_invoke_pattern(monkeypatc
 
     assert driver.cancel_friend_request() is True
     assert driver._verify_hwnd == 0
+
+
+def _friend_submit_fixture(monkeypatch, controls, *, root_class=None, root_pid=202):
+    profile = get_weixin_profile("4.1.13.65")
+    root = FakeControl(
+        "发送添加朋友申请",
+        "WindowControl",
+        root_class or profile.verify_friend_root_class,
+        BoundingRectangle=FakeRect(100, 100, 700, 600),
+    )
+    root.NativeWindowHandle = 303
+    root.ProcessId = root_pid
+    root.GetTopLevelControl = lambda: root
+    for control in controls:
+        control.GetTopLevelControl = lambda owner=root: owner
+
+    driver = NativeWeixinDriver(gate_backend=object())
+    driver._session = type(
+        "Session",
+        (),
+        {"hwnd": 101, "pid": 202, "profile": profile},
+    )()
+    driver._verify_hwnd = 303
+    driver._uia = type(
+        "Uia", (), {"ControlFromHandle": staticmethod(lambda _hwnd: root)}
+    )()
+    driver._process_windows = lambda *_args, **_kwargs: [303]
+    driver._find_scoped_controls = lambda **_selector: list(controls)
+    driver._raise_scoped_risk = lambda **_selector: None
+    driver.ensure_window_responsive = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda hwnd: hwnd == 303)
+    monkeypatch.setattr(
+        "win32process.GetWindowThreadProcessId", lambda _hwnd: (1, 202)
+    )
+    return driver, root
+
+
+def _friend_confirm(*, runtime_id=(42, 1), offscreen=False, enabled=True):
+    calls = []
+
+    class Pattern:
+        @staticmethod
+        def Invoke(**_kwargs):
+            calls.append("invoke")
+            return True
+
+    control = FakeControl(
+        "确定",
+        "ButtonControl",
+        "mmui::XOutlineButton",
+        IsEnabled=enabled,
+        IsOffscreen=offscreen,
+        BoundingRectangle=FakeRect(500, 520, 580, 560),
+    )
+    control.GetRuntimeId = lambda: runtime_id
+    control.GetInvokePattern = lambda: Pattern()
+    return control, calls
+
+
+def test_friend_submit_invokes_only_one_fresh_owned_visible_confirm(monkeypatch):
+    confirm, calls = _friend_confirm()
+    driver, _root = _friend_submit_fixture(monkeypatch, [confirm])
+
+    assert driver.submit_friend_request() == "invoke_pattern"
+    assert calls == ["invoke"]
+
+
+def test_friend_submit_rejects_ambiguous_confirm_buttons_without_invoking(
+    monkeypatch,
+):
+    first, first_calls = _friend_confirm(runtime_id=(42, 1))
+    second, second_calls = _friend_confirm(runtime_id=(42, 2))
+    driver, _root = _friend_submit_fixture(monkeypatch, [first, second])
+
+    with pytest.raises(RuntimeError, match="唯一"):
+        driver.submit_friend_request()
+
+    assert first_calls == []
+    assert second_calls == []
+
+
+def test_friend_submit_rejects_offscreen_confirm_without_invoking(monkeypatch):
+    confirm, calls = _friend_confirm(offscreen=True)
+    driver, _root = _friend_submit_fixture(monkeypatch, [confirm])
+
+    with pytest.raises(RuntimeError, match="不可见"):
+        driver.submit_friend_request()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("root_class", "root_pid"),
+    [("mmui::MainWindow", 202), ("mmui::VerifyFriendWindow", 999)],
+)
+def test_friend_submit_rejects_wrong_verification_window_identity(
+    monkeypatch, root_class, root_pid
+):
+    confirm, calls = _friend_confirm()
+    driver, _root = _friend_submit_fixture(
+        monkeypatch,
+        [confirm],
+        root_class=root_class,
+        root_pid=root_pid,
+    )
+
+    with pytest.raises(RuntimeError, match="申请窗口"):
+        driver.submit_friend_request()
+
+    assert calls == []
+
+
+def test_friend_submit_rejects_recycled_confirm_between_resolutions(monkeypatch):
+    first, first_calls = _friend_confirm(runtime_id=(42, 1))
+    replacement, replacement_calls = _friend_confirm(runtime_id=(42, 2))
+    driver, root = _friend_submit_fixture(monkeypatch, [first])
+    replacement.GetTopLevelControl = lambda: root
+    snapshots = iter(([first], [replacement]))
+    driver._find_scoped_controls = lambda **_selector: list(next(snapshots))
+
+    with pytest.raises(RuntimeError, match="变化"):
+        driver.submit_friend_request()
+
+    assert first_calls == []
+    assert replacement_calls == []
 
 
 def test_friend_preflight_falls_back_to_window_close_after_false_invoke(

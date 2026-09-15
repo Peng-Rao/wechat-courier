@@ -532,6 +532,66 @@ def test_friend_tasks_default_to_verified_form_preflight_without_submit():
     assert task_events[-1]["detail"] == "表单预检完成，未提交好友申请"
 
 
+def test_submission_capability_alone_never_crosses_boundary_without_task_intent():
+    driver = FakeDriver()
+
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [TaskItem("friend-1", account="18896904196")],
+        ),
+    )
+
+    assert result["success"] == 1
+    assert driver.friend_submit_count == 0
+    assert driver.friend_cancel_count == 1
+    assert events[-1]["step"] == "preflight_completed"
+
+
+def test_non_boolean_internal_submission_intent_fails_closed():
+    driver = FakeDriver()
+
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [TaskItem("friend-1", account="18896904196")],
+            TaskOptions(submit_friend_request=1),
+        ),
+    )
+
+    assert result["success"] == 1
+    assert driver.friend_submit_count == 0
+    assert driver.friend_cancel_count == 1
+    assert events[-1]["step"] == "preflight_completed"
+
+
+def test_non_boolean_engine_submission_capability_fails_closed():
+    driver = FakeDriver()
+    notices = []
+    engine = WeixinWorkflowEngine(
+        driver_factory=lambda: driver,
+        friend_submit_enabled="yes",
+    )
+
+    result = engine.run(
+        request(
+            "friend_add",
+            [TaskItem("friend-1", account="18896904196")],
+            TaskOptions(submit_friend_request=True),
+        ),
+        TaskControl(),
+        lambda method, payload: notices.append((method, payload)),
+    )
+    events = [payload for method, payload in notices if method == "task.event"]
+
+    assert result["success"] == 1
+    assert driver.friend_submit_count == 0
+    assert driver.friend_cancel_count == 1
+    assert events[-1]["step"] == "preflight_completed"
+
+
 def test_friend_preflight_uses_layered_retry_before_opening_the_form():
     driver = FakeDriver()
     calls = []
@@ -965,7 +1025,14 @@ def test_friend_request_verifies_fields_and_submits_once():
         remark="测试备注",
     )
 
-    result, events = run_engine(driver, request("friend_add", [item]))
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [item],
+            TaskOptions(submit_friend_request=True),
+        ),
+    )
 
     assert result["success"] == 1
     assert driver.friend_submit_count == 1
@@ -978,7 +1045,14 @@ def test_friend_unknown_submit_is_not_clicked_again():
     driver.friend_verification = None
     item = TaskItem("friend-1", account="18896904196")
 
-    result, events = run_engine(driver, request("friend_add", [item]))
+    result, events = run_engine(
+        driver,
+        request(
+            "friend_add",
+            [item],
+            TaskOptions(submit_friend_request=True),
+        ),
+    )
 
     assert driver.friend_submit_count == 1
     assert result["unknown"] == 1
