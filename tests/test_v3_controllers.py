@@ -99,6 +99,44 @@ def make_backend(tmp_path):
     return backend, client
 
 
+def test_friend_limit_is_snapshotted_locked_and_unlocked_after_task(tmp_path, qapp):
+    from app.friend_import import load_friend_records
+
+    backend, client = make_backend(tmp_path)
+    client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": True}})
+    backend.friends.batchLimit = 150
+    backend.friends.model.replace_records(load_friend_records(
+        [["姓名", "账号"], *[["示例学生", f"wxid_batch{i:04d}"] for i in range(151)]]))
+    backend.friends.model.selectFirstValid()
+    assert backend.task.startFriends()
+    payload = client.calls[-1][2]
+    assert payload["options"]["friendBatchLimit"] == 150
+    assert len(payload["items"]) == 150
+    backend.friends.batchLimit = 1
+    assert backend.friends.batchLimit == 150
+    assert backend.friends.model.selectedCount == 150
+    client.notificationReceived.emit("task.finished", {
+        "taskId": payload["taskId"], "outcome": "stopped", "done": 0, "total": 150})
+    backend.friends.batchLimit = 1
+    assert backend.friends.batchLimit == 1
+    assert backend.friends.model.selectedCount == 1
+    assert payload["options"]["friendBatchLimit"] == 150
+    backend.shutdown()
+
+
+def test_friend_acceptance_metadata_tracks_configured_batch_limit(tmp_path, qapp, monkeypatch):
+    monkeypatch.setenv("WECHAT_COURIER_ACCEPTANCE", "1")
+    backend, _client = make_backend(tmp_path)
+    changed = []
+    backend.task.acceptanceStateChanged.connect(lambda: changed.append(True))
+    backend.friends.batchLimit = 75
+    state = json.loads(backend.task.acceptanceFriendStateJson)
+    assert state["options"]["friendBatchLimit"] == 75
+    assert "friendBatchLimit" not in backend.task.acceptanceMessageState["options"]
+    assert changed
+    backend.shutdown()
+
+
 def fire_scheduled_agent_restart(backend):
     backend.task._agent_restart_timer.stop()
     backend.task._perform_agent_restart()

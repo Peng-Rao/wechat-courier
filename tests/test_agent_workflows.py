@@ -157,6 +157,24 @@ def run_engine(driver, task):
     return result, [payload for method, payload in events if method == "task.event"]
 
 
+@pytest.mark.parametrize("limit", [100, 1000])
+def test_friend_preflight_executes_entire_configured_batch_with_fake_driver(limit):
+    driver = FakeDriver()
+    task = TaskRequest.from_payload({
+        "taskId": "batch", "kind": "friend_add",
+        "items": [{"itemId": f"row-{i}", "account": f"wxid_batch{i:04d}",
+                   "greeting": "hello", "remark": "test"} for i in range(limit)],
+        "options": {"friendBatchLimit": limit},
+    })
+    result, events = run_engine(driver, task)
+    assert result["success"] == result["done"] == limit
+    assert result["error"] == result["unknown"] == 0
+    completed = [e for e in events if e["step"] == "preflight_completed" and e["outcome"] == "success"]
+    assert len({e["itemId"] for e in completed}) == limit
+    assert driver.friend_submit_count == 0
+    assert driver.friend_cancel_count == limit
+
+
 def test_engine_reuses_one_driver_for_inspection_and_tasks_until_closed():
     created = []
 

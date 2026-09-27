@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .friend_templates import render_friend_content, split_name
+from .constants import FRIEND_BATCH_LIMIT_DEFAULT, normalize_friend_batch_limit
 
 
 ACCOUNT_HEADER = "账号"
@@ -99,7 +100,8 @@ def validate_records(records: Sequence[FriendRecord], default_greeting: str = ""
             record.selected = False
 
 
-def _records_from_rows(rows: Iterable[Sequence[Any]], warnings: list[str] | None = None) -> list[FriendRecord]:
+def _records_from_rows(rows: Iterable[Sequence[Any]], warnings: list[str] | None = None,
+                       selection_limit: int = FRIEND_BATCH_LIMIT_DEFAULT) -> list[FriendRecord]:
     materialized = [list(row) for row in rows]
     if not materialized:
         raise FriendImportError("导入文件为空")
@@ -139,8 +141,9 @@ def _records_from_rows(rows: Iterable[Sequence[Any]], warnings: list[str] | None
         )
     validate_records(records)
     selected = 0
+    selection_limit = normalize_friend_batch_limit(selection_limit)
     for record in records:
-        if record.valid and selected < 20:
+        if record.valid and selected < selection_limit:
             record.selected = True
             selected += 1
     return records
@@ -179,7 +182,8 @@ def _xlsx_rows(path: Path) -> list[list[Any]]:
         workbook.close()
 
 
-def load_friend_records(source, *, warnings: list[str] | None = None) -> list[FriendRecord]:
+def load_friend_records(source, *, warnings: list[str] | None = None,
+                        selection_limit: int = FRIEND_BATCH_LIMIT_DEFAULT) -> list[FriendRecord]:
     if isinstance(source, (str, Path)):
         path = Path(source)
         suffix = path.suffix.casefold()
@@ -189,8 +193,8 @@ def load_friend_records(source, *, warnings: list[str] | None = None) -> list[Fr
             rows = _xlsx_rows(path)
         else:
             raise FriendImportError("仅支持 CSV 或 XLSX 文件")
-        return _records_from_rows(rows, warnings)
-    return _records_from_rows(source, warnings)
+        return _records_from_rows(rows, warnings, selection_limit)
+    return _records_from_rows(source, warnings, selection_limit)
 
 
 __all__ = [

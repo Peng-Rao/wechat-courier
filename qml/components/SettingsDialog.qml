@@ -237,6 +237,23 @@ Popup {
                             subtitle: "行内为空时才使用这里的默认值"
                         }
                         SettingsRow {
+                            title: "每批添加人数"
+                            description: "控制单次任务最多选择的人数"
+                            SpinBox {
+                                objectName: "settingsFriendBatchLimit"
+                                Accessible.name: "每批添加人数"
+                                implicitWidth: 140
+                                from: root.appBackend ? root.appBackend.friends.batchLimitMinimum : 1
+                                to: root.appBackend ? root.appBackend.friends.batchLimitMaximum : 1000
+                                value: root.appBackend ? root.appBackend.friends.batchLimit : 100
+                                editable: true
+                                enabled: !root.interactionLocked
+                                onValueModified: root.applyIfUnlocked(function() {
+                                    root.appBackend.friends.batchLimit = value
+                                })
+                            }
+                        }
+                        SettingsRow {
                             title: "默认打招呼语"
                             description: "两处都为空时保留微信申请窗口原文"
                             TextField {

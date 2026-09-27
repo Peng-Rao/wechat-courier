@@ -5,6 +5,8 @@ import "../../qml/components"
 TestCase {
     name: "SettingsDialog"
     when: windowShown
+    width: 960
+    height: 680
 
     QtObject {
         id: mockTask
@@ -25,6 +27,9 @@ TestCase {
         property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property int intervalMin: 15
         property int intervalMax: 30
+        property int batchLimit: 100
+        property int batchLimitMinimum: 1
+        property int batchLimitMaximum: 1000
     }
 
     QtObject {
@@ -54,6 +59,8 @@ TestCase {
     function init() {
         mockTask.active = false
         mockMessage.intervalMin = 2
+        mockFriends.batchLimit = 100
+        settingsDialog.sectionIndex = 0
         settingsDialog.open()
         tryCompare(settingsDialog, "opened", true)
     }
@@ -86,6 +93,69 @@ TestCase {
         settingsDialog.close()
 
         compare(mockMessage.intervalMin, 7)
+    }
+
+    function test_friend_batch_limit_steps_and_commits_typed_value() {
+        settingsDialog.sectionIndex = 1
+        var control = findChild(settingsDialog, "settingsFriendBatchLimit")
+        verify(control !== null)
+        compare(control.value, 100)
+        compare(control.from, 1)
+        compare(control.to, 1000)
+        verify(control.editable)
+        tryCompare(control, "visible", true)
+        wait(50)
+        mouseClick(control.up.indicator, control.up.indicator.width / 2,
+                   control.up.indicator.height / 2)
+        compare(control.value, 101)
+        compare(mockFriends.batchLimit, 101)
+        mouseClick(control.down.indicator, control.down.indicator.width / 2,
+                   control.down.indicator.height / 2)
+        compare(control.value, 100)
+        compare(mockFriends.batchLimit, 100)
+        control.contentItem.forceActiveFocus()
+        keyClick(Qt.Key_A, Qt.ControlModifier)
+        keyClick(Qt.Key_2)
+        keyClick(Qt.Key_5)
+        keyClick(Qt.Key_0)
+        keyClick(Qt.Key_Tab)
+        tryCompare(mockFriends, "batchLimit", 250)
+        mockFriends.batchLimit = 75
+        tryCompare(control, "value", 75)
+    }
+
+    function test_friend_batch_limit_button_boundaries() {
+        settingsDialog.sectionIndex = 1
+        var control = findChild(settingsDialog, "settingsFriendBatchLimit")
+        verify(control !== null)
+        tryCompare(control, "visible", true)
+        mockFriends.batchLimit = 1
+        tryCompare(control, "value", 1)
+        mouseClick(control.down.indicator, control.down.indicator.width / 2,
+                   control.down.indicator.height / 2)
+        compare(mockFriends.batchLimit, 1)
+        mockFriends.batchLimit = 1000
+        tryCompare(control, "value", 1000)
+        mouseClick(control.up.indicator, control.up.indicator.width / 2,
+                   control.up.indicator.height / 2)
+        compare(mockFriends.batchLimit, 1000)
+    }
+
+    function test_task_start_does_not_commit_dirty_batch_limit() {
+        settingsDialog.sectionIndex = 1
+        var control = findChild(settingsDialog, "settingsFriendBatchLimit")
+        verify(control !== null)
+        tryCompare(control, "visible", true)
+        wait(50)
+        control.contentItem.forceActiveFocus()
+        keyClick(Qt.Key_A, Qt.ControlModifier)
+        keyClick(Qt.Key_2)
+        keyClick(Qt.Key_5)
+        keyClick(Qt.Key_0)
+        mockTask.active = true
+        tryCompare(settingsDialog, "opened", false)
+        compare(mockFriends.batchLimit, 100)
+        verify(!control.enabled)
     }
 
     function test_friend_interval_editor_accepts_one_second() {

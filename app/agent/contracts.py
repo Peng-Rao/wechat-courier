@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from app.constants import FRIEND_BATCH_LIMIT_DEFAULT, FRIEND_BATCH_LIMIT_MIN, FRIEND_BATCH_LIMIT_MAX
+
 
 TaskKind = Literal["message_send", "friend_add"]
 Outcome = Literal["pending", "working", "success", "error", "unknown", "stopped"]
@@ -45,6 +47,14 @@ class TaskOptions:
     use_forward: bool = False
     file_paths: tuple[str, ...] = ()
     submit_friend_request: bool = False
+    friend_batch_limit: int = FRIEND_BATCH_LIMIT_DEFAULT
+
+    def __post_init__(self) -> None:
+        if (type(self.friend_batch_limit) is not int
+                or not FRIEND_BATCH_LIMIT_MIN <= self.friend_batch_limit <= FRIEND_BATCH_LIMIT_MAX):
+            raise ContractError(
+                f"friendBatchLimit must be an integer from {FRIEND_BATCH_LIMIT_MIN} to {FRIEND_BATCH_LIMIT_MAX}"
+            )
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "TaskOptions":
@@ -66,6 +76,7 @@ class TaskOptions:
             use_forward=bool(data.get("useForward", False)),
             file_paths=tuple(str(path) for path in data.get("filePaths", ())),
             submit_friend_request=submit_friend_request,
+            friend_batch_limit=data.get("friendBatchLimit", FRIEND_BATCH_LIMIT_DEFAULT),
         )
 
 
@@ -110,6 +121,10 @@ class TaskRequest:
     kind: TaskKind
     items: tuple[TaskItem, ...]
     options: TaskOptions = field(default_factory=TaskOptions)
+
+    def __post_init__(self) -> None:
+        if self.kind == "friend_add" and len(self.items) > self.options.friend_batch_limit:
+            raise ContractError(f"friend task exceeds friendBatchLimit ({self.options.friend_batch_limit})")
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "TaskRequest":

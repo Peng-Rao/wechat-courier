@@ -131,3 +131,51 @@ def test_friend_request_rejects_string_submission_intent():
                 "options": {"submitFriendRequest": "true"},
             }
         )
+
+
+@pytest.mark.parametrize("limit, count", [(1, 1), (100, 100), (1000, 1000)])
+def test_friend_batch_contract_accepts_configured_limit(limit, count):
+    from app.agent.contracts import TaskRequest
+
+    request = TaskRequest.from_payload({
+        "taskId": "batch", "kind": "friend_add",
+        "items": [{"itemId": f"row-{i}", "account": f"wxid_batch{i:04d}"} for i in range(count)],
+        "options": {"friendBatchLimit": limit},
+    })
+    assert request.options.friend_batch_limit == limit
+    assert len(request.items) == count
+
+
+@pytest.mark.parametrize("limit", [0, -1, 1001, True, False, 1.5, 100.0, "100", None])
+def test_friend_batch_contract_rejects_invalid_rpc_limit(limit):
+    from app.agent.contracts import ContractError, TaskRequest
+
+    with pytest.raises(ContractError, match="friendBatchLimit"):
+        TaskRequest.from_payload({
+            "taskId": "batch", "kind": "friend_add",
+            "items": [{"itemId": "one", "account": "wxid_batch0001"}],
+            "options": {"friendBatchLimit": limit},
+        })
+
+
+@pytest.mark.parametrize("limit, count", [(1, 2), (100, 101), (1000, 1001)])
+def test_friend_batch_contract_rejects_over_limit_items(limit, count):
+    from app.agent.contracts import ContractError, TaskRequest
+
+    with pytest.raises(ContractError, match="friendBatchLimit"):
+        TaskRequest.from_payload({
+            "taskId": "batch", "kind": "friend_add",
+            "items": [{"itemId": f"row-{i}", "account": f"wxid_batch{i:04d}"} for i in range(count)],
+            "options": {"friendBatchLimit": limit},
+        })
+
+
+def test_legacy_friend_rpc_uses_default_one_hundred_limit():
+    from app.agent.contracts import ContractError, TaskRequest
+
+    payload = {"taskId": "batch", "kind": "friend_add", "items": [
+        {"itemId": f"row-{i}", "account": f"wxid_batch{i:04d}"} for i in range(100)]}
+    assert len(TaskRequest.from_payload(payload).items) == 100
+    payload["items"].append({"itemId": "extra", "account": "wxid_extra"})
+    with pytest.raises(ContractError, match="friendBatchLimit"):
+        TaskRequest.from_payload(payload)

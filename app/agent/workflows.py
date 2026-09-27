@@ -200,8 +200,8 @@ class WeixinWorkflowEngine:
         return result
 
     def _run_items(self, request: TaskRequest, control, emit) -> dict[str, Any]:
-        if request.kind == "friend_add" and len(request.items) > 20:
-            raise ValueError("friend task cannot contain more than 20 items")
+        if request.kind == "friend_add" and len(request.items) > request.options.friend_batch_limit:
+            raise ValueError(f"friend task exceeds friendBatchLimit ({request.options.friend_batch_limit})")
         driver = self._get_driver()
         counts = {"success": 0, "error": 0, "unknown": 0, "stopped": 0}
         done = 0

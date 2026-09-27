@@ -46,6 +46,9 @@ TestCase {
         property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property real intervalMax: 30
         property real intervalMin: 15
+        property int batchLimit: 100
+        property int batchLimitMinimum: 1
+        property int batchLimitMaximum: 1000
         property var model: friendModel
         function createTemplate() { return false }
         function importFile() { return false }

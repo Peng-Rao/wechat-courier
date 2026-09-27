@@ -1,6 +1,21 @@
 # -*- coding: utf-8 -*-
 """应用常量"""
 
+FRIEND_BATCH_LIMIT_DEFAULT = 100
+FRIEND_BATCH_LIMIT_MIN = 1
+FRIEND_BATCH_LIMIT_MAX = 1000
+
+
+def normalize_friend_batch_limit(value) -> int:
+    if type(value) not in (int, str):
+        return FRIEND_BATCH_LIMIT_DEFAULT
+    try:
+        limit = int(value)
+    except ValueError:
+        return FRIEND_BATCH_LIMIT_DEFAULT
+    return max(FRIEND_BATCH_LIMIT_MIN, min(FRIEND_BATCH_LIMIT_MAX, limit))
+
+
 # ── 窗口 ──
 WIN_WIDTH = 960
 WIN_HEIGHT = 680

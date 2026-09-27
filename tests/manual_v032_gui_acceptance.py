@@ -51,12 +51,15 @@ def make_case(run_id, index):
     else:
         item.update(account=FRIEND_ACCOUNT, greeting=f"Acceptance preflight {marker}",
                     remark=f"v032-{index + 1:04d}")
-    return {"index": index + 1, "windowState": STATES[(index // 2) % 3],
+    case = {"index": index + 1, "windowState": STATES[(index // 2) % 3],
             "request": {"taskId": marker, "kind": kind, "items": [item],
                         "options": {"intervalMin": 2.0 if kind == "message_send" else 15.0,
                                     "intervalMax": 3.0 if kind == "message_send" else 30.0,
                                     "unknownPolicy": "continue", "filePaths": [],
                                     "useForward": False}}}
+    if kind == "friend_add":
+        case["request"]["options"]["friendBatchLimit"] = 100
+    return case
 
 
 def benign_content(task_id):

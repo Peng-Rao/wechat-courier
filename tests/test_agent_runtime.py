@@ -350,6 +350,53 @@ def test_client_authenticates_and_receives_notifications(qapp, qtbot):
     QLocalServer.removeServer(name)
 
 
+def test_rpc_rejects_invalid_friend_batches_before_execution(tmp_path, qapp, qtbot):
+    engine = RecordingEngine()
+    runtime = AgentRuntime(
+        engine_factory=lambda: engine,
+        journal=SafetyJournal(tmp_path / "safety.json"),
+    )
+    name = "wechat-courier-batch-test-" + uuid.uuid4().hex
+    server = AgentServer(name, "secret", runtime)
+    client = AgentClient()
+    errors = []
+    replies = []
+    client.rpcError.connect(lambda request_id, code, detail: errors.append((request_id, detail)))
+    client.replyReceived.connect(lambda request_id, result: replies.append((request_id, result)))
+    try:
+        assert server.listen()
+        client.connect_to_server(name, "secret")
+        qtbot.waitUntil(lambda: client.connected, timeout=2_000)
+        for limit, size in ((0, 1), (1001, 1), (True, 1), (1.5, 1), ("100", 1), (100, 101)):
+            request_id = client.call("task.start", {
+                "taskId": "invalid-batch", "kind": "friend_add",
+                "items": [{"itemId": str(index), "account": f"wxid_batch{index:04d}"}
+                          for index in range(size)],
+                "options": {"friendBatchLimit": limit},
+            })
+            qtbot.waitUntil(lambda: any(item[0] == request_id for item in errors), timeout=2_000)
+            assert "friendBatchLimit" in errors[-1][1]
+            assert runtime.active_task_id == ""
+            assert not engine.started.is_set()
+
+        request_id = client.call("task.start", {
+            "taskId": "valid-batch", "kind": "friend_add",
+            "items": [{"itemId": str(index), "account": f"wxid_batch{index:04d}"}
+                      for index in range(100)],
+            "options": {"friendBatchLimit": 100},
+        })
+        qtbot.waitUntil(lambda: any(item[0] == request_id for item in replies), timeout=2_000)
+        reply = next(result for item_id, result in replies if item_id == request_id)
+        assert reply == {"accepted": True, "taskId": "valid-batch"}
+        assert engine.started.wait(1)
+    finally:
+        engine.release.set()
+        client.close()
+        server.close()
+        runtime.close()
+        QLocalServer.removeServer(name)
+
+
 def test_client_rotates_and_redacts_agent_stderr(tmp_path, qapp):
     client = AgentClient(
         diagnostics_log_dir=tmp_path,

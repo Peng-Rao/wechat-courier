@@ -19,6 +19,12 @@ from .agent.client import AgentClient
 from .agent.diagnostics import default_log_dir, redact_identifier
 from .agent.workflows import normalize_identity
 from .models import extract_greeting_name
+from .constants import (
+    FRIEND_BATCH_LIMIT_DEFAULT,
+    FRIEND_BATCH_LIMIT_MIN,
+    FRIEND_BATCH_LIMIT_MAX,
+    normalize_friend_batch_limit,
+)
 from .task_models import (
     FriendImportModel,
     RuntimeLogModel,
@@ -271,6 +277,7 @@ class FriendController(QObject):
     defaultRelationshipChanged = Signal(str)
     intervalMinChanged = Signal(float)
     intervalMaxChanged = Signal(float)
+    batchLimitChanged = Signal(int)
 
     DEFAULT_GREETING = "你好，我是五阿哥，方便认识一下吗？"
     DEFAULT_RELATIONSHIP = "妈妈"
@@ -279,6 +286,12 @@ class FriendController(QObject):
         super().__init__(parent)
         self._settings = settings
         self._model = FriendImportModel(self)
+        self._batch_limit_locked = False
+        raw_batch_limit = settings.value("friends/batchLimit", FRIEND_BATCH_LIMIT_DEFAULT)
+        self._batch_limit = normalize_friend_batch_limit(raw_batch_limit)
+        self._model.set_selection_limit(self._batch_limit)
+        if raw_batch_limit != self._batch_limit:
+            settings.setValue("friends/batchLimit", self._batch_limit)
         self._default_greeting = str(
             settings.value("friends/defaultGreeting", self.DEFAULT_GREETING)
         )
@@ -300,6 +313,33 @@ class FriendController(QObject):
     @Property(QObject, constant=True)
     def model(self):
         return self._model
+
+    @Property(int, constant=True)
+    def batchLimitMinimum(self):
+        return FRIEND_BATCH_LIMIT_MIN
+
+    @Property(int, constant=True)
+    def batchLimitMaximum(self):
+        return FRIEND_BATCH_LIMIT_MAX
+
+    def _get_batch_limit(self):
+        return self._batch_limit
+
+    def _set_batch_limit(self, value):
+        if self._batch_limit_locked:
+            return
+        value = normalize_friend_batch_limit(value)
+        if value == self._batch_limit:
+            return
+        self._batch_limit = value
+        self._model.set_selection_limit(value)
+        self._settings.setValue("friends/batchLimit", value)
+        self.batchLimitChanged.emit(value)
+
+    batchLimit = Property(int, _get_batch_limit, _set_batch_limit, notify=batchLimitChanged)
+
+    def set_batch_limit_locked(self, locked: bool) -> None:
+        self._batch_limit_locked = locked
 
     def _get_greeting(self):
         return self._default_greeting
@@ -897,7 +937,8 @@ class TaskController(QObject):
             message.recipientsTextChanged, message.templateTextChanged, message.filePathsChanged,
             message.useForwardChanged, message.intervalMinChanged, message.intervalMaxChanged,
             friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRelationshipChanged,
-            friends.intervalMinChanged, friends.intervalMaxChanged, settings.unknownPolicyChanged,
+            friends.intervalMinChanged, friends.intervalMaxChanged, friends.batchLimitChanged,
+            settings.unknownPolicyChanged,
         ):
             signal.connect(lambda *_: self.acceptanceStateChanged.emit())
 
@@ -916,6 +957,8 @@ class TaskController(QObject):
             "filePaths": self._message.filePaths if kind == "message_send" else [],
             "useForward": self._message.useForward if kind == "message_send" else False,
         }
+        if kind == "friend_add":
+            options["friendBatchLimit"] = self._friends.batchLimit
         return {
             "active": self._active,
             "friendSubmitEnabled": self._agent.friendSubmitEnabled,
@@ -1121,6 +1164,7 @@ class TaskController(QObject):
     def _set_active(self, active: bool) -> None:
         if active != self._active:
             self._active = active
+            self._friends.set_batch_limit_locked(active)
             self.activeChanged.emit()
 
     def _set_kind(self, kind: str) -> None:
@@ -1563,6 +1607,7 @@ class TaskController(QObject):
                 "intervalMax": self._friends.intervalMax,
                 "unknownPolicy": self._settings.unknownPolicy,
                 "submitFriendRequest": not self._acceptance_enabled,
+                "friendBatchLimit": self._friends.batchLimit,
             },
         )
 

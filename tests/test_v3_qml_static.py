@@ -31,7 +31,8 @@ def test_friend_workspace_has_editable_import_table_and_selection_limit():
     assert "TableView" in source
     assert "setCell" in source
     assert "selectedCount" in source
-    assert "/ 20" in source
+    assert "root.friendBackend.batchLimit" in source
+    assert "/ 20" not in source
     assert "startFriends" in source
     assert 'status === "working" ? "执行中"' in source
     assert '"预检完成" : "已提交"' in source
@@ -114,7 +115,7 @@ def test_settings_dialog_guards_every_mutating_callback_while_task_is_active():
 
     assert "readonly property bool interactionLocked" in source
     assert "function applyIfUnlocked(callback)" in source
-    assert source.count("root.applyIfUnlocked(function()") == 15
+    assert source.count("root.applyIfUnlocked(function()") == 16
     assert "onInteractionLockedChanged" in source
     assert "运行中也可修改" not in source
 

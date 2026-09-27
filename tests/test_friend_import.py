@@ -65,21 +65,21 @@ def test_import_requires_account_header_and_rejects_unknown_formats(tmp_path):
         load_friend_records(unknown)
 
 
-def test_model_marks_invalid_and_duplicate_accounts_and_selects_first_20(qapp):
+def test_model_marks_invalid_and_duplicate_accounts_and_selects_first_100(qapp):
     rows = [["账号", "打招呼语", "姓名"]]
-    rows.extend([[f"wxid_valid{i:02d}", "", "示例学生"] for i in range(22)])
-    rows.extend([["wxid_valid00", "duplicate", "示例学生"], ["张三", "", "示例学生"]])
+    rows.extend([[f"wxid_valid{i:03d}", "", "示例学生"] for i in range(102)])
+    rows.extend([["wxid_valid000", "duplicate", "示例学生"], ["张三", "", "示例学生"]])
 
     model = FriendImportModel()
     model.replace_records(load_friend_records(rows))
 
-    assert model.count == 24
-    assert model.validCount == 22
-    assert model.selectedCount == 20
-    assert model.record_at(22).valid is False
-    assert "重复" in model.record_at(22).error
-    assert model.record_at(23).valid is False
-    assert "微信号或手机号" in model.record_at(23).error
+    assert model.count == 104
+    assert model.validCount == 102
+    assert model.selectedCount == 100
+    assert model.record_at(102).valid is False
+    assert "重复" in model.record_at(102).error
+    assert model.record_at(103).valid is False
+    assert "微信号或手机号" in model.record_at(103).error
 
 
 def test_editing_an_account_revalidates_duplicates(qapp):
@@ -162,10 +162,11 @@ def test_manual_row_auto_selects_only_when_it_first_becomes_valid(qapp):
     assert model.record_at(row).selected is False
 
 
-def test_manual_row_stays_unselected_when_twenty_rows_are_already_selected(qapp):
+def test_manual_row_stays_unselected_at_configured_twenty_row_limit(qapp):
     rows = [["账号", "打招呼语", "姓名"]]
     rows.extend([[f"wxid_limit{i:02d}", "", "示例学生"] for i in range(20)])
     model = FriendImportModel()
+    model.set_selection_limit(20)
     model.replace_records(load_friend_records(rows))
 
     row = model.appendEmptyRecord()

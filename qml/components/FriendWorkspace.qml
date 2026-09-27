@@ -174,7 +174,8 @@ Item {
                                 font.bold: true
                             }
                             Text {
-                                text: "导入需包含姓名、账号；可右键新增/删除，单元格可编辑；每次最多 20 条"
+                                text: "导入需包含姓名、账号；可右键新增/删除，单元格可编辑；每次最多 "
+                                    + (root.friendBackend ? root.friendBackend.batchLimit : 100) + " 条"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
@@ -263,15 +264,18 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         Text {
+                            objectName: "friendSelectionCount"
                             text: root.friendBackend
-                                ? "已选择 " + root.friendBackend.model.selectedCount + " / 20" : "已选择 0 / 20"
+                                ? "已选择 " + root.friendBackend.model.selectedCount + " / " + root.friendBackend.batchLimit
+                                : "已选择 0 / 100"
                             color: WxTheme.clTextPrimary
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeSmall
                             font.bold: true
                         }
                         Button {
-                            text: "选择前 20 条"
+                            objectName: "selectFirstFriendsButton"
+                            text: "选择前 " + (root.friendBackend ? root.friendBackend.batchLimit : 100) + " 条"
                             enabled: root.friendBackend && !root.interactionLocked
                             onClicked: {
                                 if (!root.interactionLocked && root.friendBackend)

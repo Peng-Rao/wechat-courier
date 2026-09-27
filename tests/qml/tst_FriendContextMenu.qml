@@ -41,6 +41,7 @@ TestCase {
         property var relationshipOptions: ["无", "妈妈", "爸爸", "姐姐"]
         property real intervalMin: 15
         property real intervalMax: 30
+        property int batchLimit: 100
         function importFile() { return false }
         function createTemplate() { return false }
     }
@@ -101,6 +102,7 @@ TestCase {
     }
     function init() {
         taskBackend.active = false
+        friendBackend.batchLimit = 100
         taskBackend.kind = ""
         taskBackend.startCalls = 0
         taskBackend.acceptanceEnabled = false
@@ -117,6 +119,19 @@ TestCase {
         wait(100)
         workspaceWindow.requestActivate()
         tryCompare(workspaceWindow, "active", true)
+    }
+
+    function test_batch_limit_labels_follow_settings() {
+        var countLabel = findChild(workspace, "friendSelectionCount")
+        var selectButton = findChild(workspace, "selectFirstFriendsButton")
+        verify(countLabel !== null)
+        verify(selectButton !== null)
+        friendBackend.batchLimit = 250
+        friendModel.selectedCount = 5
+        tryCompare(countLabel, "text", "已选择 5 / 250")
+        compare(selectButton.text, "选择前 250 条")
+        taskBackend.active = true
+        verify(!selectButton.enabled)
     }
 
     function test_start_requires_explicit_confirmation_and_cancel_is_safe() {

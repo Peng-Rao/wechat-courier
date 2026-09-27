@@ -9,6 +9,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Property, Qt, QUrl, 
 
 from .friend_import import FriendRecord, load_friend_records, validate_records
 from .friend_templates import normalize_relationship, split_name
+from .constants import FRIEND_BATCH_LIMIT_DEFAULT, normalize_friend_batch_limit
 
 
 _TERMINAL_STEPS = {"send_verified", "preflight_completed", "submit_verified"}
@@ -47,6 +48,7 @@ class FriendImportModel(QAbstractListModel):
     RenderedGreetingRole = Qt.UserRole + 12
 
     countsChanged = Signal()
+    selectionLimitChanged = Signal(int)
     importErrorChanged = Signal(str)
     importWarningChanged = Signal(str)
 
@@ -73,6 +75,7 @@ class FriendImportModel(QAbstractListModel):
         self._import_warning = ""
         self._default_greeting = ""
         self._default_relationship = "妈妈"
+        self._selection_limit = FRIEND_BATCH_LIMIT_DEFAULT
 
     def roleNames(self):
         return self._ROLE_NAMES
@@ -111,6 +114,34 @@ class FriendImportModel(QAbstractListModel):
     @Property(int, notify=countsChanged)
     def validCount(self):
         return sum(record.valid for record in self._records)
+
+    @Property(int, notify=selectionLimitChanged)
+    def selectionLimit(self):
+        return self._selection_limit
+
+    def set_selection_limit(self, limit: int) -> None:
+        limit = normalize_friend_batch_limit(limit)
+        if limit == self._selection_limit:
+            return
+        self._selection_limit = limit
+        if self._trim_selected_records() and self._records:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._records) - 1, 0),
+                                  [self.SelectedRole])
+        self.selectionLimitChanged.emit(limit)
+        self.countsChanged.emit()
+
+    def _trim_selected_records(self) -> bool:
+        kept = 0
+        changed = False
+        for record in self._records:
+            if not record.selected:
+                continue
+            if kept < self._selection_limit:
+                kept += 1
+            else:
+                record.selected = False
+                changed = True
+        return changed
 
     @Property(str, notify=importErrorChanged)
     def importError(self):
@@ -155,7 +186,7 @@ class FriendImportModel(QAbstractListModel):
             ):
                 continue
             self._manual_rows_pending_selection.discard(record.item_id)
-            if selected_count < 20:
+            if selected_count < self._selection_limit:
                 record.selected = True
                 selected_count += 1
 
@@ -164,6 +195,7 @@ class FriendImportModel(QAbstractListModel):
         self._records = list(records)
         self._manual_rows_pending_selection.clear()
         self._validate()
+        self._trim_selected_records()
         self.endResetModel()
         self.countsChanged.emit()
 
@@ -228,7 +260,7 @@ class FriendImportModel(QAbstractListModel):
             path = QUrl(path).toLocalFile()
         try:
             warnings = []
-            records = load_friend_records(path, warnings=warnings)
+            records = load_friend_records(path, warnings=warnings, selection_limit=self._selection_limit)
         except Exception as exc:
             self._import_error = str(exc)
             self.importErrorChanged.emit(self._import_error)
@@ -271,10 +303,10 @@ class FriendImportModel(QAbstractListModel):
         if not 0 <= row < len(self._records):
             return False
         record = self._records[row]
-        if selected and (not record.valid or self.selectedCount >= 20):
-            return False
         if record.selected == selected:
             return True
+        if selected and (not record.valid or self.selectedCount >= self._selection_limit):
+            return False
         record.selected = selected
         index = self.index(row, 0)
         self.dataChanged.emit(index, index, [self.SelectedRole])
@@ -285,7 +317,7 @@ class FriendImportModel(QAbstractListModel):
     def selectFirstValid(self) -> None:
         selected = 0
         for record in self._records:
-            record.selected = record.valid and selected < 20
+            record.selected = record.valid and selected < self._selection_limit
             if record.selected:
                 selected += 1
         if self._records:
