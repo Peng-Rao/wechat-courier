@@ -94,6 +94,12 @@ ERROR_RECOVERY_HINTS = {
     "SUBMIT_NOT_TRIGGERED": "未能安全命中“确定”按钮，本条未提交；请检查微信窗口后重新开始。",
     "DESTRUCTIVE_BOUNDARY_UNKNOWN": "动作已越过发送边界但结果未知；不会自动重发，请人工核对微信记录。",
     "AUTOMATION_ERROR": "自动化步骤失败，请导出诊断包后检查具体原因。",
+    "CLEANUP_FAILED": "任务窗口清理未完成；请处理残留窗口后点击“检测微信恢复”。",
+    "HEALTH_CHECK_FAILED": "自动化健康复检未通过；请确认微信正常后点击“检测微信恢复”。",
+    "EVENT_CLEANUP_FAILED": "自动化事件清理失败；请导出诊断包并点击“检测微信恢复”。",
+    "WINDOW_BLOCKED": "微信被弹窗阻塞；请手动处理弹窗后点击“检测微信恢复”。",
+    "WINDOW_DISABLED": "微信主窗口当前不可交互；请处理弹窗后点击“检测微信恢复”。",
+    "ACTION_DEADLINE_EXCEEDED": "自动化检查超时；请确认微信响应正常后点击“检测微信恢复”。",
 }
 
 HEALTH_FAILURE_REASONS = frozenset(ERROR_RECOVERY_HINTS) | {
@@ -1070,7 +1076,17 @@ class TaskController(QObject):
 
     @Property(str, notify=executionStateChanged)
     def recoveryHint(self):
-        return ERROR_RECOVERY_HINTS.get(self._current_error_code, "")
+        task_hint = ERROR_RECOVERY_HINTS.get(self._current_error_code, "")
+        if not self._agent.automationReady:
+            environment_hint = ERROR_RECOVERY_HINTS.get(self._agent.reasonCode, "")
+            if environment_hint and environment_hint != task_hint:
+                if self._current_error_code in {
+                    "RESULT_UNKNOWN", "RESULT_VERIFICATION_FAILED", "DESTRUCTIVE_BOUNDARY_UNKNOWN",
+                    "RISK_CONTROL", "GATE_SAFETY", "UNSUPPORTED_VERSION", "WECHAT_UNRESPONSIVE",
+                }:
+                    return task_hint + " " + environment_hint
+                return environment_hint
+        return task_hint
 
     @Property(int, notify=executionStateChanged)
     def retryAttempt(self):
@@ -1753,7 +1769,8 @@ class TaskController(QObject):
 
     @Slot()
     def detectWechatRecovery(self) -> None:
-        self._agent.inspect()
+        if not self._active:
+            self._agent.inspect()
 
     @Slot(result=bool)
     def restartWechatAfterFailure(self) -> bool:

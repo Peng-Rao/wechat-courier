@@ -156,10 +156,44 @@ TestCase {
     function init() {
         taskBackend.active = false
         taskBackend.kind = ""
+        agentBackend.canStartTask = true
+        agentBackend.automationReady = true
+        friendModel.clear()
         app.workspaceIndex = 0
         wait(20)
         if (messageWorkspace() !== null) messageWorkspace().monitorDismissed = false
         if (friendWorkspace() !== null) friendWorkspace().monitorDismissed = false
+    }
+
+    function test_recovered_health_unlocks_both_start_buttons_only_after_task_finishes() {
+        friendModel.append({friendName: "Mock", relationshipChoice: "", account: "mock_only", greeting: "hello", remark: "",
+                            valid: true, error: "", status: "pending", selected: true,
+                            relationship: "", relationshipSource: "global"})
+        friendModel.selectedCount = 1
+        var messages = messageWorkspace()
+        var friends = friendWorkspace()
+        verify(messages !== null)
+        verify(friends !== null)
+        var send = findChild(messages, "startMessageButton")
+        var add = findChild(friends, "startFriendsButton")
+        verify(send !== null)
+        verify(add !== null)
+        taskBackend.kind = "message_send"
+        taskBackend.active = true
+        agentBackend.canStartTask = false
+        agentBackend.automationReady = false
+        compare(send.enabled, false)
+        compare(add.enabled, false)
+        agentBackend.automationReady = true
+        agentBackend.canStartTask = true
+        compare(send.enabled, false)
+        compare(add.enabled, false)
+        taskBackend.active = false
+        tryCompare(send, "enabled", true)
+        tryCompare(add, "enabled", true)
+        agentBackend.canStartTask = false
+        tryCompare(send, "enabled", false)
+        tryCompare(add, "enabled", false)
     }
 
     function test_completed_logs_stay_only_on_the_owning_workspace() {

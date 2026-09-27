@@ -87,6 +87,83 @@ def test_status_health_is_applied_before_forwarding_and_rejects_stale_inspect(tm
     assert backend.agent.healthSnapshot["sequence"] == 3
 
 
+def test_stopped_failed_task_unlocks_on_fresh_health_without_auto_start(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    payload = start_message(backend, client)
+    event(client, payload, step="search_ready", errorCode="TRANSIENT_UI")
+    backend.task.stop()
+    status(client, health(2, sessionReady=False, reasonCode="TRANSIENT_UI"))
+    status(client, health(3))
+    assert backend.task.active is True
+    assert backend.agent.automationReady is True
+    assert backend.task.startMessage() is False
+    finish(client, payload, outcome="error", cleanup={"success": True}, health=health(3))
+
+    assert backend.task.active is False
+    assert backend.task.failureCount == 1
+    assert backend.task.currentStepLabel == "搜索入口准备失败"
+    assert backend.task.safeRetryAvailable is True
+    assert backend.agent.canStartTask is True
+    assert client.restart_count == 0
+    assert len([c for c in client.calls if c[1] == "task.start"]) == 1
+    status(client, health(2, sessionReady=False, reasonCode="TRANSIENT_UI"))
+    assert backend.agent.automationReady is True
+    assert backend.task.startMessage() is True
+
+
+def test_unknown_stopped_item_is_not_retryable_after_automatic_health_restore(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    payload = start_message(backend, client)
+    event(client, payload, step="send_verified", outcome="unknown", errorCode="RESULT_UNKNOWN",
+          destructiveBoundaryCrossed=True)
+    backend.task.stop()
+    status(client, health(3))
+    finish(client, payload, outcome="unknown", cleanup={"success": True})
+    assert backend.agent.automationReady is True
+    assert backend.task.unknownCount == 1
+    assert backend.task.safeRetryAvailable is False
+    assert backend.task.retryFailedItem() is False
+    assert len([c for c in client.calls if c[1] == "task.start"]) == 1
+
+
+def test_manual_recovery_check_does_not_queue_another_inspection_during_stop(tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    payload = start_message(backend, client)
+    backend.task.stop()
+    before = len(client.calls)
+    backend.task.detectWechatRecovery()
+    assert len(client.calls) == before
+    finish(client, payload, outcome="stopped")
+    backend.task.detectWechatRecovery()
+    assert client.calls[-1][1] == "wechat.inspect"
+
+
+@pytest.mark.parametrize("reason", ["CLEANUP_FAILED", "HEALTH_CHECK_FAILED", "EVENT_CLEANUP_FAILED",
+                                   "WINDOW_BLOCKED", "WINDOW_DISABLED", "ACTION_DEADLINE_EXCEEDED"])
+def test_recovery_hint_reports_environment_failure_instead_of_a_safe_retry(reason, tmp_path, qapp):
+    backend, client = make_backend(tmp_path)
+    payload = start_message(backend, client)
+    event(client, payload, errorCode="TRANSIENT_UI")
+    status(client, health(2, sessionReady=False, reasonCode=reason))
+    finish(client, payload, outcome="error")
+    assert "检测微信恢复" in backend.task.recoveryHint
+    assert "可在任务结束后安全重试本条" not in backend.task.recoveryHint
+
+
+@pytest.mark.parametrize("code", ["RISK_CONTROL", "GATE_SAFETY", "RESULT_UNKNOWN"])
+def test_cleanup_failure_keeps_task_safety_guidance(code, tmp_path, qapp):
+    from app.controllers import ERROR_RECOVERY_HINTS
+
+    backend, client = make_backend(tmp_path)
+    payload = start_message(backend, client)
+    event(client, payload, errorCode=code, destructiveBoundaryCrossed=code == "RESULT_UNKNOWN")
+    status(client, health(2, sessionReady=False, reasonCode="CLEANUP_FAILED"))
+    finish(client, payload, outcome="error", cleanup={"success": False})
+
+    assert ERROR_RECOVERY_HINTS[code] in backend.task.recoveryHint
+    assert "检测微信恢复" in backend.task.recoveryHint
+
+
 def test_disconnect_notifies_cleared_health_and_accepts_new_instance(tmp_path, qapp):
     backend, client = make_backend(tmp_path)
     status(client, health(90))

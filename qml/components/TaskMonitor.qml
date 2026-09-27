@@ -574,6 +574,7 @@ Item {
                     Button {
                         visible: root.taskBackend && root.agentBackend && !root.agentBackend.automationReady
                         text: "检测微信恢复"
+                        enabled: root.taskBackend && !root.taskBackend.active
                         onClicked: root.taskBackend.detectWechatRecovery()
                         Layout.fillWidth: true
                     }

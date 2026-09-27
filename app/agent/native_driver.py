@@ -713,6 +713,21 @@ class NativeWeixinDriver:
             result["detail"] = str(exc)
         return result
 
+    def health_window_snapshot(self) -> dict[str, Any]:
+        """Discover current Win32 state even when no UIA session was bound."""
+        check_action_deadline()
+        state = self._window_guard_state()
+        if not state:
+            return self.diagnostic_snapshot()
+        hwnd = int(state.get("hwnd", 0) or 0)
+        responsive = getattr(self._gate_backend, "window_responsive", None)
+        state["windowResponsive"] = bool(
+            hwnd and callable(responsive) and responsive(hwnd, timeout_ms=250)
+        )
+        state["sessionGeneration"] = self._session_generation
+        check_action_deadline()
+        return state
+
     def _check_window_blocked(
         self, *, allow_verify=False, allow_friend_parent=False, defer_uia=False, state=None
     ) -> int:

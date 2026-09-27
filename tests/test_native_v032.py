@@ -63,6 +63,56 @@ def test_same_process_hwnd_rebind_retains_gate_lease(driver):
     assert driver._root is None
 
 
+def test_stop_before_native_bind_keeps_tray_window_restorable_without_creating_session(driver):
+    from app.agent.runtime import TaskControl
+    from app.agent.workflows import WeixinWorkflowEngine
+    from tests.test_task_stop_recovery import make_request
+
+    driver._session = None
+    driver._uia.ControlFromHandle = fail
+    driver._gate_backend.prepare_main_window = fail
+    driver.state.update(windowState="hidden", restorable=True)
+    control = TaskControl()
+    control.request_stop()
+    engine = WeixinWorkflowEngine(driver_factory=lambda: driver)
+    initial = engine.inspect()
+    result = engine.run(make_request(), control, lambda *_: None)
+
+    assert initial["restorable"] is True
+    assert result["cleanup"]["success"] is True
+    assert result["health"]["restorable"] is True
+    assert result["health"]["windowResponsive"] is True
+    assert result["health"]["windowEnabled"] is True
+    assert result["health"]["reasonCode"] == ""
+    assert result["health"]["sequence"] > initial["sequence"]
+    assert driver._session is None
+
+
+@pytest.mark.parametrize("state,code", [
+    ({"windowEnabled": False}, "WINDOW_DISABLED"),
+    ({"blockingWindow": {"hwnd": 404, "pid": 202}}, "WINDOW_BLOCKED"),
+    ({"responsive": False}, "WECHAT_UNRESPONSIVE"),
+])
+def test_unbound_native_stop_preflight_rejects_unsafe_discovered_window(driver, state, code):
+    from app.agent.runtime import TaskControl
+    from app.agent.workflows import WeixinWorkflowEngine
+    from tests.test_task_stop_recovery import make_request
+
+    driver._session = None
+    driver._uia.ControlFromHandle = fail
+    driver._gate_backend.prepare_main_window = fail
+    driver._gate_backend.find_module = fail
+    driver.state.update(state)
+    driver._gate_backend.window_responsive = lambda *_args, **_kwargs: state.get("responsive", True)
+    control = TaskControl()
+    control.request_stop()
+    result = WeixinWorkflowEngine(driver_factory=lambda: driver).run(make_request(), control, lambda *_: None)
+
+    assert result["cleanup"]["success"] is True
+    assert result["health"]["sessionReady"] is False
+    assert result["health"]["reasonCode"] == code
+
+
 def test_each_task_bind_gets_fresh_main_root(driver):
     old = driver._root
     driver.bind_window()

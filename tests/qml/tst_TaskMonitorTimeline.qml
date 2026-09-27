@@ -86,6 +86,50 @@ TestCase {
         return false
     }
 
+    function buttonByText(item, value) {
+        if (item.text === value && item.clicked !== undefined)
+            return item
+        var children = item.children || []
+        for (var i = 0; i < children.length; ++i) {
+            var found = buttonByText(children[i], value)
+            if (found !== null) return found
+        }
+        return null
+    }
+
+    function init() {
+        taskBackend.active = false
+        taskBackend.safeRetryAvailable = false
+        agentBackend.automationReady = true
+        agentBackend.canStartTask = true
+    }
+
+    function test_recovery_detection_waits_for_task_cleanup_to_finish() {
+        agentBackend.automationReady = false
+        agentBackend.canStartTask = false
+        taskBackend.active = true
+        var button = buttonByText(monitor, "检测微信恢复")
+        verify(button !== null)
+        tryCompare(button, "visible", true)
+        compare(button.enabled, false)
+        taskBackend.active = false
+        tryCompare(button, "enabled", true)
+        agentBackend.automationReady = true
+        tryCompare(button, "visible", false)
+    }
+
+    function test_unknown_result_has_no_retry_button_after_environment_recovers() {
+        agentBackend.automationReady = false
+        agentBackend.canStartTask = false
+        var retry = buttonByText(monitor, "安全重试本条")
+        verify(retry !== null)
+        compare(retry.visible, false)
+        agentBackend.automationReady = true
+        agentBackend.canStartTask = true
+        compare(retry.visible, false)
+        compare(taskBackend.unknownCount, 1)
+    }
+
     function test_stopped_row_does_not_display_waiting() {
         taskItems.append({target: "mock_only", detail: "未执行：任务已结束",
                           result: "stopped", duration: "--", stepCode: "", itemId: "one"})

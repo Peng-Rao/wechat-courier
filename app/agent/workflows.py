@@ -12,6 +12,13 @@ from .retry import LayeredRetry, RetryExhausted, TransientUiError, classify_exce
 from .waiters import action_deadline
 
 
+_AUTO_INSPECTION_BLOCKERS = frozenset({
+    "RISK_CONTROL", "GATE_SAFETY", "UNSUPPORTED_VERSION", "WECHAT_UNRESPONSIVE",
+    "WINDOW_BLOCKED", "WINDOW_DISABLED", "EVENT_CLEANUP_FAILED",
+    "UIA_TREE_NOT_READY_AFTER_REFRESH", "ACTION_DEADLINE_EXCEEDED",
+})
+
+
 class WorkflowError(RuntimeError):
     def __init__(
         self,
@@ -93,6 +100,7 @@ class WeixinWorkflowEngine:
         self._last_health = {}
         self._cleanup_blocked = False
         self._last_failure_code = ""
+        self._safety_failure_code = ""
         self._task_kind = ""
 
     def _get_driver(self):
@@ -137,6 +145,7 @@ class WeixinWorkflowEngine:
                     "health": dict(self._last_health)}
         driver = self._get_driver()
         self._last_failure_code = ""
+        self._safety_failure_code = ""
         self._task_kind = request.kind
         self._active_task_id = request.task_id
         self._progress_emit = emit
@@ -154,7 +163,14 @@ class WeixinWorkflowEngine:
                       "detail": "任务已在执行前安全停止"}
         except Exception as exc:
             failure = classify_exception(exc)
-            self._last_failure_code = failure.code if failure else "AUTOMATION_ERROR"
+            self._last_failure_code = getattr(exc, "error_code", "") or (
+                failure.code if failure else {
+                    "RiskControlError": "RISK_CONTROL",
+                    "AccessibilitySafetyError": "GATE_SAFETY",
+                    "UnsupportedWeixinVersion": "UNSUPPORTED_VERSION",
+                }.get(type(exc).__name__, "AUTOMATION_ERROR")
+            )
+            self._remember_safety_failure(self._last_failure_code)
             result = {"outcome": "error", "done": 0, "total": len(request.items),
                       "success": 0, "error": 0, "unknown": 0, "stopped": 0,
                       "detail": str(exc), "errorCode": self._last_failure_code}
@@ -168,29 +184,14 @@ class WeixinWorkflowEngine:
                     if not isinstance(cleanup, dict):
                         cleanup = {"success": cleanup is not False}
             except Exception as exc:
-                cleanup = {"success": False, "reasonCode": "CLEANUP_FAILED",
+                failure = classify_exception(exc)
+                reason = getattr(exc, "error_code", "") or (
+                    failure.code if failure else "CLEANUP_FAILED"
+                )
+                cleanup = {"success": False, "reasonCode": reason,
                            "detail": str(exc)}
             self._cleanup_blocked = not bool(cleanup.get("success"))
-            try:
-                if not self._cleanup_blocked and not self._last_failure_code:
-                    health = self._driver_action("health", "inspect", self.inspect)
-                else:
-                    snapshotter = getattr(driver, "diagnostic_snapshot", None)
-                    snapshot = dict(snapshotter()) if callable(snapshotter) else {}
-                    observed = {key: snapshot[key] for key in (
-                        "sessionGeneration", "windowResponsive", "windowEnabled",
-                        "blockingWindow", "hwnd", "pid", "version",
-                    ) if key in snapshot and snapshot[key] is not None}
-                    health = self._stamp_health({
-                        **self._last_health, **observed,
-                        "sessionGeneration": self._session_generation(),
-                        "sessionReady": False, "uiaReady": False,
-                        "reasonCode": cleanup.get("reasonCode") or self._last_failure_code,
-                        "degradedReason": cleanup.get("reasonCode") or self._last_failure_code,
-                    })
-            except Exception:
-                health = self._stamp_health({**self._last_health, "sessionReady": False,
-                                            "reasonCode": "HEALTH_CHECK_FAILED"})
+            health = self._post_task_health(cleanup)
             emit("agent.status", {"status": "health", "health": health})
             if result is not None:
                 result.update(cleanup=cleanup, health=health)
@@ -198,6 +199,61 @@ class WeixinWorkflowEngine:
             self._active_task_id = ""
             self._active_item_id = ""
         return result
+
+    def _post_task_health(self, cleanup: dict[str, Any]) -> dict[str, Any]:
+        observed = {}
+
+        def blocked(reason, detail=""):
+            return self._stamp_health({
+                **self._last_health, **observed,
+                "sessionGeneration": self._session_generation(),
+                "sessionReady": False, "uiaReady": False,
+                "reasonCode": reason, "degradedReason": reason,
+                "detail": detail or reason,
+            })
+
+        def check_health():
+            nonlocal observed
+            snapshotter = getattr(self._driver, "health_window_snapshot", None)
+            if not callable(snapshotter):
+                snapshotter = getattr(self._driver, "diagnostic_snapshot", None)
+            snapshot = dict(snapshotter()) if callable(snapshotter) else {}
+            observed = {key: snapshot[key] for key in (
+                "sessionGeneration", "windowResponsive", "windowEnabled",
+                "blockingWindow", "hwnd", "pid", "version", "windowState", "restorable",
+            ) if key in snapshot}
+            if self._cleanup_blocked:
+                return blocked(cleanup.get("reasonCode") or "CLEANUP_FAILED", cleanup.get("detail", ""))
+            if self._safety_failure_code:
+                return blocked(self._safety_failure_code)
+            if snapshot.get("windowState") == "missing":
+                return blocked("WECHAT_NOT_FOUND")
+            if snapshot.get("windowResponsive") is False:
+                return blocked("WECHAT_UNRESPONSIVE")
+            if snapshot.get("blockingWindow"):
+                return blocked("WINDOW_BLOCKED")
+            if snapshot.get("windowEnabled") is False:
+                return blocked("WINDOW_DISABLED")
+            if callable(snapshotter) and any(
+                snapshot.get(key) is not True
+                for key in ("windowResponsive", "windowEnabled")
+            ):
+                return blocked("HEALTH_CHECK_FAILED", "Window state could not be verified")
+            # Task errors describe delivery, not the health of the next task.
+            return self.inspect()
+
+        try:
+            return self._driver_action("health", "inspect", check_health)
+        except Exception as exc:
+            failure = classify_exception(exc)
+            reason = getattr(exc, "error_code", "") or (
+                failure.code if failure else "HEALTH_CHECK_FAILED"
+            )
+            return blocked(reason, str(exc))
+
+    def _remember_safety_failure(self, code: str) -> None:
+        if code in _AUTO_INSPECTION_BLOCKERS and not self._safety_failure_code:
+            self._safety_failure_code = code
 
     def _run_items(self, request: TaskRequest, control, emit) -> dict[str, Any]:
         if request.kind == "friend_add" and len(request.items) > request.options.friend_batch_limit:
@@ -593,6 +649,8 @@ class WeixinWorkflowEngine:
         wechat_responsive: bool = True,
         error_code: str = "",
     ) -> None:
+        if outcome in {"error", "unknown"}:
+            self._remember_safety_failure(error_code)
         if outcome == "error" and error_code not in {
             "TARGET_NOT_FOUND", "TARGET_NOT_UNIQUE", "ACCOUNT_NOT_FOUND",
         }:
@@ -982,12 +1040,12 @@ class WeixinWorkflowEngine:
             )
         try:
             try:
-                if action != "bind_window":
-                    self._check_driver_responsive(self._driver)
                 self._emit_action_progress(step, action, "uia_action_started")
-                self._record_diagnostic(stage=step, action=action, outcome="started",
-                                        session_generation=self._session_generation())
                 with action_deadline():
+                    if action not in {"bind_window", "finish_task", "inspect"}:
+                        self._check_driver_responsive(self._driver)
+                    self._record_diagnostic(stage=step, action=action, outcome="started",
+                                            session_generation=self._session_generation())
                     result = callback()
                     returned_false = result is False
                     if result is False and action in {
@@ -995,9 +1053,11 @@ class WeixinWorkflowEngine:
                         "open_friend_request",
                     }:
                         raise TransientUiError("界面前置条件未满足：" + action)
-            except WorkflowError:
+            except WorkflowError as exc:
+                self._remember_safety_failure(exc.error_code)
                 raise
             except RiskControlError as exc:
+                self._remember_safety_failure("RISK_CONTROL")
                 self._record_diagnostic(
                     stage=step,
                     action=action,
@@ -1019,6 +1079,7 @@ class WeixinWorkflowEngine:
                         "AccessibilitySafetyError": "GATE_SAFETY",
                     }.get(type(exc).__name__, "AUTOMATION_ERROR")
                 )
+                self._remember_safety_failure(error_code)
                 fatal_batch = type(exc).__name__ in {
                     "UnsupportedWeixinVersion",
                     "AccessibilitySafetyError",
