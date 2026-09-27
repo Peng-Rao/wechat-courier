@@ -388,12 +388,7 @@ class FriendController(QObject):
 
     def _set_interval_min(self, value):
         value = max(1.0, min(300.0, float(value)))
-        value = min(value, self._interval_max)
-        if value == self._interval_min:
-            return
-        self._interval_min = value
-        self._settings.setValue("friends/intervalMin", value)
-        self.intervalMinChanged.emit(value)
+        self._update_interval(value, max(value, self._interval_max))
 
     intervalMin = Property(
         float, _get_interval_min, _set_interval_min, notify=intervalMinChanged
@@ -404,12 +399,22 @@ class FriendController(QObject):
 
     def _set_interval_max(self, value):
         value = max(1.0, min(300.0, float(value)))
-        value = max(value, self._interval_min)
-        if value == self._interval_max:
+        self._update_interval(min(value, self._interval_min), value)
+
+    def _update_interval(self, minimum, maximum):
+        if self._batch_limit_locked:
             return
-        self._interval_max = value
-        self._settings.setValue("friends/intervalMax", value)
-        self.intervalMaxChanged.emit(value)
+        old_min, old_max = self._interval_min, self._interval_max
+        if (minimum, maximum) == (old_min, old_max):
+            return
+        self._interval_min, self._interval_max = minimum, maximum
+        self._settings.setValue("friends/intervalMin", minimum)
+        self._settings.setValue("friends/intervalMax", maximum)
+        self._settings.sync()
+        if minimum != old_min:
+            self.intervalMinChanged.emit(minimum)
+        if maximum != old_max:
+            self.intervalMaxChanged.emit(maximum)
 
     intervalMax = Property(
         float, _get_interval_max, _set_interval_max, notify=intervalMaxChanged
@@ -906,6 +911,7 @@ class TaskController(QObject):
         self._cleanup_result: dict[str, Any] = {}
         self._task_events: list[dict[str, Any]] = []
         self._finished_result: dict[str, Any] = {}
+        self._waiting_remaining = 0.0
         self._acceptance_enabled = os.environ.get("WECHAT_COURIER_ACCEPTANCE") == "1"
         self._error = ""
         self._original_payload: dict[str, Any] | None = None
@@ -1074,6 +1080,56 @@ class TaskController(QObject):
     def currentErrorCode(self):
         return self._current_error_code
 
+    @Property(bool, notify=executionStateChanged)
+    def taskWindowReady(self):
+        health = self._agent.healthSnapshot
+        blocker = self._agent.blockingWindow
+        return bool(
+            self._active and self._agent.connected and self._agent.versionSupported
+            and self._agent.windowResponsive and self._agent.sessionReady
+            and health.get("taskId") == self._task_id
+            and health.get("taskWindowReady") is True
+            and health.get("taskWindowRole") in {"main", "friend_search", "friend_request"}
+            and self._agent.reasonCode not in HEALTH_FAILURE_REASONS
+            and not health.get("degradedReason")
+            and (not blocker or blocker.get("hwnd") == health.get("taskWindowHwnd"))
+            and (self._agent.windowEnabled or health.get("taskWindowRole") != "main")
+        )
+
+    @Property(str, notify=executionStateChanged)
+    def automationStatus(self):
+        agent = self._agent
+        if not agent.connected or not agent.processDetected:
+            return "自动化未就绪"
+        if not agent.windowResponsive:
+            return "微信窗口无响应"
+        if self._active and agent.reasonCode == "TASK_WINDOW_RELEASED":
+            return "自动化已暂停" if self._phase == "paused" else "正在整理任务窗口"
+        if (not agent.windowEnabled or agent.blockingWindow) and not self.taskWindowReady:
+            return "微信窗口被阻挡"
+        if self.taskWindowReady:
+            if self._phase == "paused":
+                return "自动化已暂停"
+            if self._phase == "stopping":
+                return "正在安全停止"
+            return "自动化执行中"
+        if agent.automationReady:
+            return "自动化已就绪"
+        if agent.canStartTask and not agent.sessionReady:
+            return "正在恢复微信" if self._active else "会话待恢复"
+        return "自动化未就绪"
+
+    @Property(float, notify=executionStateChanged)
+    def waitingRemaining(self):
+        return self._waiting_remaining if self._active and self._phase == "running" else 0.0
+
+    @Property(str, notify=executionStateChanged)
+    def intervalLabel(self):
+        options = (self._original_payload or {}).get("options", {})
+        if not options:
+            return ""
+        return f"本批间隔 {options.get('intervalMin', 0):g}–{options.get('intervalMax', 0):g} 秒"
+
     @Property(str, notify=executionStateChanged)
     def recoveryHint(self):
         task_hint = ERROR_RECOVERY_HINTS.get(self._current_error_code, "")
@@ -1175,13 +1231,18 @@ class TaskController(QObject):
     def _set_phase(self, phase: str) -> None:
         if phase != self._phase:
             self._phase = phase
+            if phase != "running":
+                self._waiting_remaining = 0.0
             self.phaseChanged.emit()
+            self.executionStateChanged.emit()
 
     def _set_active(self, active: bool) -> None:
         if active != self._active:
             self._active = active
             self._friends.set_batch_limit_locked(active)
+            self._waiting_remaining = 0.0
             self.activeChanged.emit()
+            self.executionStateChanged.emit()
 
     def _set_kind(self, kind: str) -> None:
         if kind != self._kind:
@@ -1266,6 +1327,8 @@ class TaskController(QObject):
 
     @Slot()
     def _on_connection_lost(self) -> None:
+        self._waiting_remaining = 0.0
+        self.executionStateChanged.emit()
         if not self._active:
             return
         recovery = self._agent.recoverySnapshot()
@@ -1648,6 +1711,7 @@ class TaskController(QObject):
     @Slot(str, object)
     def _on_notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "task.event" and params.get("taskId") == self._task_id:
+            self._waiting_remaining = 0.0
             params = dict(params)
             self._task_events.append(copy.deepcopy(params))
             if self._recovery_offset:
@@ -1748,6 +1812,13 @@ class TaskController(QObject):
             self.executionStateChanged.emit()
         elif method == "agent.status":
             status = str(params.get("status", ""))
+            if self._active and params.get("taskId") == self._task_id:
+                if status == "waiting" and self._phase == "running":
+                    self._waiting_remaining = max(0.0, float(params.get("remaining", 0)))
+                    self.executionStateChanged.emit()
+                elif status in {"uia_action_started", "paused"}:
+                    self._waiting_remaining = 0.0
+                    self.executionStateChanged.emit()
             if status == "recovered" and self._pending_resume:
                 self._agent.inspect()
             elif status == "recovery_failed" and self._pending_resume:

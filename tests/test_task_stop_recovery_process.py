@@ -12,7 +12,8 @@ from app.agent.client import AgentClient
 from app.backend import BackendController
 
 
-def test_real_agent_stop_rechecks_before_unlock_and_accepts_next_task(qapp, qtbot, tmp_path):
+def test_real_agent_stop_rechecks_before_unlock_and_accepts_next_task(qapp, qtbot, tmp_path, monkeypatch):
+    monkeypatch.setenv("WECHAT_COURIER_ACCEPTANCE", "1")
     pipe = "wuge-stop-recovery-" + uuid.uuid4().hex
     token = secrets.token_hex(32)
     environment = dict(
@@ -99,6 +100,30 @@ def test_real_agent_stop_rechecks_before_unlock_and_accepts_next_task(qapp, qtbo
         assert backend.agent.healthSnapshot["sequence"] > first_health["sequence"]
         assert process.poll() is None
         assert sum(m == "task.finished" for m, _ in notices) == 2
+        second_id = backend.task._task_id
+        bound_index = next(i for i, (m, p) in enumerate(notices)
+                           if m == "agent.status" and p.get("health", {}).get("taskId") == second_id
+                           and p["health"].get("taskWindowReady"))
+        search_index = next(i for i, (m, p) in enumerate(notices)
+                            if m == "agent.status" and p.get("taskId") == second_id
+                            and p.get("action") == "ensure_search_ready")
+        assert bound_index < search_index
+        for index in range(2):
+            backend.friends.model.appendEmptyRecord()
+            backend.friends.model.setCell(index, "account", f"mock_only_{index}")
+            backend.friends.model.setCell(index, "name", f"Mock {index}")
+        backend.friends.intervalMax = 1
+        assert backend.task.startFriends()
+        assert backend.task._original_payload["options"]["intervalMin"] == 1
+        assert backend.task._original_payload["options"]["intervalMax"] == 1
+        backend.friends.intervalMin = 100
+        assert backend.friends.intervalMin == 1
+        qtbot.waitUntil(lambda: backend.task.waitingRemaining > 0, timeout=3000)
+        assert backend.task.automationStatus == "自动化执行中"
+        assert backend.task.waitingRemaining <= 1
+        qtbot.waitUntil(lambda: not backend.task.active, timeout=4000)
+        assert backend.task.waitingRemaining == 0
+        assert backend.task.successCount == 2
     finally:
         if client.connected:
             client.call("agent.shutdown")
@@ -152,8 +177,11 @@ def test_real_agent_watchdog_terminates_blocked_health_preflight(qapp, qtbot, tm
         assert process.returncode == 70
         assert time.monotonic() - health_started[0] < 4.0
         assert not any(method == "task.finished" for method, _ in notices)
+        health_index = next(i for i, (method, payload) in enumerate(notices)
+                            if method == "agent.status" and payload.get("status") == "uia_action_started"
+                            and payload.get("step") == "health")
         assert not any(method == "agent.status" and payload.get("health", {}).get("sessionReady")
-                       for method, payload in notices)
+                       for method, payload in notices[health_index:])
     finally:
         client.close()
         if process.poll() is None:

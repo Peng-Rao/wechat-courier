@@ -10,6 +10,11 @@ TestCase {
 
     QtObject {
         id: mockBackend
+        property QtObject task: QtObject {
+            property bool acceptanceEnabled: false
+            property bool taskWindowReady: false
+            property string automationStatus: "自动化未就绪"
+        }
         property QtObject agent: QtObject {
             property bool connected: false
             property bool wechatConnected: false
@@ -37,6 +42,14 @@ TestCase {
 
     function test_titlebar_height() {
         compare(titleBar.height, 40)
+    }
+
+    function test_shared_automation_status() {
+        mockBackend.task.automationStatus = "自动化执行中"
+        compare(findChild(titleBar, "titleAutomationHealth").text, "自动化执行中")
+        mockBackend.task.automationStatus = "微信窗口无响应"
+        compare(findChild(titleBar, "titleAutomationHealth").text, "微信窗口无响应")
+        mockBackend.task.automationStatus = "自动化未就绪"
     }
 
     function test_titlebar_does_not_change_visual_preferences() {

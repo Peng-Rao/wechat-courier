@@ -14,6 +14,10 @@ TestCase {
         id: taskBackend
         property bool acceptanceEnabled: false
         property bool active: false
+        property string automationStatus: ""
+        property bool taskWindowReady: false
+        property real waitingRemaining: 0
+        property string intervalLabel: "本批间隔 1–5 秒"
         property bool cleanupFailed: false
         property var cleanupResult: ({})
         property string currentOutcome: "error"
@@ -116,6 +120,28 @@ TestCase {
         tryCompare(button, "enabled", true)
         agentBackend.automationReady = true
         tryCompare(button, "visible", false)
+    }
+
+    function test_task_window_health_and_countdown() {
+        taskBackend.active = true
+        taskBackend.phase = "running"
+        taskBackend.taskWindowReady = true
+        taskBackend.automationStatus = "自动化执行中"
+        agentBackend.windowEnabled = false
+        agentBackend.automationReady = false
+        taskBackend.waitingRemaining = 2.5
+        compare(findChild(monitor, "taskSessionHealth").text, "自动化执行中")
+        compare(findChild(monitor, "taskWindowHealth").text, "任务窗口正常")
+        compare(findChild(monitor, "taskIntervalCountdown").text, "下一条将在 3 秒后开始 · 本批间隔 1–5 秒")
+        compare(buttonByText(monitor, "检测微信恢复").visible, false)
+        taskBackend.phase = "paused"
+        compare(findChild(monitor, "taskIntervalCountdown").text, "已暂停 · 本批间隔 1–5 秒")
+        taskBackend.active = false
+        taskBackend.taskWindowReady = false
+        taskBackend.automationStatus = ""
+        taskBackend.waitingRemaining = 0
+        agentBackend.windowEnabled = true
+        agentBackend.automationReady = true
     }
 
     function test_unknown_result_has_no_retry_button_after_environment_recovers() {

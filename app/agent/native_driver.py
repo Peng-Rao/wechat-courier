@@ -1365,6 +1365,9 @@ class NativeWeixinDriver:
             "sessionGeneration": self._session_generation,
             "windowResponsive": True,
         }
+        result.update(self.verified_task_health(
+            "friend_search" if parent_hwnd else "main", parent_hwnd or hwnd
+        ))
         restore_result = window_restore or safe_attr(
             self._session, "window_restore"
         )
@@ -1372,6 +1375,46 @@ class NativeWeixinDriver:
         if callable(as_dict):
             result["windowRestore"] = as_dict()
         return result
+
+    def verified_task_health(self, role=None, hwnd=None) -> dict[str, Any]:
+        """Publish already-verified task windows without re-inspecting the UIA tree."""
+        import win32gui
+
+        if role is None:
+            import win32process
+
+            # Submission may destroy both auxiliary windows; never attest their
+            # cached HWNDs after they disappear or are reused by another process.
+            for attribute in ("_verify_hwnd", "_add_hwnd"):
+                candidate = int(getattr(self, attribute, 0) or 0)
+                if candidate and not (
+                    win32gui.IsWindow(candidate) and win32gui.IsWindowVisible(candidate)
+                    and win32process.GetWindowThreadProcessId(candidate)[1] == self._session.pid
+                ):
+                    setattr(self, attribute, 0)
+            hwnd = self._verify_hwnd or self._add_hwnd or self._session.hwnd
+            role = ("friend_request" if self._verify_hwnd else
+                    "friend_search" if self._add_hwnd else "main")
+        self.ensure_window_responsive(hwnd)
+        if not win32gui.IsWindowEnabled(hwnd):
+            raise WindowBlockedError("The verified task window is disabled")
+        guard = self._window_guard_state()
+        blocker = guard.get("blockingWindow")
+        if blocker and int(blocker.get("hwnd", 0)) != hwnd:
+            raise WindowBlockedError("An unverified modal window blocks the task")
+        if not guard.get("windowEnabled", True) and role == "main":
+            raise WindowBlockedError("The main window is disabled")
+        return {
+            **guard,
+            "pid": self._session.pid, "hwnd": self._session.hwnd,
+            "version": self._session.version, "connected": True,
+            "supported": True, "processDetected": True, "versionSupported": True,
+            "sessionReady": True, "uiaReady": True, "restorable": False,
+            "sessionGeneration": self._session_generation,
+            "windowResponsive": True, "windowState": "visible",
+            "taskWindowReady": True, "taskWindowRole": role, "taskWindowHwnd": hwnd,
+            "reasonCode": "", "degradedReason": "", "detail": "Task window verified",
+        }
 
     @staticmethod
     def _bind_retry_is_safe(exc: Exception) -> bool:

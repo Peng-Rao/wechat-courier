@@ -24,6 +24,12 @@ class ProcessDriver(RecoveryDriver):
         time.sleep(0.1)
         return super().inspect()
 
+    def bind_window(self):
+        return {**super().bind_window(), "processDetected": True, "versionSupported": True,
+                "sessionReady": True, "uiaReady": True, "restorable": False,
+                "reasonCode": "", "degradedReason": "", "taskWindowReady": True,
+                "taskWindowRole": "main", "taskWindowHwnd": self.window["hwnd"]}
+
     def health_window_snapshot(self):
         if os.environ.get("STOP_RECOVERY_FIXTURE_BLOCK_HEALTH") == "1":
             time.sleep(60)

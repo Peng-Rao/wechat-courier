@@ -7,6 +7,7 @@ Popup {
     id: root
     property var appBackend: null
     property int sectionIndex: 0
+    property string intervalValidation: ""
     readonly property bool interactionLocked: !!(
         appBackend && appBackend.task && appBackend.task.active
     )
@@ -30,6 +31,15 @@ Popup {
 
     onInteractionLockedChanged: {
         if (root.interactionLocked && root.opened) root.close()
+    }
+    onAboutToHide: {
+        friendIntervalMin.commit()
+        friendIntervalMax.commit()
+    }
+    onAboutToShow: {
+        friendIntervalMin.reset()
+        friendIntervalMax.reset()
+        intervalValidation = ""
     }
 
     Overlay.modal: Rectangle { color: WxTheme.isDark ? "#99070a0d" : "#660e1820" }
@@ -68,6 +78,7 @@ Popup {
             }
             Button {
                 id: closeButton
+                objectName: "settingsCloseButton"
                 Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                     ? "settingsCloseButton" : "关闭设置"
                 anchors.right: parent.right
@@ -279,26 +290,34 @@ Popup {
                         }
                         SettingsRow {
                             title: "请求间隔"
-                            description: "可配置 1 至 300 秒"
+                            description: root.intervalValidation || "每条结束后额外等待，1 至 300 秒"
                             RowLayout {
-                                TextField {
+                                SettingsIntervalField {
+                                    id: friendIntervalMin
                                     objectName: "settingsFriendIntervalMin"
+                                    Accessible.name: "settingsFriendIntervalMin"
                                     Layout.preferredWidth: 72
-                                    text: root.appBackend ? root.appBackend.friends.intervalMin : "15"
-                                    validator: IntValidator { bottom: 1; top: 300 }
-                                    onEditingFinished: root.applyIfUnlocked(function() {
-                                        root.appBackend.friends.intervalMin = Number(text)
-                                    })
+                                    savedValue: root.appBackend ? root.appBackend.friends.intervalMin : 15
+                                    interactionLocked: root.interactionLocked
+                                    onCommitted: function(value) {
+                                        root.applyIfUnlocked(function() { root.appBackend.friends.intervalMin = value })
+                                        root.intervalValidation = ""
+                                    }
+                                    onInvalidInput: root.intervalValidation = "请输入 1 至 300 的整数，已恢复保存值"
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
-                                TextField {
+                                SettingsIntervalField {
+                                    id: friendIntervalMax
                                     objectName: "settingsFriendIntervalMax"
+                                    Accessible.name: "settingsFriendIntervalMax"
                                     Layout.preferredWidth: 72
-                                    text: root.appBackend ? root.appBackend.friends.intervalMax : "30"
-                                    validator: IntValidator { bottom: 1; top: 300 }
-                                    onEditingFinished: root.applyIfUnlocked(function() {
-                                        root.appBackend.friends.intervalMax = Number(text)
-                                    })
+                                    savedValue: root.appBackend ? root.appBackend.friends.intervalMax : 30
+                                    interactionLocked: root.interactionLocked
+                                    onCommitted: function(value) {
+                                        root.applyIfUnlocked(function() { root.appBackend.friends.intervalMax = value })
+                                        root.intervalValidation = ""
+                                    }
+                                    onInvalidInput: root.intervalValidation = "请输入 1 至 300 的整数，已恢复保存值"
                                 }
                                 Text { text: "秒"; color: WxTheme.clTextSecondary }
                             }
@@ -491,6 +510,7 @@ Popup {
                 anchors.rightMargin: 16
                 anchors.verticalCenter: parent.verticalCenter
                 text: "完成"
+                objectName: "settingsDoneButton"
                 onClicked: root.close()
                 contentItem: Text {
                     text: parent.text

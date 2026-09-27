@@ -492,9 +492,9 @@ Item {
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: statusDetails.implicitHeight + 24
-                        color: root.agentBackend && (!root.agentBackend.windowResponsive || !root.agentBackend.windowEnabled)
+                        color: root.agentBackend && (!root.agentBackend.windowResponsive || (!root.agentBackend.windowEnabled && !(root.taskBackend && root.taskBackend.taskWindowReady)))
                             ? WxTheme.clDangerSoft : WxTheme.clInfoSoft
-                        border.color: root.agentBackend && (!root.agentBackend.windowResponsive || !root.agentBackend.windowEnabled)
+                        border.color: root.agentBackend && (!root.agentBackend.windowResponsive || (!root.agentBackend.windowEnabled && !(root.taskBackend && root.taskBackend.taskWindowReady)))
                             ? WxTheme.clDangerNew : WxTheme.clInfoBorder
                         radius: WxTheme.radiusMedium
                         ColumnLayout {
@@ -514,7 +514,9 @@ Item {
                                     objectName: "taskSessionHealth"
                                     Accessible.role: Accessible.StaticText
                                     Accessible.name: text
-                                    text: root.agentBackend && root.agentBackend.automationReady
+                                    text: root.taskBackend && root.taskBackend.automationStatus
+                                        ? root.taskBackend.automationStatus
+                                        : root.agentBackend && root.agentBackend.automationReady
                                         ? "已就绪 · 第 " + root.agentBackend.sessionGeneration + " 代"
                                         : root.agentBackend && root.agentBackend.canStartTask ? "会话待恢复" : "未就绪"
                                     color: WxTheme.clTextPrimary
@@ -531,10 +533,11 @@ Item {
                                     Accessible.name: text
                                     text: !root.agentBackend || !root.agentBackend.processDetected ? "未连接"
                                         : !root.agentBackend.windowResponsive ? "无响应"
+                                        : root.taskBackend && root.taskBackend.taskWindowReady ? "任务窗口正常"
                                         : !root.agentBackend.windowEnabled || root.agentBackend.blockingWindow ? "被阻挡"
                                         : root.agentBackend.canStartTask && !root.agentBackend.automationReady ? "待恢复" : "响应正常"
                                     color: root.agentBackend && root.agentBackend.windowResponsive
-                                        && root.agentBackend.windowEnabled && !root.agentBackend.blockingWindow
+                                        && ((root.taskBackend && root.taskBackend.taskWindowReady) || (root.agentBackend.windowEnabled && !root.agentBackend.blockingWindow))
                                         ? WxTheme.clTextPrimary : WxTheme.clDangerNew
                                     font.pixelSize: WxTheme.fontSizeTiny
                                     font.bold: true
@@ -572,7 +575,7 @@ Item {
                         Layout.fillWidth: true
                     }
                     Button {
-                        visible: root.taskBackend && root.agentBackend && !root.agentBackend.automationReady
+                        visible: root.taskBackend && root.agentBackend && !root.agentBackend.automationReady && !root.taskBackend.taskWindowReady
                         text: "检测微信恢复"
                         enabled: root.taskBackend && !root.taskBackend.active
                         onClicked: root.taskBackend.detectWechatRecovery()
@@ -613,7 +616,17 @@ Item {
                         font.bold: true
                     }
                     Text {
-                        text: "暂停和停止会在安全步骤生效"
+                        objectName: "taskIntervalCountdown"
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
+                        text: root.taskBackend && root.taskBackend.active
+                            ? (root.taskBackend.phase === "paused" ? "已暂停"
+                                : root.taskBackend.phase === "stopping" ? "正在安全停止"
+                                : root.taskBackend.waitingRemaining > 0
+                                    ? "下一条将在 " + Math.ceil(root.taskBackend.waitingRemaining) + " 秒后开始"
+                                    : "正在处理当前项目")
+                                + (root.taskBackend.intervalLabel ? " · " + root.taskBackend.intervalLabel : "")
+                            : "暂停和停止会在安全步骤生效"
                         color: WxTheme.clTextHint
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeTiny

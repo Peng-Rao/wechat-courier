@@ -119,7 +119,7 @@ Rectangle {
                     width: 8
                     height: 8
                     radius: 4
-                    color: root.titleBackend && root.titleBackend.agent.automationReady
+                    color: root.titleBackend && (root.titleBackend.agent.automationReady || (root.titleBackend.task && root.titleBackend.task.taskWindowReady))
                         ? WxTheme.clPrimary
                         : (root.titleBackend && root.titleBackend.agent.processDetected
                             && !root.titleBackend.agent.windowResponsive
@@ -129,7 +129,9 @@ Rectangle {
                     objectName: "titleAutomationHealth"
                     Accessible.role: Accessible.StaticText
                     Accessible.name: text
-                    text: root.titleBackend && root.titleBackend.agent.automationReady
+                    text: root.titleBackend && root.titleBackend.task && root.titleBackend.task.automationStatus
+                        ? root.titleBackend.task.automationStatus
+                        : root.titleBackend && root.titleBackend.agent.automationReady
                         ? "自动化已就绪"
                         : root.titleBackend && root.titleBackend.agent.processDetected
                             && !root.titleBackend.agent.windowResponsive

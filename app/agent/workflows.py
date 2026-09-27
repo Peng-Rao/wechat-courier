@@ -519,6 +519,7 @@ class WeixinWorkflowEngine:
             duration = min(1.0, remaining)
             self._sleep(duration)
             remaining -= duration
+        emit("agent.status", {"status": "waiting", "taskId": request.task_id, "remaining": 0})
 
     def _mark_boundary(
         self,
@@ -1042,6 +1043,8 @@ class WeixinWorkflowEngine:
             try:
                 self._emit_action_progress(step, action, "uia_action_started")
                 with action_deadline():
+                    if action == "finish_task":
+                        self._invalidate_task_health("TASK_WINDOW_RELEASED")
                     if action not in {"bind_window", "finish_task", "inspect"}:
                         self._check_driver_responsive(self._driver)
                     self._record_diagnostic(stage=step, action=action, outcome="started",
@@ -1053,11 +1056,34 @@ class WeixinWorkflowEngine:
                         "open_friend_request",
                     }:
                         raise TransientUiError("界面前置条件未满足：" + action)
+                    health = result if action == "bind_window" else None
+                    if result is True and action in {
+                        "open_add_friend", "open_friend_request", "cancel_friend_request",
+                        "verify_friend_request",
+                    }:
+                        snapshotter = getattr(self._driver, "verified_task_health", None)
+                        if callable(snapshotter):
+                            try:
+                                health = snapshotter()
+                            except Exception as exc:
+                                if action != "verify_friend_request":
+                                    raise
+                                # A confirmed submission must stay confirmed even if
+                                # its surviving window cannot be used by the next item.
+                                failure = classify_exception(exc)
+                                code = failure.code if failure else "HEALTH_CHECK_FAILED"
+                                self._remember_safety_failure(code)
+                                self._invalidate_task_health(code)
+                        elif action == "verify_friend_request":
+                            self._invalidate_task_health("TASK_WINDOW_RELEASED")
+                    if isinstance(health, dict) and health.get("sessionReady") is True:
+                        self._publish_task_health(health)
             except WorkflowError as exc:
                 self._remember_safety_failure(exc.error_code)
                 raise
             except RiskControlError as exc:
                 self._remember_safety_failure("RISK_CONTROL")
+                self._invalidate_task_health("RISK_CONTROL")
                 self._record_diagnostic(
                     stage=step,
                     action=action,
@@ -1080,6 +1106,7 @@ class WeixinWorkflowEngine:
                     }.get(type(exc).__name__, "AUTOMATION_ERROR")
                 )
                 self._remember_safety_failure(error_code)
+                self._invalidate_task_health(error_code)
                 fatal_batch = type(exc).__name__ in {
                     "UnsupportedWeixinVersion",
                     "AccessibilitySafetyError",
@@ -1147,6 +1174,23 @@ class WeixinWorkflowEngine:
             if callable(progress_setter):
                 progress_setter(None)
             self._emit_action_progress(step, action, "uia_action_completed")
+
+    def _publish_task_health(self, health):
+        if self._progress_emit is not None:
+            self._progress_emit("agent.status", {
+                "status": "health", "taskId": self._active_task_id,
+                "health": self._stamp_health({**health, "taskId": self._active_task_id}),
+            })
+
+    def _invalidate_task_health(self, reason):
+        health = {
+            **self._last_health, "sessionReady": False, "uiaReady": False,
+            "taskWindowReady": False, "taskWindowRole": "", "taskWindowHwnd": 0,
+            "restorable": False, "reasonCode": reason, "degradedReason": reason,
+        }
+        if reason == "WECHAT_UNRESPONSIVE":
+            health["windowResponsive"] = False
+        self._publish_task_health(health)
 
     def _run_pre_boundary_with_retry(
         self,

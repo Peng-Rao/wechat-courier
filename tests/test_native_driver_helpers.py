@@ -1140,6 +1140,7 @@ def test_bind_window_restores_an_existing_session_before_reusing_its_uia_root(
     )()
     monkeypatch.setattr(driver, "_activate_bound_main_window", lambda _hwnd: True)
     monkeypatch.setattr(driver, "_bound_main_window_ready", lambda _hwnd: True)
+    monkeypatch.setattr("win32gui.IsWindowEnabled", lambda hwnd: hwnd == 11)
 
     result = driver.bind_window()
 

@@ -63,6 +63,23 @@ def test_same_process_hwnd_rebind_retains_gate_lease(driver):
     assert driver._root is None
 
 
+def test_verified_task_health_preserves_main_disabled_state_without_uia_queries(driver, monkeypatch):
+    driver._uia.ControlFromHandle = fail
+    driver._query.find_all = fail
+    driver.state.update(windowEnabled=False, blockingWindow={"hwnd": 404, "pid": 202})
+    monkeypatch.setattr("win32gui.IsWindowEnabled", lambda hwnd: hwnd == 404)
+    health = driver.verified_task_health("friend_request", 404)
+    assert health["sessionReady"] and health["taskWindowReady"]
+    assert health["windowEnabled"] is False
+    assert health["taskWindowRole"] == "friend_request"
+    from app.agent.native_driver import WindowBlockedError
+    with pytest.raises(WindowBlockedError):
+        driver.verified_task_health("friend_search", 303)
+    monkeypatch.setattr("win32gui.IsWindowEnabled", lambda hwnd: False)
+    with pytest.raises(WindowBlockedError):
+        driver.verified_task_health("friend_request", 404)
+
+
 def test_stop_before_native_bind_keeps_tray_window_restorable_without_creating_session(driver):
     from app.agent.runtime import TaskControl
     from app.agent.workflows import WeixinWorkflowEngine
