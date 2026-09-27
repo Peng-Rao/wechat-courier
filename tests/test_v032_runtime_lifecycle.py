@@ -198,7 +198,11 @@ def test_requested_clean_shutdown_recovers_a_remaining_gate_lease(tmp_path, qapp
 
 
 def test_requested_clean_shutdown_without_lease_needs_no_recovery(tmp_path, qapp):
-    client = AgentClient(journal_path=str(tmp_path / "safety.json"), diagnostics_log_dir=tmp_path)
+    client = AgentClient(
+        journal_path=str(tmp_path / "safety.json"),
+        gate_lease_path=tmp_path / "stable-gate.json",
+        diagnostics_log_dir=tmp_path,
+    )
     recovery = []
     client._run_gate_recovery = lambda: recovery.append("recover") or True
     client._state = "connected"
