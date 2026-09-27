@@ -124,6 +124,22 @@ TestCase {
         tryCompare(control, "value", 75)
     }
 
+    function test_rounded_ends_stay_inside_popup() {
+        var header = findChild(settingsDialog, "settingsHeaderBand")
+        var footer = findChild(settingsDialog, "settingsFooterBand")
+        verify(header !== null)
+        verify(footer !== null)
+        compare(settingsDialog.padding, 1)
+        compare(header.radius, 8)
+        verify(header.roundTop && !header.roundBottom)
+        verify(!footer.roundTop && footer.roundBottom)
+        verify(header.width <= settingsDialog.width - 2)
+        verify(footer.width <= settingsDialog.width - 2)
+        verify(settingsDialog.x >= 0 && settingsDialog.y >= 0)
+        verify(settingsDialog.x + settingsDialog.width <= settingsDialog.parent.width)
+        verify(settingsDialog.y + settingsDialog.height <= settingsDialog.parent.height)
+    }
+
     function test_friend_batch_limit_button_boundaries() {
         settingsDialog.sectionIndex = 1
         var control = findChild(settingsDialog, "settingsFriendBatchLimit")

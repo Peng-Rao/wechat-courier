@@ -9,7 +9,7 @@ from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonInstance
 
 from app.backend import BackendController
 from app.demo import is_demo_mode
-from app import win32_helper
+from app.window_shell import WindowShellController, configure_native_renderer
 
 try:
     from app._version import __version__
@@ -34,6 +34,7 @@ def main():
     os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
+    configure_native_renderer()
     app = QGuiApplication(sys.argv)
     app.setApplicationName("五阿哥微信助手")
     app.setApplicationVersion(__version__)
@@ -48,9 +49,12 @@ def main():
 
     # QML 引擎
     engine = QQmlApplicationEngine()
+    window_shell = WindowShellController()
+    app.aboutToQuit.connect(window_shell.detach)
 
     # 注入 backend 为上下文属性
     engine.rootContext().setContextProperty("backend", backend)
+    engine.rootContext().setContextProperty("windowShell", window_shell)
 
     qml_main = os.path.join(get_qml_dir(), "main.qml")
     engine.load(QUrl.fromLocalFile(qml_main))
@@ -59,8 +63,7 @@ def main():
     if not root_objects:
         sys.exit(-1)
 
-    if sys.platform == "win32":
-        win32_helper.install_frameless_window_hit_test(int(root_objects[0].winId()))
+    window_shell.attach(root_objects[0])
 
     sys.exit(app.exec())
 

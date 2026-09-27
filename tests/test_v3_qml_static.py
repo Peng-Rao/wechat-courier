@@ -142,15 +142,16 @@ def test_default_greeting_field_has_room_for_the_full_text():
 def test_main_window_fits_available_geometry_before_first_show():
     source = (ROOT / "qml" / "main.qml").read_text(encoding="utf-8")
 
-    assert "visible: true" in source
-    assert "opacity: 0" in source
+    assert "visible: false" in source
+    assert "opacity: 1" in source
+    assert "opacity: 0" not in source
     assert "function initializeWindowGeometry()" in source
     assert "Screen.desktopAvailableWidth" in source
     assert "Screen.desktopAvailableHeight" in source
     assert "root.screen.availableGeometry" not in source
     assert "Qt.callLater(root.initializeWindowGeometry)" in source
     assert "root.show()" in source
-    assert "root.opacity = 1" in source
+    assert "root.opacity =" not in source
 
 
 def test_titlebar_displays_agent_and_weixin_health():

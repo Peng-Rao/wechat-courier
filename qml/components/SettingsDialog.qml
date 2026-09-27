@@ -27,7 +27,7 @@ Popup {
     height: Math.min(620, parent ? parent.height - 48 : 620)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 0
+    padding: 1
 
     onInteractionLockedChanged: {
         if (root.interactionLocked && root.opened) root.close()
@@ -52,11 +52,20 @@ Popup {
     contentItem: ColumnLayout {
         spacing: 0
 
-        Rectangle {
+        WxRoundedBand {
+            objectName: "settingsHeaderBand"
             Layout.fillWidth: true
             Layout.preferredHeight: 48
-            color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
+            fillColor: WxTheme.clToolbarFill
+            radius: WxTheme.radiusLarge
+            roundBottom: false
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 1
+                color: WxTheme.clSurfaceBorder
+            }
             Text {
                 anchors.left: parent.left
                 anchors.leftMargin: 16
@@ -500,11 +509,20 @@ Popup {
             }
         }
 
-        Rectangle {
+        WxRoundedBand {
+            objectName: "settingsFooterBand"
             Layout.fillWidth: true
             Layout.preferredHeight: 52
-            color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
+            fillColor: WxTheme.clToolbarFill
+            radius: WxTheme.radiusLarge
+            roundTop: false
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 1
+                color: WxTheme.clSurfaceBorder
+            }
             Button {
                 anchors.right: parent.right
                 anchors.rightMargin: 16

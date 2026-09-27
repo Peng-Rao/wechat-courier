@@ -22,7 +22,10 @@ def test_main_window_uses_frameless_custom_titlebar():
     assert "Qt.FramelessWindowHint" in qml
     assert "WxTitleBar" in qml
     assert "startSystemResize" in qml
-    assert "install_frameless_window_hit_test" in main_py
+    assert "window_shell.attach(root_objects[0])" in main_py
+    assert 'setContextProperty("windowShell", window_shell)' in main_py
+    assert "root.winId" not in qml
+    assert "windowShell.applyVisuals" in qml
 
 
 def test_main_window_exposes_snap_and_fullscreen_contract():

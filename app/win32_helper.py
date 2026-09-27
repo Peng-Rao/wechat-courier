@@ -25,6 +25,12 @@ else:
 
 
 WM_NCHITTEST = 0x0084
+WM_NCDESTROY = 0x0082
+WM_NCCALCSIZE = 0x0083
+WM_NCPAINT = 0x0085
+WM_NCACTIVATE = 0x0086
+WM_GETMINMAXINFO = 0x0024
+WM_ENTERSIZEMOVE = 0x0231
 
 HTCLIENT = 1
 HTLEFT = 10
@@ -39,6 +45,7 @@ HTCAPTION = 2
 HTMAXBUTTON = 9
 
 GWL_STYLE = -16
+GWL_EXSTYLE = -20
 GWLP_WNDPROC = -4
 
 WS_CAPTION = 0x00C00000
@@ -49,6 +56,8 @@ WS_MAXIMIZEBOX = 0x00010000
 FRAMELESS_SNAP_STYLE_MASK = (
     WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
 )
+NATIVE_FRAME_STYLE_MASK = FRAMELESS_SNAP_STYLE_MASK
+WS_EX_LAYERED = 0x00080000
 
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -71,6 +80,7 @@ class FramelessHitTestMetrics:
     drag_right_margin: int = TITLE_BAR_DRAG_RIGHT_MARGIN
     caption_button_width: int = CAPTION_BUTTON_WIDTH
     resize_border_width: int = RESIZE_BORDER_WIDTH
+    resizable: bool = True
 
 
 def _scaled(value: int, scale: float) -> int:
@@ -82,8 +92,8 @@ def hit_test_client_point(x: int, y: int, metrics: FramelessHitTestMetrics) -> i
     width = int(metrics.client_width)
     height = int(metrics.client_height)
     scale = float(metrics.dpi_scale or 1.0)
-    border = _scaled(metrics.resize_border_width, scale)
-    title_height = _scaled(metrics.title_bar_height, scale)
+    border = _scaled(metrics.resize_border_width, scale) if metrics.resizable else 0
+    title_height = _scaled(metrics.title_bar_height, scale) if metrics.title_bar_height else 0
     drag_right_margin = _scaled(metrics.drag_right_margin, scale)
 
     on_left = x < border
@@ -117,9 +127,25 @@ def hit_test_client_point(x: int, y: int, metrics: FramelessHitTestMetrics) -> i
 
 
 _snap_subclasses: dict[int, tuple[object, int]] = {}
+_interaction_callbacks: dict[int, object] = {}
+
+
+def set_window_interaction_callback(hwnd_val: int, callback) -> None:
+    _interaction_callbacks[int(hwnd_val)] = callback
 
 
 if sys.platform == "win32" and user32:
+    class MINMAXINFO(ctypes.Structure):
+        _fields_ = [(name, wintypes.POINT) for name in (
+            "ptReserved", "ptMaxSize", "ptMaxPosition", "ptMinTrackSize", "ptMaxTrackSize")]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user32.MonitorFromWindow.restype = wintypes.HANDLE
+    user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
     LRESULT = ctypes.c_ssize_t
     WNDPROC = ctypes.WINFUNCTYPE(
         LRESULT,
@@ -153,6 +179,8 @@ if sys.platform == "win32" and user32:
     ]
     user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsZoomed.argtypes = [wintypes.HWND]
     user32.SetWindowPos.argtypes = [
         wintypes.HWND,
         wintypes.HWND,
@@ -181,6 +209,9 @@ else:
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
 DWMWA_SYSTEMBACKDROP_TYPE = 38
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_DONOTROUND = 1
+DWMWCP_ROUND = 2
 
 # Windows 11 System Backdrop Types (DWMWA_SYSTEMBACKDROP_TYPE)
 DWMSBT_AUTO = 0
@@ -263,6 +294,31 @@ def set_window_backdrop_win11(hwnd_val: int, backdrop_type: int) -> bool:
         return hr == 0
     except Exception as e:
         print(f"[win32_helper] DwmSetWindowAttribute backdrop failed: {e}")
+        return False
+
+
+def set_window_corner_preference(hwnd_val: int, rounded: bool) -> bool:
+    if not dwmapi or not hwnd_val:
+        return False
+    try:
+        value = ctypes.c_int(DWMWCP_ROUND if rounded else DWMWCP_DONOTROUND)
+        return dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd_val), ctypes.c_uint(DWMWA_WINDOW_CORNER_PREFERENCE),
+            ctypes.byref(value), ctypes.sizeof(value),
+        ) == 0
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def extend_native_frame(hwnd_val: int) -> bool:
+    """Make the transparent Qt client participate in the DWM backdrop."""
+    if not dwmapi or not hwnd_val:
+        return False
+    try:
+        margins = (ctypes.c_int * 4)(-1, -1, -1, -1)
+        return dwmapi.DwmExtendFrameIntoClientArea(
+            ctypes.c_void_p(hwnd_val), ctypes.byref(margins)) == 0
+    except (OSError, AttributeError, TypeError, ValueError):
         return False
 
 
@@ -373,16 +429,28 @@ def _window_dpi_scale(hwnd_val: int) -> float:
         return 1.0
 
 
+def native_resize_inset(dpi: int) -> int:
+    if not user32:
+        return 0
+    if hasattr(user32, "GetSystemMetricsForDpi"):
+        return user32.GetSystemMetricsForDpi(32, dpi) + user32.GetSystemMetricsForDpi(92, dpi)
+    return user32.GetSystemMetrics(32) + user32.GetSystemMetrics(92)
+
+
 def _client_metrics(hwnd_val: int) -> FramelessHitTestMetrics | None:
     if not user32:
         return None
     rect = wintypes.RECT()
     if not user32.GetClientRect(wintypes.HWND(hwnd_val), ctypes.byref(rect)):
         return None
+    style = _GetWindowLongPtr(wintypes.HWND(hwnd_val), GWL_STYLE)
+    has_frame = bool(style & WS_THICKFRAME)
     return FramelessHitTestMetrics(
         client_width=rect.right - rect.left,
         client_height=rect.bottom - rect.top,
         dpi_scale=_window_dpi_scale(hwnd_val),
+        resizable=has_frame and not bool(user32.IsZoomed(wintypes.HWND(hwnd_val))),
+        title_bar_height=TITLE_BAR_HEIGHT if has_frame else 0,
     )
 
 
@@ -404,7 +472,7 @@ def _hit_test_lparam(hwnd_val: int, lparam: int) -> int:
     return hit_test_client_point(point.x, point.y, metrics)
 
 
-def _enable_frameless_snap_styles(hwnd_val: int) -> None:
+def _enable_snap_styles(hwnd_val: int, native_frame: bool = False) -> None:
     if not user32:
         return
     hwnd = wintypes.HWND(hwnd_val)
@@ -426,8 +494,7 @@ def _enable_frameless_snap_styles(hwnd_val: int) -> None:
     )
 
 
-def install_frameless_window_hit_test(hwnd_val: int) -> bool:
-    """Install a Win32 hit-test bridge for the QML frameless title bar."""
+def _install_window_hit_test(hwnd_val: int, native_frame: bool) -> bool:
     if sys.platform != "win32" or not user32 or not WNDPROC:
         return False
     if not hwnd_val:
@@ -437,13 +504,49 @@ def install_frameless_window_hit_test(hwnd_val: int) -> bool:
     if hwnd_int in _snap_subclasses:
         return True
 
-    _enable_frameless_snap_styles(hwnd_int)
+    _enable_snap_styles(hwnd_int, native_frame)
     previous_proc = _GetWindowLongPtr(wintypes.HWND(hwnd_int), GWLP_WNDPROC)
     if not previous_proc:
         return False
 
     def wnd_proc(hwnd, msg, wparam, lparam):
+        if msg == WM_ENTERSIZEMOVE:
+            callback = _interaction_callbacks.get(int(hwnd))
+            if callback is not None:
+                callback()
+        if native_frame and msg == WM_GETMINMAXINFO:
+            result = user32.CallWindowProcW(ctypes.c_void_p(previous_proc), hwnd, msg, wparam, lparam)
+            monitor = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+            if user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(monitor)):
+                info = ctypes.cast(lparam, ctypes.POINTER(MINMAXINFO)).contents
+                inset = native_resize_inset(round(_window_dpi_scale(hwnd) * 96))
+                info.ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left - inset
+                info.ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top - inset
+                info.ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left + 2 * inset
+                info.ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top + 2 * inset
+            return result
+        if native_frame and msg == WM_NCPAINT:
+            return 0
+        if native_frame and msg == WM_NCACTIVATE:
+            return user32.CallWindowProcW(ctypes.c_void_p(previous_proc), hwnd, msg, wparam, -1)
+        if native_frame and msg == WM_NCCALCSIZE and wparam:
+            rect = ctypes.cast(lparam, ctypes.POINTER(wintypes.RECT)).contents
+            style = _GetWindowLongPtr(hwnd, GWL_STYLE)
+            # One native pixel gives DWM a border without painting a caption.
+            inset = 1 if style & WS_THICKFRAME else 0
+            if style & WS_THICKFRAME and user32.IsZoomed(hwnd):
+                dpi = round(_window_dpi_scale(hwnd) * 96)
+                inset = native_resize_inset(dpi)
+            rect.left += inset
+            rect.top += inset
+            rect.right -= inset
+            rect.bottom -= inset
+            return 0
         if msg == WM_NCHITTEST:
+            own_result = _hit_test_lparam(int(hwnd), int(lparam))
+            # Caption buttons belong to QML, not to the invisible native caption.
+            if native_frame or own_result == HTCLIENT:
+                return own_result
             dwm_result = LRESULT(0)
             try:
                 if (
@@ -457,15 +560,19 @@ def install_frameless_window_hit_test(hwnd_val: int) -> bool:
                     return dwm_result.value
             except Exception:
                 pass
-            return _hit_test_lparam(int(hwnd), int(lparam))
+            return own_result
 
-        return user32.CallWindowProcW(
+        result = user32.CallWindowProcW(
             ctypes.c_void_p(previous_proc),
             hwnd,
             msg,
             wparam,
             lparam,
         )
+        if msg == WM_NCDESTROY:
+            _snap_subclasses.pop(int(hwnd), None)
+            _interaction_callbacks.pop(int(hwnd), None)
+        return result
 
     callback = WNDPROC(wnd_proc)
     installed_previous = _SetWindowLongPtr(
@@ -477,4 +584,33 @@ def install_frameless_window_hit_test(hwnd_val: int) -> bool:
         return False
 
     _snap_subclasses[hwnd_int] = (callback, installed_previous)
+    if native_frame:
+        user32.SetWindowPos(wintypes.HWND(hwnd_int), None, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
     return True
+
+
+def install_frameless_window_hit_test(hwnd_val: int) -> bool:
+    """Compatibility bridge for the original transparent frameless shell."""
+    return _install_window_hit_test(hwnd_val, native_frame=False)
+
+
+def install_native_window_hit_test(hwnd_val: int) -> bool:
+    """Keep native frame capabilities while using QML caption controls."""
+    return _install_window_hit_test(hwnd_val, native_frame=True)
+
+
+def uninstall_window_hit_test(hwnd_val: int) -> None:
+    _interaction_callbacks.pop(int(hwnd_val), None)
+    entry = _snap_subclasses.get(int(hwnd_val))
+    if not entry or not user32:
+        return
+    callback, previous_proc = entry
+    hwnd = ctypes.c_void_p(hwnd_val)
+    if user32.IsWindow(hwnd):
+        current = _GetWindowLongPtr(hwnd, GWLP_WNDPROC)
+        if current != ctypes.cast(callback, ctypes.c_void_p).value:
+            # Another subclass may still call ours; retain its callback until NCDESTROY.
+            return
+        _SetWindowLongPtr(hwnd, GWLP_WNDPROC, previous_proc)
+    _snap_subclasses.pop(int(hwnd_val), None)

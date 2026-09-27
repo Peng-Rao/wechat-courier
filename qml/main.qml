@@ -12,14 +12,20 @@ ApplicationWindow {
     height: 880
     minimumWidth: 960
     minimumHeight: 680
-    visible: true
-    opacity: 0
+    visible: false
+    opacity: 1
     title: "五阿哥微信助手"
     color: "transparent"
-    flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint
+    flags: typeof windowShell !== "undefined" ? windowShell.initialWindowFlags
+        : Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint
 
     property rect normalGeometry: Qt.rect(0, 0, 1320, 880)
     property bool _applyingWindowLayout: false
+    property string shellLayoutMode: "normal"
+
+    onShellLayoutModeChanged: {
+        if (typeof windowShell !== "undefined") windowShell.setLayoutMode(shellLayoutMode)
+    }
 
     function screenGeometry() {
         if (Screen.desktopAvailableWidth > 0 && Screen.desktopAvailableHeight > 0) {
@@ -54,13 +60,13 @@ ApplicationWindow {
         root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
         root._applyingWindowLayout = false
 
-        root.show()
-        root.opacity = 1
         root.syncWindowVisuals()
+        root.show()
     }
 
     function captureNormalGeometry() {
         if (!root._applyingWindowLayout
+                && root.shellLayoutMode === "normal"
                 && root.visibility === Window.Windowed
                 && root.width >= root.minimumWidth
                 && root.height >= root.minimumHeight) {
@@ -69,7 +75,7 @@ ApplicationWindow {
     }
 
     function rememberNormalGeometry() {
-        if (root.visibility === Window.Windowed) {
+        if (root.visibility === Window.Windowed && root.shellLayoutMode === "normal") {
             root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
         }
     }
@@ -95,6 +101,7 @@ ApplicationWindow {
         root.y = Math.round(rect.y)
         root._applyingWindowLayout = false
         if (updateNormal !== false) {
+            root.shellLayoutMode = "normal"
             root.normalGeometry = Qt.rect(root.x, root.y, root.width, root.height)
         }
     }
@@ -105,11 +112,13 @@ ApplicationWindow {
         }
         if (mode === "maximize") {
             root.rememberNormalGeometry()
+            root.shellLayoutMode = "maximized"
             root.showMaximized()
             return
         }
         if (mode === "left" || mode === "right") {
             root.rememberNormalGeometry()
+            root.shellLayoutMode = mode
             root.applyWindowGeometry(root.snapRectForMode(mode), false)
         }
     }
@@ -129,6 +138,7 @@ ApplicationWindow {
     function enterFullScreenPreview() {
         if (root.visibility !== Window.FullScreen) {
             root.rememberNormalGeometry()
+            root.shellLayoutMode = "fullscreen"
             root.showFullScreen()
         }
     }
@@ -151,21 +161,37 @@ ApplicationWindow {
     onYChanged: captureNormalGeometry()
     onWidthChanged: captureNormalGeometry()
     onHeightChanged: captureNormalGeometry()
+    onVisibilityChanged: {
+        if (visibility === Window.Maximized) shellLayoutMode = "maximized"
+        else if (visibility === Window.FullScreen) shellLayoutMode = "fullscreen"
+        else if (visibility === Window.Windowed
+                 && (shellLayoutMode === "maximized" || shellLayoutMode === "fullscreen"))
+            shellLayoutMode = "normal"
+    }
 
     background: Rectangle {
-        color: WxTheme.clWindowTint
+        color: typeof windowShell !== "undefined" && !windowShell.backdropAvailable
+            ? WxTheme.clBgWindow : WxTheme.clWindowTint
         Behavior on color {
             ColorAnimation { duration: WxTheme.animSlow }
         }
     }
 
     function syncWindowVisuals() {
-        if (typeof backend !== "undefined" && backend) {
-            backend.updateWindowVisuals(root.winId, WxTheme.isDark, WxTheme.glassEnabled, WxTheme.glassOpacity)
+        if (typeof windowShell !== "undefined" && windowShell) {
+            windowShell.applyVisuals(WxTheme.isDark, WxTheme.glassEnabled, WxTheme.glassOpacity)
         }
     }
 
     // 监听窗口视觉变化，调用后端 Win32 API 动态刷新原生材质
+    Connections {
+        target: typeof windowShell !== "undefined" ? windowShell : null
+        function onInteractiveMoveStarted() {
+            if (root.shellLayoutMode === "left" || root.shellLayoutMode === "right")
+                root.shellLayoutMode = "normal"
+        }
+    }
+
     Connections {
         target: WxTheme
         ignoreUnknownSignals: true
@@ -277,10 +303,12 @@ ApplicationWindow {
         property int resizeEdges: Qt.LeftEdge
 
         hoverEnabled: true
+        enabled: root.visibility === Window.Windowed
         acceptedButtons: Qt.LeftButton
         z: 9000
         onPressed: {
-            if (root.visibility !== Window.FullScreen) {
+            if (root.visibility === Window.Windowed) {
+                root.shellLayoutMode = "normal"
                 root.startSystemResize(resizeEdges)
             }
         }

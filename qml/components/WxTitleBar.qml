@@ -189,6 +189,7 @@ Rectangle {
             // 1. Minimize Button
             Rectangle {
                 id: minButton
+                objectName: "windowMinimizeButton"
                 Layout.preferredWidth: 46
                 Layout.fillHeight: true
                 color: minMouseArea.containsMouse ? WxTheme.clBgHover : "transparent"
@@ -214,6 +215,7 @@ Rectangle {
             // 2. Maximize/Restore Button
             Rectangle {
                 id: maxButton
+                objectName: "windowMaximizeButton"
                 Layout.preferredWidth: 46
                 Layout.fillHeight: true
                 color: maxMouseArea.containsMouse ? WxTheme.clBgHover : "transparent"
@@ -247,6 +249,7 @@ Rectangle {
             // 3. Close Button
             Rectangle {
                 id: closeButton
+                objectName: "windowCloseButton"
                 Layout.preferredWidth: 46
                 Layout.fillHeight: true
                 color: closeMouseArea.containsMouse ? "#e81123" : "transparent"
