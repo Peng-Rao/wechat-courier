@@ -8,6 +8,9 @@
 ; ── 基本信息 ──
 !define PRODUCT_NAME "福格微信助手"
 !define PRODUCT_VERSION "1.0.0"
+!ifndef PRODUCT_ICON_NAME
+!define PRODUCT_ICON_NAME "fuge-icon-${PRODUCT_VERSION}.ico"
+!endif
 !define OLD_PRODUCT_NAME "五阿哥群发助手"
 !define OLD_ASSISTANT_NAME "五阿哥微信助手"
 !define PRODUCT_PUBLISHER "wx4py"
@@ -81,19 +84,24 @@ Section "Install"
 
     ; 拷贝 PyInstaller 打包后的全部文件
     File /r "..\dist\${PRODUCT_NAME}\*.*"
+    ; A content-addressed path avoids reusing the old executable icon cache.
+    File "/oname=${PRODUCT_ICON_NAME}" "..\assets\app.ico"
 
     ; 桌面快捷方式
-    CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe" "" "$INSTDIR\${PRODUCT_NAME}.exe"
+    CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe" "" "$INSTDIR\${PRODUCT_ICON_NAME}" 0
 
     ; 开始菜单
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe" "" "$INSTDIR\${PRODUCT_NAME}.exe"
+    CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\${PRODUCT_NAME}.exe" "" "$INSTDIR\${PRODUCT_ICON_NAME}" 0
     CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\卸载.lnk" "$INSTDIR\uninst.exe"
+    System::Call 'shell32::SHChangeNotify(i 0x00002000, i 0x00001005, w "$DESKTOP\${PRODUCT_NAME}.lnk", p 0)'
+    System::Call 'shell32::SHChangeNotify(i 0x00002000, i 0x00001005, w "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk", p 0)'
+    System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0x00000000, p 0, p 0)'
 
     ; 注册表
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\uninst.exe"
-    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_NAME}.exe"
+    WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_ICON_NAME}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
     WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "InstallLocation" "$INSTDIR"

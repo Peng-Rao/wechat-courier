@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """一键构建脚本 — PyInstaller 打包 + NSIS 安装器"""
+import hashlib
 import importlib.util
 import subprocess
 import sys
@@ -16,6 +17,21 @@ def _ensure_pyinstaller_available():
         raise RuntimeError(
             "未安装 PyInstaller。请先运行：pip install -r requirements-dev.txt"
         )
+
+
+def _refresh_windows_shell_icons():
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    try:
+        notify = ctypes.windll.shell32.SHChangeNotify
+        notify.argtypes = [ctypes.c_long, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+        notify.restype = None
+        # Invalidate cached EXE icons without deleting caches or restarting Explorer.
+        notify(0x08000000, 0, None, None)
+    except OSError as exc:
+        print(f"Unable to refresh Windows shell icons: {exc}")
 
 
 def main():
@@ -46,7 +62,12 @@ def main():
     nsis_exe = os.environ.get("NSIS_EXE", "makensis")
     if NSIS_SCRIPT.exists():
         try:
-            subprocess.run([nsis_exe, str(NSIS_SCRIPT)], cwd=ROOT, check=True)
+            icon_hash = hashlib.sha256((ROOT / "assets" / "app.ico").read_bytes()).hexdigest()[:16]
+            subprocess.run([
+                nsis_exe,
+                f"/DPRODUCT_ICON_NAME=fuge-icon-{icon_hash}.ico",
+                str(NSIS_SCRIPT),
+            ], cwd=ROOT, check=True)
             print(f"\n安装器已生成：{ROOT / 'dist' / '福格微信助手_Setup.exe'}")
         except FileNotFoundError:
             print("未找到 NSIS (makensis)，跳过安装器构建。")
@@ -54,6 +75,7 @@ def main():
     else:
         print("未找到 setup.nsi，跳过安装器构建。")
 
+    _refresh_windows_shell_icons()
     print("\n构建完成！")
 
 

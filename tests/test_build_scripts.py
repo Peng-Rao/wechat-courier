@@ -2,6 +2,7 @@
 """Build script regression tests."""
 
 import dis
+import hashlib
 import importlib.util
 import runpy
 import subprocess
@@ -43,6 +44,7 @@ def test_build_script_does_not_call_missing_parent_comtypes_pregen(monkeypatch):
 
     monkeypatch.setattr(build, "_ensure_pyinstaller_available", lambda: None)
     monkeypatch.setattr(build.subprocess, "run", fake_run)
+    monkeypatch.setattr(build, "_refresh_windows_shell_icons", lambda: None)
 
     build.main()
 
@@ -97,22 +99,79 @@ def test_build_spec_includes_qml_svg_assets():
     assert '".svg"' in spec_text
 
 
-def test_installer_shortcuts_use_embedded_exe_icon():
+def test_installer_shortcuts_use_cache_busting_standalone_icon():
     script = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
 
     assert '"$INSTDIR\\assets\\app.ico"' not in script
+    assert 'File "/oname=${PRODUCT_ICON_NAME}" "..\\assets\\app.ico"' in script
     assert (
         'CreateShortCut "$DESKTOP\\${PRODUCT_NAME}.lnk" '
-        '"$INSTDIR\\${PRODUCT_NAME}.exe" "" "$INSTDIR\\${PRODUCT_NAME}.exe"'
+        '"$INSTDIR\\${PRODUCT_NAME}.exe" "" "$INSTDIR\\${PRODUCT_ICON_NAME}" 0'
     ) in script
     assert (
         'CreateShortCut "$SMPROGRAMS\\${PRODUCT_NAME}\\${PRODUCT_NAME}.lnk" '
-        '"$INSTDIR\\${PRODUCT_NAME}.exe" "" "$INSTDIR\\${PRODUCT_NAME}.exe"'
+        '"$INSTDIR\\${PRODUCT_NAME}.exe" "" "$INSTDIR\\${PRODUCT_ICON_NAME}" 0'
     ) in script
     assert (
         'WriteRegStr HKLM "${PRODUCT_UNINST_KEY}" "DisplayIcon" '
-        '"$INSTDIR\\${PRODUCT_NAME}.exe"'
+        '"$INSTDIR\\${PRODUCT_ICON_NAME}"'
     ) in script
+    for shortcut in (
+        "$DESKTOP\\${PRODUCT_NAME}.lnk",
+        "$SMPROGRAMS\\${PRODUCT_NAME}\\${PRODUCT_NAME}.lnk",
+    ):
+        assert f'w "{shortcut}", p 0)' in script
+    assert "shell32::SHChangeNotify(i 0x00002000, i 0x00001005" in script
+
+
+def test_build_passes_content_addressed_shortcut_icon_to_nsis(monkeypatch):
+    build = load_build_module()
+    calls = []
+    monkeypatch.setattr(build, "_ensure_pyinstaller_available", lambda: None)
+    monkeypatch.setattr(build.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+    monkeypatch.setattr(build, "_refresh_windows_shell_icons", lambda: None)
+    build.main()
+    digest = hashlib.sha256((ROOT / "assets" / "app.ico").read_bytes()).hexdigest()[:16]
+    nsis_call = next(cmd for cmd in calls if str(build.NSIS_SCRIPT) in cmd)
+    assert f"/DPRODUCT_ICON_NAME=fuge-icon-{digest}.ico" in nsis_call
+
+
+def test_build_refreshes_explorer_after_artifacts_are_created(monkeypatch):
+    build = load_build_module()
+    calls = []
+    monkeypatch.setattr(build, "_ensure_pyinstaller_available", lambda: None)
+    monkeypatch.setattr(build.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+    monkeypatch.setattr(
+        build, "_refresh_windows_shell_icons", lambda: calls.append("shell-refresh"),
+        raising=False,
+    )
+    build.main()
+    assert calls[-1] == "shell-refresh"
+
+
+def test_installer_invalidates_executable_icon_cache_after_install():
+    script = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
+    notify = "shell32::SHChangeNotify(i 0x08000000, i 0x00000000, p 0, p 0)"
+    assert notify in script
+    assert script.index(notify) > script.index('CreateShortCut "$DESKTOP')
+
+
+def test_windows_shell_icon_refresh_uses_notification_not_cache_deletion(monkeypatch):
+    build = load_build_module()
+    calls = []
+
+    def notify(*args):
+        calls.append(args)
+
+    fake_ctypes = SimpleNamespace(
+        windll=SimpleNamespace(shell32=SimpleNamespace(SHChangeNotify=notify)),
+        c_long=object(), c_uint=object(), c_void_p=object(),
+    )
+    monkeypatch.setattr(build.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    build._refresh_windows_shell_icons()
+    assert calls == [(0x08000000, 0, None, None)]
+    assert notify.restype is None
 
 
 def test_windows_ci_uses_python_312_and_validates_every_release_artifact():
