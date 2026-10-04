@@ -649,8 +649,9 @@ class AgentController(QObject):
     replyReceived = Signal(int, object)
     rpcErrorReceived = Signal(int, int, str)
 
-    def __init__(self, client: AgentClient | None = None, parent=None):
+    def __init__(self, client: AgentClient | None = None, parent=None, *, operation_blocked=None):
         super().__init__(parent)
+        self._operation_blocked = operation_blocked or (lambda: False)
         self._client = client or AgentClient(parent=self)
         self._state = str(getattr(self._client, "state", "stopped"))
         self._connected = bool(getattr(self._client, "connected", False))
@@ -676,6 +677,8 @@ class AgentController(QObject):
         self._detail = "等待检测微信"
         self._connection_reason = ""
         self._inspect_request_id = 0
+        self._wechat_recovery_busy = False
+        self._wechat_recovery_request_id = 0
         self._client.stateChanged.connect(self._on_state)
         self._client.connectedChanged.connect(self._on_connected)
         self._client.replyReceived.connect(self._on_reply)
@@ -713,6 +716,10 @@ class AgentController(QObject):
     @Property(bool, notify=stateChanged)
     def connected(self):
         return self._connected
+
+    @Property(bool, notify=inspectionChanged)
+    def operationBlocked(self):
+        return bool(self._operation_blocked())
 
     @Property(bool, notify=inspectionChanged)
     def wechatConnected(self):
@@ -782,6 +789,10 @@ class AgentController(QObject):
         return (self._state in {"starting", "connecting", "authenticating", "recovering_gate"}
                 or (self._connected and self.gateRecovery.get("stage") in {"checking", "restoring", "restarting", "awaiting_login"}))
 
+    @Property(bool, notify=inspectionChanged)
+    def wechatRecoveryBusy(self):
+        return self._wechat_recovery_busy
+
     @Property(str, notify=inspectionChanged)
     def recoveryStatus(self):
         if self.reasonCode == "AGENT_ALREADY_RUNNING":
@@ -828,6 +839,7 @@ class AgentController(QObject):
         return (
             self._connected
             and not self.gateRecoveryActive
+            and not self._wechat_recovery_busy
             and self._process_detected
             and self._version_supported
             and self._window_responsive
@@ -840,10 +852,12 @@ class AgentController(QObject):
 
     @Slot()
     def start(self) -> None:
+        if self.operationBlocked: return
         self._client.start()
 
     @Slot()
     def restart(self) -> None:
+        if self.operationBlocked: return
         restart = getattr(self._client, "restart", None)
         if restart is not None:
             restart()
@@ -863,7 +877,7 @@ class AgentController(QObject):
 
     @Slot(result=int)
     def inspect(self) -> int:
-        if not self._connected:
+        if not self._connected or self.operationBlocked:
             return 0
         self._inspect_request_id = self._client.call("wechat.inspect")
         return self._inspect_request_id
@@ -912,13 +926,34 @@ class AgentController(QObject):
         self.inspectionChanged.emit()
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> int:
+        params = params or {}
+        if self.operationBlocked and (method in {"task.start", "wechat.inspect"}
+                or (method == "recovery.approve" and params.get("decision") == "restart_wechat")):
+            return 0
         if method == "task.start":
             self._client.grant_foreground_permission()
-        return self._client.call(method, params or {})
+        restarting = (method == "recovery.approve" and params.get("decision") == "restart_wechat"
+                      and params.get("scope", "task") == "task")
+        if restarting:
+            self._wechat_recovery_busy = True
+            self.inspectionChanged.emit()
+        try:
+            request_id = self._client.call(method, params)
+        except Exception:
+            if restarting:
+                self._wechat_recovery_busy = False
+                self.inspectionChanged.emit()
+            raise
+        if restarting: self._wechat_recovery_request_id = request_id
+        return request_id
 
     @Slot(str, object)
     def _on_notification(self, method: str, params: Any) -> None:
         if method == "agent.status" and isinstance(params, dict):
+            if params.get("status") in {"recovered", "recovery_failed"}:
+                self._wechat_recovery_busy = False
+                self._wechat_recovery_request_id = 0
+                self.inspectionChanged.emit()
             snapshot = params.get("health")
             if isinstance(snapshot, dict):
                 self.applyInspection(snapshot)
@@ -935,6 +970,8 @@ class AgentController(QObject):
         was_connected = self._connected
         self._connected = connected
         if not connected:
+            self._wechat_recovery_busy = False
+            self._wechat_recovery_request_id = 0
             self._inspect_request_id = 0
             self._friend_submit_enabled = None
             self._wechat_connected = False
@@ -967,6 +1004,10 @@ class AgentController(QObject):
 
     @Slot(int, int, str)
     def _on_rpc_error(self, request_id: int, code: int, message: str) -> None:
+        if request_id == self._wechat_recovery_request_id:
+            self._wechat_recovery_busy = False
+            self._wechat_recovery_request_id = 0
+            self.inspectionChanged.emit()
         self.rpcErrorReceived.emit(request_id, code, message)
         self.errorOccurred.emit(message)
 
@@ -1002,8 +1043,11 @@ class TaskController(QObject):
         friends: FriendController,
         settings: SettingsController,
         parent=None,
+        *,
+        operation_blocked=None,
     ):
         super().__init__(parent)
+        self._operation_blocked = operation_blocked or (lambda: False)
         self._agent = agent
         self._message = message
         self._friends = friends
@@ -1356,6 +1400,7 @@ class TaskController(QObject):
     def safeRetryAvailable(self):
         return bool(
             not self._active
+            and not self._operation_blocked()
             and self._retry_candidate is not None
             and self._retry_candidate.get("itemId") not in self._non_retryable_item_ids
             and self._agent.canStartTask
@@ -1373,6 +1418,7 @@ class TaskController(QObject):
     def wechatRestartAvailable(self):
         return bool(
             not self._active
+            and not self._operation_blocked()
             and self._current_error_code == "WECHAT_UNRESPONSIVE"
             and not self._wechat_responsive
             and self._agent.connected
@@ -1442,6 +1488,9 @@ class TaskController(QObject):
         self.errorChanged.emit()
 
     def _start(self, kind: str, items: list[dict[str, Any]], options: dict[str, Any]) -> bool:
+        if self._operation_blocked():
+            self._set_error("联系人读取或导出正在进行中")
+            return False
         if self._active:
             self._set_error("已有任务正在执行")
             return False

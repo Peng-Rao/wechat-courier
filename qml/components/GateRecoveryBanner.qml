@@ -10,6 +10,7 @@ Rectangle {
     readonly property var agent: appBackend ? appBackend.agent : null
     readonly property var recovery: agent && agent.gateRecovery ? agent.gateRecovery : ({})
     readonly property bool busy: !!(agent && agent.gateRecoveryBusy)
+    readonly property bool contactsBusy: !!(appBackend && appBackend.contacts && appBackend.contacts.busy)
     objectName: "gateRecoveryBanner"
     visible: !!(agent && (agent.gateRecoveryActive || agent.reasonCode === "AGENT_ALREADY_RUNNING"))
     implicitHeight: visible ? content.implicitHeight + 16 : 0
@@ -31,7 +32,7 @@ Rectangle {
         Button {
             objectName: "gateInspectButton"
             text: "检测恢复"
-            enabled: !root.busy
+            enabled: !root.busy && !root.contactsBusy
             onClicked: {
                 if (root.agent.connected) root.agent.inspect()
                 else root.agent.restart()

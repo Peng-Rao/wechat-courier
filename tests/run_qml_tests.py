@@ -55,7 +55,8 @@ def main():
 
     try:
         cmd = [runner, "-input", QML_TEST_DIR, "-o", f"{output_file},txt"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        environment = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software"}
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=environment)
 
         # 同时打印 qmltestrunner 的 stderr（可能包含诊断信息）
         if result.stderr:

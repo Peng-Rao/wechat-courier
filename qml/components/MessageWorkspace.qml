@@ -11,6 +11,7 @@ Item {
     readonly property var messageBackend: appBackend ? appBackend.message : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
     readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
+    readonly property bool contactsBusy: !!(appBackend && appBackend.contacts && appBackend.contacts.busy)
     readonly property bool ownsTask: !!(
         taskBackend && taskBackend.kind === "message_send"
     )
@@ -639,6 +640,7 @@ Item {
                         text: "开始发送 " + (root.messageBackend ? root.messageBackend.recipientCount : 0) + " 人"
                         enabled: root.appBackend && root.appBackend.agent && root.appBackend.agent.canStartTask
                             && !root.interactionLocked
+                            && !root.contactsBusy
                             && root.messageBackend && root.messageBackend.recipientCount > 0
                         onClicked: root.startTask()
                         implicitHeight: 38

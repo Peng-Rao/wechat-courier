@@ -23,7 +23,7 @@ Rectangle {
         Accessible.name: "acceptanceEditorState"
         Accessible.description: visible ? (root.workspaceIndex === 0
             ? root.appBackend.task.acceptanceMessageStateJson
-            : root.appBackend.task.acceptanceFriendStateJson) : ""
+            : root.workspaceIndex === 1 ? root.appBackend.task.acceptanceFriendStateJson : "") : ""
     }
     Item {
         width: 1
@@ -67,14 +67,14 @@ Rectangle {
                 spacing: 6
 
                 Repeater {
-                    model: ["消息群发", "自动发送好友申请"]
+                    model: ["消息群发", "自动发送好友申请", "微信联系人导出"]
                     Button {
                         required property int index
                         required property string modelData
-                        objectName: index === 0 ? "messageWorkspaceTab" : "friendWorkspaceTab"
+                        objectName: index === 0 ? "messageWorkspaceTab" : index === 1 ? "friendWorkspaceTab" : "contactWorkspaceTab"
                         Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                             ? objectName : modelData
-                        Layout.preferredWidth: index === 0 ? 100 : 160
+                        Layout.preferredWidth: index === 0 ? 100 : index === 1 ? 160 : 144
                         Layout.fillHeight: true
                         onClicked: root.workspaceIndex = index
                         contentItem: Text {
@@ -118,6 +118,7 @@ Rectangle {
 
             MessageWorkspace { appBackend: root.appBackend }
             FriendWorkspace { appBackend: root.appBackend }
+            ContactWorkspace { appBackend: root.appBackend }
         }
     }
 

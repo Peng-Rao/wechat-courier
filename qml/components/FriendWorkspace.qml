@@ -11,6 +11,7 @@ Item {
     readonly property var friendBackend: appBackend ? appBackend.friends : null
     readonly property var taskBackend: appBackend ? appBackend.task : null
     readonly property bool interactionLocked: !!(taskBackend && taskBackend.active)
+    readonly property bool contactsBusy: !!(appBackend && appBackend.contacts && appBackend.contacts.busy)
     readonly property bool friendSubmitAvailable: !!(
         taskBackend && taskBackend.acceptanceEnabled
         || appBackend && appBackend.agent
@@ -756,6 +757,7 @@ Item {
                                 + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
                             enabled: root.appBackend && root.appBackend.agent.canStartTask
                                 && !root.interactionLocked
+                                && !root.contactsBusy
                                 && root.friendSubmitAvailable
                                 && root.friendBackend && root.friendBackend.model.selectedCount > 0
                             onClicked: root.requestFriendStart()
@@ -799,7 +801,7 @@ Item {
         confirmText: "确认提交"
         cancelText: "取消"
         isDanger: true
-        confirmEnabled: !root.interactionLocked && root.friendSubmitAvailable
+        confirmEnabled: !root.interactionLocked && !root.contactsBusy && root.friendSubmitAvailable
         confirmButtonObjectName: "friendSubmitConfirmButton"
         cancelButtonObjectName: "friendSubmitCancelButton"
         onConfirmed: root.confirmFriendSubmission()

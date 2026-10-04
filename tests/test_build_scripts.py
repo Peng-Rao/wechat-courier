@@ -234,7 +234,7 @@ def test_build_outputs_gui_and_isolated_agent_in_one_directory():
     assert '*collect_submodules("openpyxl")' in spec_text
 
 
-def test_build_spec_packages_one_generated_manifest_for_gui_and_agent(tmp_path, monkeypatch):
+def test_build_spec_packages_one_generated_manifest_for_all_processes(tmp_path, monkeypatch):
     analyses = []
 
     def analysis(scripts, **kwargs):
@@ -250,6 +250,7 @@ def test_build_spec_packages_one_generated_manifest_for_gui_and_agent(tmp_path, 
     utils = ModuleType("PyInstaller.utils")
     hooks = ModuleType("PyInstaller.utils.hooks")
     hooks.collect_submodules = lambda name: []
+    hooks.copy_metadata = lambda name: []
     hooks.get_pywin32_dll_dir = lambda: None
     package.utils = utils
     utils.hooks = hooks
@@ -262,7 +263,7 @@ def test_build_spec_packages_one_generated_manifest_for_gui_and_agent(tmp_path, 
         "EXE": lambda *args, **kwargs: None, "COLLECT": lambda *args, **kwargs: None,
     })
 
-    assert len(analyses) == 2
+    assert len(analyses) == 3
     manifest_sources = []
     for result in analyses:
         manifests = [entry for entry in result.datas if Path(entry[0]).name == "build-info.json"]

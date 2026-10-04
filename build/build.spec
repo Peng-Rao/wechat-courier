@@ -9,13 +9,15 @@ if ROOT not in sys.path:
 
 from build.pyinstaller_filters import filter_qt_artifacts
 from app.build_info import MANIFEST_FILENAME, write_build_manifest
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 block_cipher = None
 
-# One immutable source identity for both executables; no user log files included.
+# One immutable source identity for all executables; no user log files included.
 manifest_path = write_build_manifest(os.path.join(workpath, MANIFEST_FILENAME), ROOT)
 build_datas = [(str(manifest_path), ".")]
+licenses_dir = os.path.join(ROOT, "licenses")
+license_datas = [(licenses_dir, "licenses")] if os.path.isdir(licenses_dir) else []
 
 # ═══════════════════════════════════════
 #  comtypes 预生成目录
@@ -33,7 +35,7 @@ if os.path.isdir(comtypes_gen_dir):
 # ═══════════════════════════════════════
 #  QML 文件与图标资源
 # ═══════════════════════════════════════
-datas = list(comtypes_datas) + build_datas
+datas = list(comtypes_datas) + build_datas + license_datas
 qml_dir = os.path.join(ROOT, "qml")
 for dirpath, dirnames, filenames in os.walk(qml_dir):
     for f in filenames:
@@ -139,12 +141,30 @@ agent_analysis = Analysis(
 agent_analysis.binaries = filter_qt_artifacts(agent_analysis.binaries)
 agent_analysis.datas = filter_qt_artifacts(agent_analysis.datas)
 
+# Contact reading never imports the automation runtime or its COM/UIA hooks.
+contact_analysis = Analysis(
+    [os.path.join(ROOT, "contact_reader_main.py")],
+    pathex=[ROOT],
+    binaries=binaries,
+    datas=build_datas + license_datas + copy_metadata("sqlcipher3"),
+    hiddenimports=["PySide6.QtCore", "PySide6.QtNetwork", "win32api", "win32con",
+                   "win32security", "win32file", "win32process", "pywintypes",
+                   "sqlcipher3", "sqlcipher3.dbapi2", "sqlcipher3._sqlite3"],
+    hookspath=[], hooksconfig={}, runtime_hooks=[],
+    excludes=["tkinter", "streamlit", "app.agent.native_driver", "app.agent.gate",
+              "app.agent.runtime", "pythoncom", "comtypes"],
+    noarchive=False,
+)
+contact_analysis.binaries = filter_qt_artifacts(contact_analysis.binaries)
+contact_analysis.datas = filter_qt_artifacts(contact_analysis.datas)
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 agent_pyz = PYZ(
     agent_analysis.pure,
     agent_analysis.zipped_data,
     cipher=block_cipher,
 )
+contact_pyz = PYZ(contact_analysis.pure, contact_analysis.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
@@ -175,15 +195,26 @@ agent_exe = EXE(
     version=os.path.join(ROOT, "build", "version_info.txt"),
 )
 
+contact_exe = EXE(
+    contact_pyz, contact_analysis.scripts, [], exclude_binaries=True,
+    name="wechat-contact-reader", debug=False, bootloader_ignore_signals=False,
+    strip=False, upx=True, console=False,
+    version=os.path.join(ROOT, "build", "version_info.txt"),
+)
+
 coll = COLLECT(
     exe,
     agent_exe,
+    contact_exe,
     a.binaries,
     agent_analysis.binaries,
+    contact_analysis.binaries,
     a.zipfiles,
     agent_analysis.zipfiles,
+    contact_analysis.zipfiles,
     a.datas,
     agent_analysis.datas,
+    contact_analysis.datas,
     strip=False,
     upx=True,
     name="福格微信助手",

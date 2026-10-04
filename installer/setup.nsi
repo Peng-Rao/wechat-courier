@@ -73,6 +73,7 @@ Function .onInit
     nsExec::ExecToLog 'taskkill /F /IM "${OLD_PRODUCT_NAME}.exe"'
     nsExec::ExecToLog 'taskkill /F /IM "${OLD_ASSISTANT_NAME}.exe"'
     nsExec::ExecToLog 'taskkill /F /IM "wechat-agent.exe"'
+    nsExec::ExecToLog 'taskkill /F /IM "wechat-contact-reader.exe"'
 FunctionEnd
 
 ; ── 安装区段 ──

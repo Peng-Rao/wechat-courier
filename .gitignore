@@ -15,6 +15,7 @@ env/
 *.jsonl
 *.txt
 !build/version_info.txt
+!licenses/*.txt
 EOF
 
 docs/

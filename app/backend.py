@@ -12,6 +12,7 @@ from .constants import PHASE_IDLE, PHASE_RUNNING, PHASE_PAUSED, PHASE_DONE
 from .demo import is_demo_mode
 from .models import extract_greeting_name
 from .sender_worker import SenderWorker
+from .contacts.controller import ContactController
 from . import win32_helper
 from .controllers import (
     AgentController,
@@ -58,6 +59,7 @@ class BackendController(QObject):
     glassOpacityChanged = Signal(int)
     showToast = Signal(str, str)
     previewIndexChanged = Signal(int)
+    operationBusyChanged = Signal()
 
     def __init__(
         self,
@@ -111,14 +113,34 @@ class BackendController(QObject):
         self._message_controller.fileActionFailed.connect(lambda detail: self.showToast.emit(detail, "error"))
         self._friends_controller = FriendController(self._settings, self)
         self._settings_controller = SettingsController(self, self._settings, self)
-        self._agent_controller = AgentController(agent_client, self)
+        self._agent_controller = AgentController(agent_client, self,
+            operation_blocked=lambda: bool(getattr(self, "_contacts_controller", None)
+                and self._contacts_controller.busy))
+        self._contacts_controller = ContactController(
+            self._settings, self, operation_blocked=lambda: (
+                self._task_controller.active or self._agent_controller.gateRecoveryBusy
+                or self._agent_controller.wechatRecoveryBusy
+                or self._phase in (PHASE_RUNNING, PHASE_PAUSED)
+                or (self._worker is not None and self._worker.isRunning())
+            ),
+        )
         self._task_controller = TaskController(
             self._agent_controller,
             self._message_controller,
             self._friends_controller,
             self._settings_controller,
             self,
+            operation_blocked=lambda: self._contacts_controller.busy,
         )
+        self._contacts_controller.busyChanged.connect(self.operationBusyChanged)
+        self._contacts_controller.busyChanged.connect(self._task_controller.executionStateChanged)
+        self._contacts_controller.busyChanged.connect(self._agent_controller.inspectionChanged)
+        self._task_controller.activeChanged.connect(self.operationBusyChanged)
+        self._task_controller.activeChanged.connect(self._contacts_controller.environmentChanged)
+        self._agent_controller.inspectionChanged.connect(self._on_contact_environment_changed)
+        self.phaseChanged.connect(self._contacts_controller.environmentChanged)
+        self.phaseChanged.connect(self.operationBusyChanged)
+        self._contacts_controller.actionFailed.connect(lambda detail: self.showToast.emit(detail, "error"))
         if auto_start_agent:
             self._agent_controller.start()
 
@@ -131,6 +153,23 @@ class BackendController(QObject):
     # ═══════════════════════════════════════
 
     # ── phase ──
+    @Property(QObject, constant=True)
+    def contacts(self):
+        return self._contacts_controller
+
+    @Property(bool, notify=operationBusyChanged)
+    def operationBusy(self):
+        return (self._contacts_controller.busy or self._task_controller.active
+                or self._phase in (PHASE_RUNNING, PHASE_PAUSED)
+                or (self._worker is not None and self._worker.isRunning()))
+
+    @Slot()
+    def _on_contact_environment_changed(self):
+        self._contacts_controller.environmentChanged()
+        if (self._agent_controller.gateRecoveryBusy or self._agent_controller.wechatRecoveryBusy) and self._contacts_controller.busy:
+            if self._contacts_controller.phase != "exporting":
+                self._contacts_controller.cancel()
+
     def _get_phase(self) -> str:
         return self._phase
 
@@ -427,6 +466,10 @@ class BackendController(QObject):
 
     @Slot()
     def start_sending(self):
+        if self._contacts_controller.busy:
+            self._fatal_error = "联系人读取或导出正在进行中"
+            self.fatalErrorChanged.emit(self._fatal_error)
+            return
         friends_raw = self._friend_list_text.strip()
         friends_list = [f.strip() for f in friends_raw.split("\n") if f.strip()]
         template = self._template_text.strip()
@@ -502,7 +545,9 @@ class BackendController(QObject):
         """重置所有状态到 idle。"""
         if self._worker and self._worker.isRunning():
             self._worker.request_stop()
-            self._worker.wait(3000)
+            if not self._worker.wait(3000) or self._worker.isRunning():
+                self.showToast.emit("发送线程尚未退出，请稍后重置。", "error")
+                return
         self._worker = None
         self._fatal_error = ""
         self._file_paths = []
@@ -673,6 +718,8 @@ class BackendController(QObject):
         self._set_inputs_enabled(True)
         self._progress_status = "已结束"
         self.progressStatusChanged.emit(self._progress_status)
+        self._contacts_controller.environmentChanged()
+        self.operationBusyChanged.emit()
         if was_running:
             if self._send_fatal_error_seen:
                 self.showToast.emit("发送任务失败！", "error")
@@ -706,6 +753,7 @@ class BackendController(QObject):
     @Slot()
     def shutdown(self):
         """Stop the v0.3 Agent and any legacy worker during GUI shutdown."""
+        self._contacts_controller.close()
         if self._worker and self._worker.isRunning():
             self._worker.request_stop()
             self._worker.wait(3000)

@@ -22,6 +22,7 @@ ApplicationWindow {
     property rect normalGeometry: Qt.rect(0, 0, 1320, 880)
     property bool _applyingWindowLayout: false
     property string shellLayoutMode: "normal"
+    property bool closeAfterContacts: false
 
     onShellLayoutModeChanged: {
         if (typeof windowShell !== "undefined") windowShell.setLayoutMode(shellLayoutMode)
@@ -228,8 +229,13 @@ ApplicationWindow {
     }
 
     onClosing: function(closeEvent) {
+        if (root.closeAfterContacts) {
+            closeEvent.accepted = false
+            return
+        }
         if (typeof backend !== "undefined" && backend) {
             if ((backend.task && backend.task.active)
+                    || (backend.contacts && backend.contacts.busy)
                     || backend.phase === "running" || backend.phase === "paused") {
                 closeEvent.accepted = false
                 closeConfirmDialog.open()
@@ -240,11 +246,26 @@ ApplicationWindow {
     // 关闭确认对话框
     ConfirmDialog {
         id: closeConfirmDialog
-        message: "自动化任务正在进行中，关闭窗口会请求安全停止。是否确认关闭？"
+        message: "任务正在进行中，关闭窗口会请求安全停止并取消联系人读取或导出。是否确认关闭？"
         isDanger: true
         confirmText: "确认关闭"
         cancelText: "取消"
-        onConfirmed: Qt.quit()
+        onConfirmed: {
+            if (typeof backend !== "undefined" && backend.contacts && backend.contacts.busy) {
+                root.closeAfterContacts = true
+                backend.contacts.cancel()
+                if (!backend.contacts.busy) Qt.quit()
+            } else {
+                Qt.quit()
+            }
+        }
+    }
+
+    Connections {
+        target: typeof backend !== "undefined" && backend.contacts ? backend.contacts : null
+        function onBusyChanged() {
+            if (root.closeAfterContacts && !backend.contacts.busy) Qt.quit()
+        }
     }
 
     ColumnLayout {

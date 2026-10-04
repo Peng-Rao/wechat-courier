@@ -21,7 +21,8 @@ TestCase {
         function restart() { inspections++ }
         function cancelGateRecovery() { cancelled++ }
     }
-    QtObject { id: backend; property var agent: agentMock }
+    QtObject { id: contactsMock; property bool busy: false }
+    QtObject { id: backend; property var agent: agentMock; property var contacts: contactsMock }
     Window {
         id: testWindow
         width: 960
@@ -40,6 +41,12 @@ TestCase {
         compare(agentMock.cancelled, 1)
         agentMock.gateRecovery = {stage: "blocked", attempt: 1}
         agentMock.gateRecoveryBusy = false
+        tryCompare(inspect, "enabled", true)
+        contactsMock.busy = true
+        tryCompare(inspect, "enabled", false)
+        mouseClick(inspect)
+        compare(agentMock.inspections, 0)
+        contactsMock.busy = false
         tryCompare(inspect, "enabled", true)
         mouseClick(inspect)
         compare(agentMock.inspections, 1)
