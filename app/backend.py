@@ -49,7 +49,6 @@ class BackendController(QObject):
     inputsEnabledChanged = Signal(bool)
     friendListTextChanged = Signal(str)
     templateTextChanged = Signal(str)
-    useForwardChanged = Signal(bool)
     filePathsChanged = Signal(list)
     fileSizesChanged = Signal(list)
     sendIntervalMinChanged = Signal(float)
@@ -75,7 +74,6 @@ class BackendController(QObject):
         self._phase = PHASE_IDLE
         self._friend_list_text = ""
         self._template_text = ""
-        self._use_forward = False
         self._file_paths: list[str] = []
         self._file_sizes: list[str] = []
         self._file_path_model = QStringListModel(self)
@@ -110,6 +108,7 @@ class BackendController(QObject):
 
         # v0.3 聚合控制器。旧属性继续保留，供现有调用方平滑迁移。
         self._message_controller = MessageController(self._settings, self)
+        self._message_controller.fileActionFailed.connect(lambda detail: self.showToast.emit(detail, "error"))
         self._friends_controller = FriendController(self._settings, self)
         self._settings_controller = SettingsController(self, self._settings, self)
         self._agent_controller = AgentController(agent_client, self)
@@ -125,7 +124,7 @@ class BackendController(QObject):
 
         # 初始化只读属性
         self.demoModeChanged.emit(is_demo_mode())
-        self.versionInfoChanged.emit(f"五阿哥微信助手 v{self._version}")
+        self.versionInfoChanged.emit(f"福格微信助手 v{self._version}")
 
     # ═══════════════════════════════════════
     #  Properties
@@ -171,17 +170,6 @@ class BackendController(QObject):
             self._update_preview()
 
     templateText = Property(str, _get_template_text, _set_template_text, notify=templateTextChanged)
-
-    # ── useForward ──
-    def _get_use_forward(self) -> bool:
-        return self._use_forward
-
-    def _set_use_forward(self, value: bool):
-        if self._use_forward != value:
-            self._use_forward = value
-            self.useForwardChanged.emit(value)
-
-    useForward = Property(bool, _get_use_forward, _set_use_forward, notify=useForwardChanged)
 
     # ── filePaths ──
     def _get_file_paths(self) -> list:
@@ -269,7 +257,7 @@ class BackendController(QObject):
 
     # ── versionInfo ──
     def _get_version_info(self) -> str:
-        return f"五阿哥微信助手 v{self._version}"
+        return f"福格微信助手 v{self._version}"
 
     versionInfo = Property(str, _get_version_info, notify=versionInfoChanged)
 
@@ -463,7 +451,6 @@ class BackendController(QObject):
         self._worker.friends = friends_list
         self._worker.message_template = template
         self._worker.file_paths = list(self._file_paths)
-        self._worker.use_forward = self._use_forward and bool(self._file_paths)
 
         # 连接信号
         self._worker.progress_updated.connect(self._on_progress_updated)

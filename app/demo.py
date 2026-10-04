@@ -22,14 +22,6 @@ class MockChatWindow:
         time.sleep(0.3)
         return True
 
-    def upload_files_to_helper(self, *a, **kw):
-        time.sleep(0.3)
-        return True
-
-    def forward_recent_merge_to(self, *a, **kw):
-        time.sleep(0.3)
-        return True
-
 
 class MockWeChatClient:
     def __init__(self, auto_connect=False):

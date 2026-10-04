@@ -12,9 +12,11 @@ def friend_rows(count):
     return [["姓名", "账号"], *[["示例学生", f"wxid_batch{i:04d}"] for i in range(count)]]
 
 
-def test_default_import_selects_one_hundred_and_rejects_next_row(qapp):
+def test_default_import_is_unselected_and_range_limit_rejects_next_row(qapp):
     model = FriendImportModel()
     model.replace_records(load_friend_records(friend_rows(101)))
+    assert model.selectedCount == 0
+    assert model.selectRange(1, 100)
     assert model.selectedCount == 100
     assert model.setSelected(100, True) is False
     assert len(model.selected_payload()) == 100
@@ -29,6 +31,8 @@ def test_import_and_select_first_valid_obey_configured_limit(tmp_path, qapp, lim
     source.write_text("姓名,账号\n" + "\n".join(
         f"示例学生,wxid_batch{i:04d}" for i in range(1001)), encoding="utf-8-sig")
     assert controller.importFile(str(source))
+    assert controller.model.selectedCount == 0
+    assert controller.model.selectRange(1, limit)
     assert controller.model.selectedCount == limit
     assert controller.model.setSelected(limit, True) is False
     controller.model.setSelected(0, False)
@@ -41,6 +45,7 @@ def test_reducing_limit_preserves_first_selected_rows_without_deleting_data(tmp_
     controller = FriendController(QSettings(str(tmp_path / "friends.ini"), QSettings.IniFormat))
     model = controller.model
     model.replace_records(load_friend_records(friend_rows(8)))
+    assert model.selectRange(1, 8)
     model.setSelected(0, False)
     model.setSelected(2, False)
     changes = []
@@ -70,6 +75,7 @@ def test_new_valid_manual_row_obeys_limit_without_auto_expanding_selection(tmp_p
     controller = FriendController(QSettings(str(tmp_path / "friends.ini"), QSettings.IniFormat))
     controller.batchLimit = 1
     controller.model.replace_records(load_friend_records(friend_rows(1)))
+    assert controller.model.selectRange(1, 1)
     row = controller.model.appendEmptyRecord()
     controller.model.setCell(row, "name", "示例学生")
     controller.model.setCell(row, "account", "wxid_manual")

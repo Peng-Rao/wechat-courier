@@ -11,7 +11,7 @@ def qml(name):
 def test_app_has_two_real_workspaces_and_settings_center():
     app = (ROOT / "qml" / "App.qml").read_text(encoding="utf-8")
     assert "消息群发" in app
-    assert "批量加好友" in app
+    assert "自动发送好友申请" in app
     assert "MessageWorkspace" in app
     assert "FriendWorkspace" in app
     assert "SettingsDialog" in app
@@ -68,7 +68,7 @@ def test_active_task_locks_navigation_settings_and_configuration_controls():
     assert "enabled: root.settingsEnabled" in titlebar
     assert "readonly property bool interactionLocked" in friends
     assert "readonly property bool interactionLocked" in messages
-    assert 'objectName: "messageUseForwardSwitch"' in messages
+    assert "useForward" not in messages
     assert "enabled: !root.interactionLocked" in messages
 
 
@@ -104,7 +104,7 @@ def test_monitor_distinguishes_completion_from_results_and_gates_recovery():
 
 def test_settings_center_contains_task_recovery_and_appearance_sections():
     source = qml("SettingsDialog.qml")
-    for label in ("消息群发", "批量加好友", "自动化与恢复", "外观"):
+    for label in ("消息群发", "自动发送好友申请", "自动化与恢复", "外观"):
         assert label in source
     assert "glassOpacity" in source
     assert "unknownPolicy" in source
@@ -115,7 +115,7 @@ def test_settings_dialog_guards_every_mutating_callback_while_task_is_active():
 
     assert "readonly property bool interactionLocked" in source
     assert "function applyIfUnlocked(callback)" in source
-    assert source.count("root.applyIfUnlocked(function()") == 16
+    assert source.count("root.applyIfUnlocked(function()") == 15
     assert "onInteractionLockedChanged" in source
     assert "运行中也可修改" not in source
 

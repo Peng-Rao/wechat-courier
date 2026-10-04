@@ -93,7 +93,7 @@ Rectangle {
         onAccepted: {
             if (panelBackend) {
                 var logLines = []
-                logLines.push("=== 五阿哥微信助手发送日志 ===")
+                logLines.push("=== 福格微信助手发送日志 ===")
                 logLines.push("任务完成状态: " + (panelBackend.progressStatus.indexOf("停止") === -1 && panelBackend.progressStatus.indexOf("错误") === -1 ? "全部完成" : "用户中止/未完成"))
                 logLines.push("成功数: " + root.successCount + " 人")
                 logLines.push("失败数: " + root.failureCount + " 人")

@@ -17,13 +17,12 @@ TestCase {
         property string fatalError: ""
         property real progressValue: 50.0
         property string progressStatus: "正在发送"
-        property string versionInfo: "五阿哥微信助手 v0.3.0"
+        property string versionInfo: "福格微信助手 v0.3.0"
         property string previewFriend: "好友1"
         property string previewGreeting: "友1"
         property string previewMessage: "你好 友1"
         property int previewFileCount: 0
         property var previewFileNames: []
-        property bool useForward: false
         property real sendIntervalMin: 2.0
         property real sendIntervalMax: 3.0
         property var filePathModel: null

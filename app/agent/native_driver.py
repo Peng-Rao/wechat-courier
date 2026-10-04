@@ -43,12 +43,15 @@ FRIEND_REQUEST_TITLES = ("申请添加朋友", "发送添加朋友申请")
 RISK_KEYWORDS = (
     "验证码",
     "操作频繁",
+    "操作过于频繁",
+    "操作太频繁",
+    "添加好友频繁",
+    "添加好友过于频繁",
     "风险提示",
     "账号限制",
     "安全验证",
     "环境异常",
 )
-FORWARD_CONFIRMATION_KEYWORDS = ("聊天记录", "合并转发")
 FRIEND_IDENTITY_LABELS = ("微信号", "手机号", "账号", "帐号")
 FRIEND_SUBMIT_SUCCESS_NAMES = (
     "朋友申请已发送",
@@ -107,6 +110,7 @@ class MessageBubbleSnapshot:
     bounds: tuple[int, int, int, int] | None
     order: int = field(compare=False)
     outgoing: bool | None = field(compare=False)
+    is_image: bool = False
 
 
 @dataclass(frozen=True)
@@ -283,46 +287,8 @@ def extract_contact_results(
     return [entry.candidate for entry in extract_search_result_rows(nodes)]
 
 
-def extract_exact_forward_candidates(
-    nodes: Iterable[tuple[Any, int]], target: str
-) -> list[Any]:
-    expected = normalize_identity(target)
-    candidates = []
-    seen = set()
-    for control, _depth in nodes:
-        if str(safe_attr(control, "ControlTypeName", "")) not in {
-            "ListItemControl",
-            "ButtonControl",
-            "CheckBoxControl",
-        }:
-            continue
-        if not bool(safe_attr(control, "IsEnabled", False)):
-            continue
-        if bool(safe_attr(control, "IsOffscreen", True)):
-            continue
-        if normalize_identity(str(safe_attr(control, "Name", ""))) != expected:
-            continue
-        key = _control_reference(control)
-        if key not in seen:
-            seen.add(key)
-            candidates.append(control)
-    return candidates
 
 
-def filter_recent_message_bubbles(
-    nodes: Iterable[tuple[Any, int]],
-    accepted_classes: Sequence[str],
-    count: int,
-) -> list[Any]:
-    if count <= 0:
-        return []
-    accepted = set(accepted_classes)
-    bubbles = [
-        control
-        for control, _depth in nodes
-        if str(safe_attr(control, "ClassName", "")) in accepted
-    ]
-    return bubbles[-count:]
 
 
 def control_key(control: Any) -> tuple:
@@ -364,36 +330,6 @@ def _stable_message_control_identity(control: Any) -> tuple:
     )
 
 
-def has_new_forward_confirmation(
-    controls: Iterable[Any], before: Iterable[tuple]
-) -> bool:
-    prior_identities = set()
-    for entry in before:
-        if (
-            isinstance(entry, tuple)
-            and len(entry) == 2
-            and isinstance(entry[0], tuple)
-            and entry[0]
-            and entry[0][0] in {"runtime", "fallback"}
-        ):
-            prior_identities.add(entry[0])
-        else:
-            prior_identities.add(entry)
-
-    message_controls = []
-    for control in controls:
-        class_name = str(safe_attr(control, "ClassName", ""))
-        if "Chat" not in class_name and "Message" not in class_name:
-            continue
-        message_controls.append(control)
-
-    if not message_controls:
-        return False
-    tail = message_controls[-1]
-    if _stable_message_control_identity(tail) in prior_identities:
-        return False
-    text = str(safe_attr(tail, "Name", "")).strip()
-    return any(keyword in text for keyword in FORWARD_CONFIRMATION_KEYWORDS)
 
 
 def resolve_friend_form_fields(nodes: Iterable[tuple[Any, int]]):
@@ -414,10 +350,34 @@ def resolve_friend_form_fields(nodes: Iterable[tuple[Any, int]]):
 
 
 def raise_for_risk_controls(nodes: Iterable[tuple[Any, int]]) -> None:
-    for control, _depth in nodes:
-        text = str(safe_attr(control, "Name", "")).strip()
-        if text and any(keyword in text for keyword in RISK_KEYWORDS):
-            raise RiskControlError(text)
+    excluded_depth = None
+    for control, depth in nodes:
+        if excluded_depth is not None and depth > excluded_depth:
+            continue
+        excluded_depth = None
+        class_name = str(_cached_property(control, "ClassName", "")).lower()
+        automation_id = str(_cached_property(control, "AutomationId", "")).lower()
+        if "chat_message_list" in automation_id or any(value in class_name for value in ("chattextitem", "chatbubbleitem", "chatfileitem")):
+            excluded_depth = depth
+            continue
+        if _cached_property(control, "IsOffscreen", False):
+            continue
+        text = str(_cached_property(control, "Name", "")).strip()
+        frequency = bool(re.search(r"(?:操作.{0,4}频繁|(?:添加|申请).{0,12}(?:好友|朋友).{0,12}频繁|频繁.{0,12}(?:添加|申请))", text))
+        if text and (frequency or any(keyword in text for keyword in RISK_KEYWORDS)):
+            error = RiskControlError(text)
+            error.risk_kind = "frequency" if frequency else "verification" if "验证" in text else "account_risk"
+            raise error
+
+
+def _cached_property(control, name: str, default=None):
+    try:
+        element = getattr(control, "Element", None)
+        if element is not None:
+            return getattr(element, "Cached" + name)
+    except Exception:
+        pass
+    return safe_attr(control, name, default)
 
 
 def extract_labeled_friend_identities(
@@ -594,6 +554,7 @@ class NativeWeixinDriver:
         self._selected_target = ""
         self._selected_identities: frozenset[str] = frozenset()
         self._composer = None
+        self._attachment_evidence = {}
         self._add_hwnd = 0
         self._verify_hwnd = 0
         self._friend_account = ""
@@ -601,7 +562,6 @@ class NativeWeixinDriver:
         self._friend_query_generation = 0
         self._friend_profile_token: tuple[Any, ...] | None = None
         self._friend_search = None
-        self._forward_source_count = 0
         self._session_generation = 0
         self._session_identity_changed = False
         self._lease_checked = False
@@ -662,6 +622,7 @@ class NativeWeixinDriver:
             "version": str(session.version) if session is not None else "",
             "sessionGeneration": self._session_generation,
             "taskKind": self._task_kind,
+            "attachmentVerification": dict(self._attachment_evidence),
             "windowEnabled": None,
             "blockingWindow": None,
             "uiaReady": False,
@@ -1571,10 +1532,38 @@ class NativeWeixinDriver:
         container = root or self._control_root(target_hwnd)
         if container is None:
             return
-        controls = self._query.find_all(
-            container, name=RISK_KEYWORDS, enabled=False
-        )
-        raise_for_risk_controls((control, 1) for control in controls)
+        containers = [container]
+        main_hwnd = int(safe_attr(self._session, "hwnd", 0) or 0)
+        risk_fragments = ("alert", "toast", "messagebox", "warning", "risk_tip", "security_tip")
+        class_name = str(_cached_property(container, "ClassName", ""))
+        identity = (class_name + " "
+                    + str(_cached_property(container, "AutomationId", ""))).lower()
+        friend_classes = {"mmui::AddFriendWindow", "mmui::VerifyFriendWindow"}
+        known_friend_window = class_name in friend_classes or target_hwnd in {
+            int(getattr(self, "_add_hwnd", 0) or 0), int(getattr(self, "_verify_hwnd", 0) or 0),
+        } - {0}
+        if (target_hwnd == main_hwnd or not known_friend_window) and not any(
+                value in identity for value in risk_fragments):
+            # Ordinary chats and search results are not live restriction hints.
+            containers = [candidate for candidate in self._query.find_all(
+                container, control_types=("WindowControl", "PaneControl", "GroupControl", "CustomControl"),
+                enabled=False, visible=True,
+            ) if any(value in (str(_cached_property(candidate, "ClassName", "")) + " "
+                              + str(_cached_property(candidate, "AutomationId", ""))).lower()
+                     for value in risk_fragments)][:16]
+        for warning_root in containers:
+            controls = self._query.find_all(
+                warning_root, control_types=("TextControl", "CustomControl"), enabled=False, visible=True,
+            )
+            try:
+                raise_for_risk_controls([(warning_root, 0), *((control, 1) for control in controls[:128])])
+            except RiskControlError as exc:
+                if getattr(exc, "risk_kind", "") == "frequency" and (
+                    getattr(self, "_task_kind", "") == "friend_add"
+                    or "addfriend" in identity or "verifyfriend" in identity
+                ):
+                    exc.risk_kind = "friend_frequency"
+                raise
 
     def _raise_process_risk(self) -> None:
         if self._query is None:
@@ -2504,10 +2493,7 @@ class NativeWeixinDriver:
         for root in roots:
             if root is None:
                 continue
-            risk_controls = self._query.find_all(
-                root, name=RISK_KEYWORDS, enabled=False
-            )
-            raise_for_risk_controls([(control, 1) for control in risk_controls])
+            self._raise_scoped_risk(root=root)
             search_lists.extend(
                 self._query.find_all(
                     root,
@@ -3012,6 +2998,10 @@ class NativeWeixinDriver:
                     bounds=self._rectangle_tuple(rectangle),
                     order=order,
                     outgoing=outgoing,
+                    is_image=(
+                        str(safe_attr(bubble, "ClassName", "")) == "mmui::ChatBubbleReferItemView"
+                        and outer_name in {"图片", "[图片]"}
+                    ),
                 )
             )
         return tuple(snapshots)
@@ -3093,9 +3083,7 @@ class NativeWeixinDriver:
             exact_filename = expected in filename_tokens(tail)
             if tail.class_name != file_class and not exact_filename:
                 return False
-            # A full-width Qt row has no usable direction.  In that layout the
-            # exact filename token is required to bind the new tail bubble to
-            # this one paste/Enter action.
+            # Full-width Qt rows need the exact filename to correlate delivery.
             if tail.outgoing is None and not exact_filename:
                 return False
             if self.read_composer_text() != "":
@@ -3185,8 +3173,9 @@ class NativeWeixinDriver:
         )
         return None
 
-    def send_files(self, paths: Sequence[str]) -> list[dict[str, str]]:
+    def send_files(self, paths: Sequence[str]) -> list[dict[str, Any]]:
         from src.utils.clipboard_utils import set_files_to_clipboard
+        from .attachments import is_image_attachment
 
         results = []
         for value in paths:
@@ -3196,7 +3185,9 @@ class NativeWeixinDriver:
                     {"path": path, "outcome": "error", "detail": "文件不存在"}
                 )
                 continue
-            before = self.attachment_snapshot()
+            is_image = is_image_attachment(path)
+            self._attachment_evidence = {"status": "PASTING", "sourceImage": is_image}
+            before = () if is_image else self.attachment_snapshot()
             if not set_files_to_clipboard([path]):
                 results.append(
                     {"path": path, "outcome": "error", "detail": "剪贴板写入失败"}
@@ -3205,8 +3196,28 @@ class NativeWeixinDriver:
             self._report_progress("attachment_paste")
             self._click_bounds(self._composer)
             self._composer = self._send_keys(self._composer, "{Ctrl}v", wait_time=0.1)
-            draft_was_visible = self._attachment_draft_visible(Path(path).name)
+            if is_image:
+                draft_was_visible = self.read_composer_text() == "\ufffc"
+                if not draft_was_visible:
+                    self._attachment_evidence["status"] = "IMAGE_DRAFT_NOT_READY"
+                    results.append({"path": path, "outcome": "unknown", "detail": "图片草稿未确认，未触发发送"})
+                    continue
+            else:
+                draft_was_visible = self._attachment_draft_visible(Path(path).name)
             self._invoke_once_or_key(("发送", "发送(S)"), self._composer)
+            if is_image:
+                # Temporary policy: accepted Enter + cleared composer counts as success.
+                # Delivery evidence is deliberately not claimed (see the open issue).
+                self._attachment_evidence.update(
+                    status="IMAGE_VERIFICATION_SKIPPED", triggerAccepted=True,
+                    composerCleared=True, verified=False,
+                )
+                self._report_progress("attachment_complete")
+                results.append({
+                    "path": path, "outcome": "success", "detail": "发送成功",
+                    "verified": False, "verificationSkipped": True,
+                })
+                continue
             self._report_progress("attachment_verify")
             verified = self.verify_attachment_sent(
                 before,
@@ -3214,6 +3225,7 @@ class NativeWeixinDriver:
                 self._timeout,
                 draft_was_visible=draft_was_visible,
             )
+            self._attachment_evidence["status"] = "FILE_VERIFIED" if verified else "FILE_RESULT_UNKNOWN"
             results.append(
                 {
                     "path": path,
@@ -3223,54 +3235,8 @@ class NativeWeixinDriver:
             )
         return results
 
-    def _open_exact_chat(self, target: str) -> None:
-        if not self.ensure_search_ready():
-            raise RuntimeError("搜索入口不可用")
-        candidates = self.search_contacts(target)
-        expected = normalize_identity(target)
-        exact = [
-            candidate
-            for candidate in candidates
-            if any(
-                normalize_identity(identity) == expected
-                for identity in candidate.identities
-            )
-        ]
-        if len(exact) != 1:
-            raise RuntimeError(f"无法定位唯一聊天目标：{target}")
-        self.select_search_result(exact[0])
-        title = normalize_identity(self.current_chat_title())
-        if not title or not any(
-            normalize_identity(identity) == title
-            for identity in exact[0].identities
-        ):
-            raise RuntimeError(f"聊天标题校验失败：{target}")
 
-    def prepare_forward_bundle(self, paths: Sequence[str]) -> dict[str, Any]:
-        materialized = [str(Path(value)) for value in paths]
-        if not materialized or any(not Path(path).is_file() for path in materialized):
-            return {"outcome": "error", "detail": "合并转发源文件不存在"}
-        self._open_exact_chat("文件传输助手")
-        results = self.send_files(materialized)
-        if any(result.get("outcome") == "unknown" for result in results):
-            return {"outcome": "unknown", "detail": "源文件上传结果未知"}
-        failed = [result for result in results if result.get("outcome") != "success"]
-        if failed:
-            return {
-                "outcome": "error",
-                "detail": f"{len(failed)} 个源文件上传失败",
-            }
-        self._forward_source_count = len(materialized)
-        return {"outcome": "success", "count": len(materialized)}
 
-    def _legacy_matching_all_controls(self, **selector) -> list[Any]:
-        nodes = self._all_nodes()
-        raise_for_risk_controls(nodes)
-        return [
-            control
-            for control, depth in nodes
-            if find_exact_control(((control, depth),), **selector) is control
-        ]
 
     def _visible_process_roots(self) -> list[tuple[int, Any]]:
         import win32gui
@@ -3306,399 +3272,23 @@ class NativeWeixinDriver:
                 result.append((hwnd, root))
         return result
 
-    def _matching_all_controls(self, **selector) -> list[Any]:
-        if self._query is None:
-            return self._legacy_matching_all_controls(**selector)
-        matches = []
-        seen = set()
-        for hwnd, root in self._visible_process_roots():
-            self._raise_scoped_risk(hwnd=hwnd, root=root)
-            for control in self._find_scoped_controls(
-                hwnd=hwnd, root=root, **selector
-            ):
-                reference = _control_reference(control)
-                if reference not in seen:
-                    seen.add(reference)
-                    matches.append(control)
-        return matches
 
-    def _find_all_control(self, **selector):
-        matches = self._matching_all_controls(**selector)
-        return matches[0] if len(matches) == 1 else None
 
-    def _resolve_bound_all_control(
-        self, reference: tuple[Any, ...], **selector
-    ):
-        matches = [
-            control
-            for control in self._matching_all_controls(**selector)
-            if _control_reference(control) == reference
-        ]
-        return matches[0] if len(matches) == 1 else None
 
-    def _click_bound_all_control_once(
-        self, control, postcondition, **selector
-    ):
-        reference = _control_reference(control)
-        return self._actions.click(
-            control,
-            postcondition,
-            pre_resolve_control=lambda: self._resolve_bound_all_control(
-                reference, **selector
-            ),
-            wake_event=self._wake_event,
-        )
 
-    def _wait_all_control(self, **selector):
-        holder = {"control": None}
 
-        def locate():
-            holder["control"] = self._find_all_control(**selector)
-            return holder["control"] is not None
 
-        if not self._wait_for(locate, self._timeout):
-            raise RuntimeError(f"转发控件未出现：{selector}")
-        return holder["control"]
 
-    def _message_bubbles(self) -> list[Any]:
-        profile = self._session.profile
-        message_list = self._wait_control(
-            automation_id=profile.chat_message_list_automation_id,
-            enabled=False,
-        )
-        nodes = [
-            (control, 1)
-            for control in self._find_scoped_controls(
-                hwnd=self._session.hwnd,
-                root=message_list,
-                enabled=False,
-            )
-        ]
-        return filter_recent_message_bubbles(
-            nodes, profile.chat_message_classes, len(nodes)
-        )
 
-    def _recent_message_bubbles(self, count: int) -> list[Any]:
-        bubbles = self._message_bubbles()[-count:] if count > 0 else []
-        if len(bubbles) != count:
-            raise RuntimeError(f"源消息不足：需要 {count} 条，找到 {len(bubbles)} 条")
-        return bubbles
 
-    def _resolve_message_bubble(self, reference: tuple[Any, ...]):
-        matches = [
-            bubble
-            for bubble in self._message_bubbles()
-            if _control_reference(bubble) == reference
-        ]
-        return matches[0] if len(matches) == 1 else None
 
-    def _right_click_bounds(self, control) -> None:
-        rectangle = safe_attr(control, "BoundingRectangle")
-        if (
-            rectangle is None
-            or rectangle.right <= rectangle.left
-            or rectangle.bottom <= rectangle.top
-        ):
-            raise RuntimeError("消息气泡没有可用边界")
-        point = (
-            (rectangle.left + rectangle.right) // 2,
-            (rectangle.top + rectangle.bottom) // 2,
-        )
-        window_root, _window_rectangle = self._owning_window(control)
-        self._prepare_click_window(window_root, control, point)
-        self._uia.RightClick(*point)
 
-    @staticmethod
-    def _read_selection_state(control) -> bool | None:
-        for getter, attribute in (
-            ("GetSelectionItemPattern", "IsSelected"),
-            ("GetTogglePattern", "ToggleState"),
-        ):
-            try:
-                pattern = getattr(control, getter)()
-                value = getattr(pattern, attribute)
-                if attribute == "ToggleState":
-                    return int(value) == 1
-                return bool(value)
-            except _STOP_ERRORS:
-                raise
-            except Exception:
-                continue
-        return None
 
-    @staticmethod
-    def _selection_state(control) -> bool:
-        return NativeWeixinDriver._read_selection_state(control) is True
 
-    def _select_forward_bubble(self, control) -> None:
-        reference = _control_reference(control)
 
-        def resolve():
-            return self._resolve_message_bubble(reference)
 
-        current = resolve()
-        if current is None:
-            raise RuntimeError("待转发消息已变化，拒绝选择")
-        if self._selection_state(current):
-            return
-        self._actions.click(
-            current,
-            lambda: (
-                (fresh := resolve()) is not None
-                and self._selection_state(fresh)
-            ),
-            pre_resolve_control=resolve,
-            wake_event=self._wake_event,
-        )
 
-    def _forward_search_edit(self):
-        profile = self._session.profile
-        for automation_id in profile.forward_search_automation_ids:
-            controls = self._matching_all_controls(
-                control_type="EditControl",
-                automation_id=automation_id,
-            )
-            if len(controls) == 1:
-                return controls[0]
-        controls = self._matching_all_controls(
-            name=("搜索", "查找"),
-            control_type="EditControl",
-        )
-        return controls[0] if len(controls) == 1 else None
 
-    def _forward_candidate(self, target: str):
-        candidates = self._matching_all_controls(
-            name=target,
-            control_types=("ListItemControl", "ButtonControl", "CheckBoxControl"),
-            visible=True,
-        )
-        if len(candidates) != 1:
-            raise RuntimeError(f"转发目标不唯一或未找到：{target}")
-        return candidates[0]
-
-    def _forward_recipient_selected(self, target: str, search_edit) -> bool:
-        candidates = self._matching_all_controls(
-            name=target,
-            control_types=("ListItemControl", "ButtonControl", "CheckBoxControl"),
-            visible=True,
-        )
-        if len(candidates) != 1:
-            return False
-        target_control = candidates[0]
-        if self._read_selection_state(target_control) is not True:
-            return False
-
-        expected_owner = None
-        if self._session is not None:
-            try:
-                expected_owner, _rectangle = self._owning_window(search_edit)
-            except _STOP_ERRORS:
-                raise
-            except Exception:
-                return False
-
-        target_class = str(safe_attr(target_control, "ClassName", ""))
-        target_type = str(safe_attr(target_control, "ControlTypeName", ""))
-        selected_references = set()
-        seen_references = set()
-        peers = self._matching_all_controls(
-            control_type=target_type,
-            class_name=target_class,
-            enabled=False,
-        )
-        for control in peers:
-            if expected_owner is not None:
-                try:
-                    owner, _rectangle = self._owning_window(control)
-                except _STOP_ERRORS:
-                    raise
-                except Exception:
-                    return False
-                expected_hwnd = int(
-                    safe_attr(expected_owner, "NativeWindowHandle", 0) or 0
-                )
-                owner_hwnd = int(safe_attr(owner, "NativeWindowHandle", 0) or 0)
-                if expected_hwnd and owner_hwnd:
-                    if owner_hwnd != expected_hwnd:
-                        continue
-                elif owner is not expected_owner:
-                    continue
-
-            reference = _control_reference(control)
-            if reference in seen_references:
-                continue
-            seen_references.add(reference)
-            selection_state = self._read_selection_state(control)
-            if selection_state is None:
-                return False
-            if selection_state:
-                selected_references.add(reference)
-
-        return selected_references == {_control_reference(target_control)}
-
-    def _forward_message_edit(self, search_edit):
-        controls = self._matching_all_controls(
-            name=("留言", "附言", "给朋友留言"),
-            control_type="EditControl",
-            visible=True,
-        )
-        for control in controls:
-            if control is search_edit:
-                continue
-            return control
-        return None
-
-    def _invoke_once(self, control) -> str:
-        try:
-            pattern = control.GetInvokePattern()
-        except _STOP_ERRORS:
-            raise
-        except Exception:
-            pattern = None
-        if pattern is not None:
-            try:
-                result = pattern.Invoke(waitTime=0)
-            except TypeError:
-                result = pattern.Invoke()
-            if result is False:
-                raise RuntimeError("InvokePattern 返回失败")
-            return "invoke_pattern"
-        self._click_bounds(control)
-        return "uia_bounds_click"
-
-    def forward_bundle(
-        self, target: str, message: str, paths: Sequence[str]
-    ) -> dict[str, str]:
-        count = int(getattr(self, "_forward_source_count", 0))
-        if count != len(paths) or count <= 0:
-            return {"outcome": "error", "detail": "合并转发源文件尚未准备"}
-
-        self._open_exact_chat(target)
-        target_snapshot = self.message_snapshot()
-        self._open_exact_chat("文件传输助手")
-        bubbles = self._recent_message_bubbles(count)
-        last_bubble = self._resolve_message_bubble(
-            _control_reference(bubbles[-1])
-        )
-        if last_bubble is None:
-            raise RuntimeError("待转发消息已变化，拒绝打开多选")
-        self._right_click_bounds(last_bubble)
-        interactive_types = tuple(sorted(INTERACTIVE_CONTROL_TYPES))
-        multi_selector = dict(
-            name=("多选", "选择多条", "多选消息"),
-            control_types=interactive_types,
-            visible=True,
-        )
-        multi = self._wait_all_control(**multi_selector)
-        forward_selector = dict(
-            name=("转发",),
-            control_types=interactive_types,
-            visible=True,
-        )
-        self._click_bound_all_control_once(
-            multi,
-            lambda: self._find_all_control(**forward_selector) is not None,
-            **multi_selector,
-        )
-
-        bubbles = self._recent_message_bubbles(count)
-        bubble_references = {_control_reference(bubble) for bubble in bubbles}
-        for bubble in bubbles:
-            self._select_forward_bubble(bubble)
-        selected_references = {
-            _control_reference(bubble)
-            for bubble in self._message_bubbles()
-            if self._selection_state(bubble)
-        }
-        if selected_references != bubble_references:
-            raise RuntimeError("多选消息集合与待转发文件不一致，拒绝继续")
-
-        forward = self._wait_all_control(**forward_selector)
-        merge_selector = dict(
-            name=("合并转发", "合并发送"),
-            control_types=interactive_types,
-            visible=True,
-        )
-        self._click_bound_all_control_once(
-            forward,
-            lambda: self._find_all_control(**merge_selector) is not None,
-            **forward_selector,
-        )
-        merge = self._wait_all_control(**merge_selector)
-        self._click_bound_all_control_once(
-            merge,
-            lambda: self._forward_search_edit() is not None,
-            **merge_selector,
-        )
-
-        search_edit = self._forward_search_edit()
-        if search_edit is None:
-            raise RuntimeError("转发搜索框未出现")
-        self._actions.set_text(search_edit, target, wake_event=self._wake_event)
-        candidate = self._forward_candidate(target)
-        candidate_reference = _control_reference(candidate)
-
-        def resolve_candidate():
-            try:
-                current = self._forward_candidate(target)
-            except _STOP_ERRORS:
-                raise
-            except Exception:
-                return None
-            return (
-                current
-                if _control_reference(current) == candidate_reference
-                else None
-            )
-
-        self._actions.click(
-            candidate,
-            lambda: self._forward_recipient_selected(target, search_edit),
-            pre_resolve_control=resolve_candidate,
-            wake_event=self._wake_event,
-        )
-
-        if message:
-            message_edit = self._forward_message_edit(search_edit)
-            if message_edit is None:
-                raise RuntimeError("转发留言输入框未暴露到 UIA")
-            self._actions.set_text(
-                message_edit, message, wake_event=self._wake_event
-            )
-
-        if not self._forward_recipient_selected(target, search_edit):
-            raise RuntimeError("转发收件人未保持唯一精确选中状态，拒绝发送")
-        send_selector = dict(
-            name=("发送", "确定"),
-            control_type="ButtonControl",
-            visible=True,
-        )
-        send = self._wait_all_control(**send_selector)
-        fresh_send = self._resolve_bound_all_control(
-            _control_reference(send), **send_selector
-        )
-        if fresh_send is None:
-            raise RuntimeError("转发发送按钮已变化，拒绝触发")
-        if not self._forward_recipient_selected(target, search_edit):
-            raise RuntimeError("转发收件人在发送前已变化，拒绝触发")
-        self._invoke_once(fresh_send)
-
-        self._open_exact_chat(target)
-        appended = self._wait_for(
-            lambda: has_new_forward_confirmation(
-                self._message_controls(), target_snapshot
-            ),
-            self._timeout,
-            hwnd=self._session.hwnd,
-        )
-        if not appended:
-            for hwnd, root in self._visible_process_roots():
-                self._raise_scoped_risk(hwnd=hwnd, root=root)
-            return {"outcome": "unknown", "detail": "已触发合并转发，但结果无法确认"}
-        return {
-            "outcome": "success",
-            "detail": f"{count} 个文件已合并转发并确认",
-        }
 
     def _activate_navigation(
         self,
@@ -4468,10 +4058,7 @@ __all__ = [
     "SearchResultRow",
     "extract_contact_results",
     "extract_search_result_rows",
-    "extract_exact_forward_candidates",
-    "filter_recent_message_bubbles",
     "find_exact_control",
-    "has_new_forward_confirmation",
     "extract_labeled_friend_identities",
     "raise_for_risk_controls",
     "resolve_friend_form_fields",

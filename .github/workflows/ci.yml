@@ -10,7 +10,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  PRODUCT_NAME: "五阿哥微信助手"
+  PRODUCT_NAME: "福格微信助手"
 
 jobs:
   # ── Test ──

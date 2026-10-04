@@ -24,6 +24,7 @@ Item {
     property int contextRow: -1
     property int currentRow: -1
     property int previewRevision: 0
+    readonly property real tableScale: Math.min(1, width / 1160)
     readonly property var currentPreview: {
         var revision = previewRevision
         return friendBackend && currentRow >= 0 ? friendBackend.model.preview(currentRow) : ({})
@@ -42,6 +43,8 @@ Item {
         function onModelReset() {
             root.currentRow = root.friendBackend.model.count > 0 ? 0 : -1
             ++root.previewRevision
+            rangeStart.text = "1"
+            rangeEnd.text = String(Math.max(1, Math.min(root.friendBackend.model.count, root.friendBackend.batchLimit)))
             Qt.callLater(function() {
                 friendTable.forceLayout()
                 if (root.friendBackend && root.friendBackend.model.count > 0)
@@ -69,6 +72,13 @@ Item {
 
     function dismissMonitor() {
         root.monitorDismissed = true
+        if (root.taskBackend && root.taskBackend.riskStopModelRow >= 0) {
+            root.currentRow = root.taskBackend.riskStopModelRow
+            Qt.callLater(function() {
+                friendTable.forceLayout()
+                friendTable.positionViewAtRow(root.currentRow, TableView.Contain)
+            })
+        }
     }
 
     Connections {
@@ -165,6 +175,7 @@ Item {
                         anchors.rightMargin: 16
                         spacing: 10
                         ColumnLayout {
+                            Layout.fillWidth: true
                             spacing: 2
                             Text {
                                 text: "待添加账号"
@@ -174,11 +185,13 @@ Item {
                                 font.bold: true
                             }
                             Text {
+                                Layout.fillWidth: true
                                 text: "导入需包含姓名、账号；可右键新增/删除，单元格可编辑；每次最多 "
                                     + (root.friendBackend ? root.friendBackend.batchLimit : 100) + " 条"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
+                                elide: Text.ElideRight
                             }
                         }
                         Item { Layout.fillWidth: true }
@@ -274,15 +287,6 @@ Item {
                             font.bold: true
                         }
                         Button {
-                            objectName: "selectFirstFriendsButton"
-                            text: "选择前 " + (root.friendBackend ? root.friendBackend.batchLimit : 100) + " 条"
-                            enabled: root.friendBackend && !root.interactionLocked
-                            onClicked: {
-                                if (!root.interactionLocked && root.friendBackend)
-                                    root.friendBackend.model.selectFirstValid()
-                            }
-                        }
-                        Button {
                             objectName: "clearFriendTableButton"
                             text: "清空表格"
                             enabled: root.friendBackend && root.friendBackend.model.count > 0
@@ -290,6 +294,66 @@ Item {
                             onClicked: {
                                 if (!root.interactionLocked) root.clearFriendTable()
                             }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 50
+                    color: WxTheme.clToolbarFill
+                    border.color: WxTheme.clSurfaceBorder
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 8
+                        Text { text: "起始序号"; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeSmall }
+                        TextField {
+                            id: rangeStart
+                            objectName: "friendRangeStart"
+                            Accessible.name: objectName
+                            Layout.preferredWidth: 72
+                            text: "1"
+                            enabled: !root.interactionLocked
+                            validator: IntValidator { bottom: 1; top: 1000000 }
+                            selectByMouse: true
+                        }
+                        Text { text: "结束序号"; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeSmall }
+                        TextField {
+                            id: rangeEnd
+                            objectName: "friendRangeEnd"
+                            Accessible.name: objectName
+                            Layout.preferredWidth: 72
+                            text: String(root.friendBackend ? Math.max(1, Math.min(root.friendBackend.model.count, root.friendBackend.batchLimit)) : 1)
+                            enabled: !root.interactionLocked
+                            validator: IntValidator { bottom: 1; top: 1000000 }
+                            selectByMouse: true
+                        }
+                        Button {
+                            objectName: "selectFriendRangeButton"
+                            Accessible.name: objectName
+                            text: "选择区间"
+                            enabled: !!root.friendBackend && !root.interactionLocked
+                            onClicked: root.friendBackend.model.selectRange(
+                                rangeStart.acceptableInput ? Number(rangeStart.text) : 0,
+                                rangeEnd.acceptableInput ? Number(rangeEnd.text) : 0)
+                        }
+                        Button {
+                            objectName: "clearFriendSelectionButton"
+                            text: "清除选择"
+                            enabled: !!root.friendBackend && !root.interactionLocked
+                            onClicked: root.friendBackend.model.clearSelection()
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.friendBackend ? root.friendBackend.model.selectionError || "" : ""
+                            elide: Text.ElideRight
+                            color: WxTheme.clDangerNew
+                            font.pixelSize: WxTheme.fontSizeSmall
+                            ToolTip.visible: rangeErrorHover.containsMouse && text.length > 0
+                            ToolTip.text: text
+                            MouseArea { id: rangeErrorHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                         }
                     }
                 }
@@ -306,12 +370,12 @@ Item {
                         spacing: 0
                         Text { text: "选择"; Layout.preferredWidth: 44; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
                         Text { text: "序号"; Layout.preferredWidth: 40; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "姓名"; Layout.preferredWidth: 120; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "账号"; Layout.preferredWidth: 170; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "后缀（可自定义）"; Layout.preferredWidth: 130; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Text { text: "姓名"; Layout.preferredWidth: 120 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Text { text: "账号"; Layout.preferredWidth: 170 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Text { text: "后缀（可自定义）"; Layout.preferredWidth: 130 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
                         Text { text: "打招呼语"; Layout.fillWidth: true; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "自动备注"; Layout.preferredWidth: 140; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "状态"; Layout.preferredWidth: 140; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Text { text: "自动备注"; Layout.preferredWidth: 140 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Text { text: "状态"; Layout.preferredWidth: 140 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
                     }
                 }
 
@@ -328,6 +392,7 @@ Item {
                         rowHeightProvider: function(row) { return 46 }
                         delegate: Rectangle {
                             required property int row
+                            required property string itemId
                             required property string account
                             required property string friendName
                             required property string relationshipChoice
@@ -337,11 +402,20 @@ Item {
                             required property string error
                             required property string status
                             required property bool selected
+                            readonly property bool riskStoppedRow: !!(root.taskBackend
+                                && root.taskBackend.riskStopItemId === itemId
+                                && root.taskBackend.riskStopModelRow >= 0)
                             implicitWidth: friendTable.width
                             implicitHeight: 46
-                            color: !valid ? WxTheme.clDangerSoft
+                            color: riskStoppedRow || !valid ? WxTheme.clDangerSoft
                                 : selected ? (row % 2 ? WxTheme.clRowAlternate : "transparent")
                                 : "transparent"
+                            Rectangle {
+                                width: 3
+                                height: parent.height
+                                visible: parent.riskStoppedRow
+                                color: WxTheme.clDangerNew
+                            }
                             Rectangle {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
@@ -366,13 +440,13 @@ Item {
                                 Text {
                                     text: String(row + 1).padStart(2, "0")
                                     Layout.preferredWidth: 40
-                                    color: WxTheme.clTextSecondary
+                                    color: riskStoppedRow ? WxTheme.clDangerNew : WxTheme.clTextSecondary
                                     font.family: WxTheme.fontFamily
                                     font.pixelSize: WxTheme.fontSizeSmall
                                 }
                                 TextField {
                                     objectName: "friendNameField"
-                                    Layout.preferredWidth: 120
+                                    Layout.preferredWidth: 120 * root.tableScale
                                     text: friendName
                                     enabled: !root.interactionLocked
                                     color: WxTheme.clTextPrimary
@@ -391,7 +465,7 @@ Item {
                                     objectName: "friendAccountField"
                                     Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                                         ? "friendAccountField" : "好友账号"
-                                    Layout.preferredWidth: 170
+                                    Layout.preferredWidth: 170 * root.tableScale
                                     readonly property int modelRow: parent.parent.row
                                     text: account
                                     onActiveFocusChanged: { if (activeFocus) root.currentRow = row }
@@ -411,7 +485,7 @@ Item {
                                 }
                                 FriendRelationshipSelector {
                                     objectName: "friendRelationshipSelector"
-                                    Layout.preferredWidth: 130
+                                    Layout.preferredWidth: 130 * root.tableScale
                                     choice: relationshipChoice
                                     options: root.friendBackend ? root.friendBackend.relationshipOptions : []
                                     enabled: !root.interactionLocked
@@ -447,7 +521,7 @@ Item {
                                 }
                                 TextField {
                                     objectName: "friendRemarkField"
-                                    Layout.preferredWidth: 140
+                                    Layout.preferredWidth: 140 * root.tableScale
                                     text: remark
                                     readOnly: true
                                     selectByMouse: true
@@ -464,7 +538,7 @@ Item {
                                     }
                                 }
                                 Item {
-                                    Layout.preferredWidth: 140
+                                    Layout.preferredWidth: 140 * root.tableScale
                                     Layout.fillHeight: true
                                     Rectangle {
                                         anchors.centerIn: parent
@@ -480,7 +554,7 @@ Item {
                                             id: statusText
                                             anchors.centerIn: parent
                                             width: parent.width - 12
-                                            text: !valid ? error
+                                            text: riskStoppedRow ? (root.taskBackend.riskStopKind === "friend_frequency" ? "频繁限制" : "风控停止") : !valid ? error
                                                 : status === "working" ? "执行中"
                                                 : status === "success"
                                                     ? (root.taskBackend && root.taskBackend.acceptanceEnabled

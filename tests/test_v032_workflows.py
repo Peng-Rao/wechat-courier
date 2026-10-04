@@ -81,17 +81,17 @@ def test_false_precondition_records_return_value_and_action_completion():
                for _, payload in notices)
 
 
-def test_stop_requested_before_forward_never_uploads_source():
+def test_stop_requested_before_attachment_never_sends():
     driver = LifecycleDriver()
     engine = WeixinWorkflowEngine(driver_factory=lambda: driver)
     control = TaskControl()
     control.request_stop()
-    task = TaskRequest(task_id="stopped-forward", kind="message_send", items=[
+    task = TaskRequest(task_id="stopped-attachment", kind="message_send", items=[
         TaskItem(item_id="item", target="文件传输助手", message="note")
-    ], options=TaskOptions(use_forward=True, file_paths=("test.txt",)))
+    ], options=TaskOptions(file_paths=("test.txt",)))
     result = engine.run(task, control, lambda *_: None)
-    assert driver.forward_preparations == 0
-    assert driver.forward_targets == []
+    assert driver.sent == []
+    assert driver.sent_files == []
     assert result["outcome"] == "stopped"
     assert result["cleanup"]["success"] is True
 

@@ -21,6 +21,7 @@ class TaskControl:
     def __init__(self, *, require_result_ack: bool = False) -> None:
         self._condition = threading.Condition()
         self._paused = False
+        self._pause_generation = 0
         self._stop_requested = False
         self._require_result_ack = require_result_ack
         self._result_acks: set[str] = set()
@@ -37,6 +38,8 @@ class TaskControl:
 
     def pause(self) -> None:
         with self._condition:
+            if not self._paused:
+                self._pause_generation += 1
             self._paused = True
 
     def resume(self) -> None:
@@ -55,6 +58,22 @@ class TaskControl:
             while self._paused and not self._stop_requested:
                 self._condition.wait(0.2)
             return not self._stop_requested
+
+    def wait_at_safe_point(self, on_pause: Callable[[], None]) -> bool:
+        notified_generation = -1
+        while True:
+            with self._condition:
+                if self._stop_requested:
+                    return False
+                if not self._paused:
+                    return True
+                generation = self._pause_generation
+                if notified_generation == generation:
+                    self._condition.wait(0.2)
+                    continue
+            # UIA cleanup must not hold the lock needed by pause/resume/stop RPC.
+            on_pause()
+            notified_generation = generation
 
     def acknowledge_result(self, item_id: str) -> None:
         with self._condition:

@@ -199,11 +199,12 @@ def test_same_instance_reconnect_retains_sequence_and_accepts_new_health(tmp_pat
     assert backend.agent.healthSnapshot["sequence"] == 91
 
 
-@pytest.mark.parametrize("use_forward", [False, True])
-def test_stop_disconnect_releases_lock_without_replay_or_cleanup_claim(tmp_path, qapp, monkeypatch, use_forward):
+@pytest.mark.parametrize("with_attachment", [False, True])
+def test_stop_disconnect_releases_lock_without_replay_or_cleanup_claim(tmp_path, qapp, monkeypatch, with_attachment):
     monkeypatch.setenv("WECHAT_COURIER_ACCEPTANCE", "1")
     backend, client = make_backend(tmp_path)
-    backend.message.useForward = use_forward
+    if with_attachment:
+        backend.message.addFile(str(tmp_path / "test.txt"))
     start_message(backend, client)
     backend.task.stop()
     unlocked = []
@@ -424,17 +425,19 @@ def test_acceptance_metadata_is_stable_notified_and_correlated_to_actual_task(tm
         "active": False, "friendSubmitEnabled": False, "kind": "message_send",
         "items": [{"target": "Alice", "message": "hello"}],
         "options": {"intervalMin": 2.5, "intervalMax": 3.0, "unknownPolicy": "continue",
-                    "filePaths": [], "useForward": False},
+                    "filePaths": []},
     }
     backend.friends.model.appendEmptyRecord()
     backend.friends.model.setCell(0, "account", "wxid_demo")
     backend.friends.model.setCell(0, "greeting", "greeting")
     backend.friends.model.setCell(0, "name", "remark")
     backend.friends.model.setCell(0, "relationship", "无")
+    assert backend.friends.model.selectRange(1, 1)
     friend = backend.task.acceptanceFriendState
-    assert friend["items"] == [{"account": "wxid_demo", "greeting": "greeting", "remark": "remark"}]
+    assert friend["items"] == [{"account": "wxid_demo", "greeting": "greeting", "remark": "remark",
+                                "sourceRow": 1, "sourceFileRow": 0}]
     assert friend["options"]["filePaths"] == []
-    assert friend["options"]["useForward"] is False
+    assert "useForward" not in friend["options"]
     payload = start_message(backend, client)
     sent = event(client, payload, step="send_verified", outcome="success")
     finish(client, payload)
@@ -492,7 +495,7 @@ def test_qml_uses_task_eligibility_live_health_and_failure_labels():
     components = Path(__file__).resolve().parents[1] / "qml" / "components"
     for name in ("FriendWorkspace.qml", "MessageWorkspace.qml"):
         source = (components / name).read_text(encoding="utf-8")
-        assert "enabled: root.appBackend && root.appBackend.agent.canStartTask" in source
+        assert "root.appBackend.agent.canStartTask" in source
         assert "待恢复" in source
     monitor = (components / "TaskMonitor.qml").read_text(encoding="utf-8")
     assert "root.agentBackend.windowResponsive" in monitor
@@ -508,7 +511,7 @@ def test_acceptance_controls_have_opt_in_accessible_names():
     components = Path(__file__).resolve().parents[1] / "qml" / "components"
     controls = {
         "MessageWorkspace.qml": ["messageRecipientsInput", "messageTemplateInput", "startMessageButton",
-                                 "messageAddFileButton", "messageUseForwardSwitch", "messageRemoveFileButton-"],
+                                 "messageAddFileButton", "messageRemoveFileButton-"],
         "FriendWorkspace.qml": ["importFriendsButton", "friendAccountField", "startFriendsButton"],
         "TaskMonitor.qml": ["taskReturnToEditorButton", "taskStopButton"],
         "WxTitleBar.qml": ["settingsButton"],
@@ -557,6 +560,7 @@ def render_fake_health_states(output):
     backend.friends.model.appendEmptyRecord()
     assert backend.friends.model.setCell(0, "account", "wxid_demo")
     assert backend.friends.model.setCell(0, "name", "示例学生")
+    assert backend.friends.model.selectRange(1, 1)
     engine = QQmlApplicationEngine()
     errors = []
     engine.warnings.connect(lambda warnings: errors.extend(w.toString() for w in warnings))
@@ -721,7 +725,7 @@ Window { width: 1280; height: 860; visible: true
     app_root.setProperty("appBackend", backend)
     QMetaObject.invokeMethod(app_root, "openSettings", Q_ARG("QVariant", 3))
     QTest.qWait(100)
-    for index, name in enumerate(("消息群发", "批量加好友", "自动化与恢复", "外观")):
+    for index, name in enumerate(("消息群发", "自动发送好友申请", "自动化与恢复", "外观")):
         assert not accessible_node(name, f"settingsSection{index}").state().invisible
     assert not errors, errors
     integrated.close()

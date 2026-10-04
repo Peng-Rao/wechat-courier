@@ -121,7 +121,7 @@ def test_windows_ci_uses_python_312_and_validates_every_release_artifact():
     )
 
     assert 'PYTHON_VERSION: "3.12"' in workflow
-    assert 'PRODUCT_NAME: "五阿哥微信助手"' in workflow
+    assert 'PRODUCT_NAME: "福格微信助手"' in workflow
     for artifact in (
         '"dist/$($env:PRODUCT_NAME)/$($env:PRODUCT_NAME).exe"',
         '"dist/$($env:PRODUCT_NAME)/wechat-agent.exe"',
@@ -168,7 +168,7 @@ def test_build_outputs_gui_and_isolated_agent_in_one_directory():
     spec_text = (ROOT / "build" / "build.spec").read_text(encoding="utf-8")
 
     assert 'os.path.join(ROOT, "agent_main.py")' in spec_text
-    assert 'name="五阿哥微信助手"' in spec_text
+    assert 'name="福格微信助手"' in spec_text
     assert 'name="wechat-agent"' in spec_text
     assert "agent_exe" in spec_text
     assert "agent_analysis.binaries" in spec_text
@@ -225,10 +225,10 @@ def test_product_versions_and_installer_upgrade_contract_are_v034():
     )
     installer = (ROOT / "installer" / "setup.nsi").read_text(encoding="utf-8-sig")
 
-    assert '__version__ = "0.3.5"' in app_version
-    assert '__version__ = "0.3.5"' in library_version
-    assert '!define PRODUCT_NAME "五阿哥微信助手"' in installer
-    assert '!define PRODUCT_VERSION "0.3.5"' in installer
+    assert '__version__ = "1.0.0"' in app_version
+    assert '__version__ = "1.0.0"' in library_version
+    assert '!define PRODUCT_NAME "福格微信助手"' in installer
+    assert '!define PRODUCT_VERSION "1.0.0"' in installer
     assert '!define OLD_PRODUCT_NAME "五阿哥群发助手"' in installer
     assert "taskkill" in installer
     assert "OLD_PRODUCT_NAME" in installer

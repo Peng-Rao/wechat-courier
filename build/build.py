@@ -47,7 +47,7 @@ def main():
     if NSIS_SCRIPT.exists():
         try:
             subprocess.run([nsis_exe, str(NSIS_SCRIPT)], cwd=ROOT, check=True)
-            print(f"\n安装器已生成：{ROOT / 'dist' / '五阿哥微信助手_Setup.exe'}")
+            print(f"\n安装器已生成：{ROOT / 'dist' / '福格微信助手_Setup.exe'}")
         except FileNotFoundError:
             print("未找到 NSIS (makensis)，跳过安装器构建。")
             print("如需构建安装器，请安装 NSIS 并将 makensis 加入 PATH。")

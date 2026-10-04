@@ -13,6 +13,7 @@ def model_with_names(*names):
     model.replace_records(load_friend_records(
         [["姓名", "账号"], *[[name, f"wxid_person{i}"] for i, name in enumerate(names)]]
     ))
+    model.selectFirstValid()
     return model
 
 
@@ -97,6 +98,7 @@ def test_global_relationship_persists_without_replacing_existing_greeting(tmp_pa
     controller.defaultRelationship = "无"
     reloaded = FriendController(settings)
     reloaded.model.replace_records(load_friend_records([["姓名", "账号"], ["张三", "wxid_person1"]]))
+    assert reloaded.model.selectRange(1, 1)
     assert reloaded.build_items()[0]["remark"] == "张三"
     assert reloaded.build_items()[0]["greeting"] == "旧的自定义问候"
 
@@ -142,14 +144,14 @@ def test_explicit_global_manual_choice_survives_later_name_suffix(qapp):
     assert model.preview(0)["remark"] == "另一学生奶奶"
 
 
-def test_manual_name_is_required_before_first_auto_selection(qapp):
+def test_manual_name_is_required_and_valid_row_remains_unselected(qapp):
     model = FriendImportModel()
     row = model.appendEmptyRecord()
     model.setCell(row, "account", "wxid_valid1")
     assert not model.record_at(row).valid
     assert not model.record_at(row).selected
     model.setCell(row, "name", "示例学生")
-    assert model.record_at(row).selected
+    assert not model.record_at(row).selected
     assert not model.setCell(row, "remark", "不可手改")
     assert model.preview(row)["remark"] == "示例学生妈妈"
 
@@ -181,7 +183,7 @@ def test_file_urls_with_spaces_work_for_import_and_template(tmp_path, qapp):
     assert controller.model.validCount == 2
 
 
-def test_import_selects_first_twenty_after_actual_global_template_validation(tmp_path, qapp):
+def test_range_selection_uses_actual_global_template_validation(tmp_path, qapp):
     model = FriendImportModel()
     model.set_defaults("{未知}", "妈妈")
     path = tmp_path / "mixed.csv"
@@ -190,6 +192,8 @@ def test_import_selects_first_twenty_after_actual_global_template_validation(tmp
     lines += ["有效学生,wxid_lastperson,{称呼}您好"]
     path.write_text("\n".join(lines), encoding="utf-8-sig")
     assert model.importFile(str(path))
+    assert model.selectedCount == 0
+    assert model.selectRange(1, 21)
     assert model.validCount == model.selectedCount == 1
     assert model.selected_payload()[0]["account"] == "wxid_lastperson"
 
@@ -210,6 +214,7 @@ def test_task_request_contains_rendered_snapshot_not_live_template(tmp_path, qap
         [["姓名", "账号"], ["示例学生", "mock_only_001"]]))
     backend.friends.defaultGreeting = "{称呼}您好"
     backend.friends.defaultRelationship = "姐姐"
+    assert backend.friends.model.selectRange(1, 1)
     assert backend.task.startFriends()
     payload = next(params for _, method, params in reversed(client.calls) if method == "task.start")
     assert payload["items"][0]["greeting"] == "示例学生姐姐您好"

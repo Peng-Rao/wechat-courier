@@ -18,6 +18,10 @@ TestCase {
         property bool taskWindowReady: false
         property real waitingRemaining: 0
         property string intervalLabel: "本批间隔 1–5 秒"
+        property string elapsedLabel: "01:02:03"
+        property string riskStopItemId: ""
+        property string riskStopKind: ""
+        property string riskStopLabel: ""
         property bool cleanupFailed: false
         property var cleanupResult: ({})
         property string currentOutcome: "error"
@@ -158,10 +162,21 @@ TestCase {
 
     function test_stopped_row_does_not_display_waiting() {
         taskItems.append({target: "mock_only", detail: "未执行：任务已结束",
-                          result: "stopped", duration: "--", stepCode: "", itemId: "one"})
+                          result: "stopped", duration: "--", stepCode: "", itemId: "one", sourceRow: 8})
         tryVerify(function() { return hasText(monitor, "已停止") })
         verify(!hasText(monitor, "等待中"))
         taskItems.clear()
+    }
+
+    function test_both_task_kinds_keep_final_elapsed_and_actual_interval() {
+        taskBackend.active = false
+        taskBackend.elapsedLabel = "01:02:03"
+        for (var kind of ["message_send", "friend_add"]) {
+            monitor.taskKind = kind
+            compare(findChild(monitor, "taskElapsedTime").text, "累计耗时 01:02:03")
+            verify(findChild(monitor, "taskIntervalCountdown").text.indexOf("本批间隔 1–5 秒") >= 0)
+        }
+        monitor.taskKind = "friend_add"
     }
 
     function connector(index) {

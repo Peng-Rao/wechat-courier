@@ -59,7 +59,7 @@ Rectangle {
 
         // Title Text
         Text {
-            text: root.window ? root.window.title : "五阿哥微信助手"
+            text: root.window ? root.window.title : "福格微信助手"
             font.family: WxTheme.fontFamily
             font.pixelSize: WxTheme.fontSizeSmall
             font.bold: true

@@ -113,6 +113,7 @@ def test_real_agent_stop_rechecks_before_unlock_and_accepts_next_task(qapp, qtbo
             backend.friends.model.setCell(index, "account", f"mock_only_{index}")
             backend.friends.model.setCell(index, "name", f"Mock {index}")
         backend.friends.intervalMax = 1
+        assert backend.friends.model.selectRange(1, 2)
         assert backend.task.startFriends()
         assert backend.task._original_payload["options"]["intervalMin"] == 1
         assert backend.task._original_payload["options"]["intervalMax"] == 1

@@ -127,7 +127,7 @@ Popup {
                     anchors.margins: 12
                     spacing: 4
                     Repeater {
-                        model: ["消息群发", "批量加好友", "自动化与恢复", "外观"]
+                        model: ["消息群发", "自动发送好友申请", "自动化与恢复", "外观"]
                         Button {
                             required property int index
                             required property string modelData
@@ -231,16 +231,6 @@ Popup {
                                 Text { text: "秒"; color: WxTheme.clTextSecondary }
                             }
                         }
-                        SettingsRow {
-                            title: "合并转发附件"
-                            description: "启用后按当前发送策略处理附件和留言"
-                            Switch {
-                                checked: root.appBackend ? root.appBackend.message.useForward : false
-                                onToggled: root.applyIfUnlocked(function() {
-                                    root.appBackend.message.useForward = checked
-                                })
-                            }
-                        }
                         Item { Layout.fillHeight: true }
                     }
                 }
@@ -253,7 +243,7 @@ Popup {
                         width: parent.width
                         spacing: 0
                         SettingsHeading {
-                            title: "批量加好友"
+                            title: "自动发送好友申请"
                             subtitle: "行内为空时才使用这里的默认值"
                         }
                         SettingsRow {

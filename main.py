@@ -29,14 +29,14 @@ def get_assets_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "assets")
 
 
-def main():
+def main(settings=None):
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
     os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
     configure_native_renderer()
     app = QGuiApplication(sys.argv)
-    app.setApplicationName("五阿哥微信助手")
+    app.setApplicationName("福格微信助手")
     app.setApplicationVersion(__version__)
 
     icon_path = os.path.join(get_assets_dir(), "app.ico")
@@ -44,7 +44,7 @@ def main():
         app.setWindowIcon(QIcon(icon_path))
 
     # 创建后端
-    backend = BackendController(__version__, auto_start_agent=True)
+    backend = BackendController(__version__, settings=settings, auto_start_agent=True)
     app.aboutToQuit.connect(backend.shutdown)
 
     # QML 引擎

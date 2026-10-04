@@ -14,7 +14,7 @@ ApplicationWindow {
     minimumHeight: 680
     visible: false
     opacity: 1
-    title: "五阿哥微信助手"
+    title: "福格微信助手"
     color: "transparent"
     flags: typeof windowShell !== "undefined" ? windowShell.initialWindowFlags
         : Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint
@@ -430,7 +430,7 @@ ApplicationWindow {
             }
 
             Text {
-                text: "五阿哥微信助手"
+                text: "福格微信助手"
                 anchors.horizontalCenter: parent.horizontalCenter
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeNormal + 2

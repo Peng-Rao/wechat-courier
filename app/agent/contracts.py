@@ -44,7 +44,6 @@ class TaskOptions:
     interval_min: float = 0.0
     interval_max: float = 0.0
     unknown_policy: str = "continue"
-    use_forward: bool = False
     file_paths: tuple[str, ...] = ()
     submit_friend_request: bool = False
     friend_batch_limit: int = FRIEND_BATCH_LIMIT_DEFAULT
@@ -59,6 +58,8 @@ class TaskOptions:
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "TaskOptions":
         data = payload or {}
+        if "useForward" in data:
+            raise ContractError("useForward has been removed; send ordinary attachments instead")
         minimum = float(data.get("intervalMin", 0.0))
         maximum = float(data.get("intervalMax", minimum))
         if minimum < 0 or maximum < minimum:
@@ -73,7 +74,6 @@ class TaskOptions:
             interval_min=minimum,
             interval_max=maximum,
             unknown_policy=policy,
-            use_forward=bool(data.get("useForward", False)),
             file_paths=tuple(str(path) for path in data.get("filePaths", ())),
             submit_friend_request=submit_friend_request,
             friend_batch_limit=data.get("friendBatchLimit", FRIEND_BATCH_LIMIT_DEFAULT),
@@ -164,9 +164,11 @@ class TaskEvent:
     destructive_boundary_crossed: bool = False
     wechat_responsive: bool = True
     error_code: str = ""
+    item_elapsed_ms: float | None = None
+    risk_kind: str = ""
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "taskId": self.task_id,
             "itemId": self.item_id,
             "step": self.step,
@@ -184,3 +186,8 @@ class TaskEvent:
             "wechatResponsive": self.wechat_responsive,
             "errorCode": self.error_code,
         }
+        if self.item_elapsed_ms is not None:
+            payload["itemElapsedMs"] = self.item_elapsed_ms
+        if self.risk_kind:
+            payload["riskKind"] = self.risk_kind
+        return payload

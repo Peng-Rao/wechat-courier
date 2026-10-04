@@ -177,6 +177,7 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     assert model.record_at(0).relationship == ""
     assert remark.property("text") == "student"
+    _activate(view, root.findChild(QQuickItem, "selectFriendRangeButton"))
     assert friends.build_items()[0]["greeting"] == "student，您好！"
     friends.defaultRelationship = "姐姐"
     QTest.qWait(50)

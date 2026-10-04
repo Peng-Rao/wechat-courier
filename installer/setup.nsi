@@ -1,14 +1,15 @@
 ﻿; ═══════════════════════════════════════════
-;  五阿哥微信助手 NSIS 安装脚本
+;  福格微信助手 NSIS 安装脚本
 ; ═══════════════════════════════════════════
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 ; ── 基本信息 ──
-!define PRODUCT_NAME "五阿哥微信助手"
-!define PRODUCT_VERSION "0.3.5"
+!define PRODUCT_NAME "福格微信助手"
+!define PRODUCT_VERSION "1.0.0"
 !define OLD_PRODUCT_NAME "五阿哥群发助手"
+!define OLD_ASSISTANT_NAME "五阿哥微信助手"
 !define PRODUCT_PUBLISHER "wx4py"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\${PRODUCT_NAME}.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
@@ -42,23 +43,39 @@ ShowUnInstDetails show
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+; Only remove known binaries from a registered installation of this product.
+!macro MigrateLegacyProduct LEGACY_NAME
+    ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_NAME}" "InstallLocation"
+    ReadRegStr $1 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_NAME}" "DisplayName"
+    StrCmp $1 "${LEGACY_NAME}" 0 migration_done_${LEGACY_NAME}
+    StrCmp $0 "" migration_done_${LEGACY_NAME}
+    IfFileExists "$0\${LEGACY_NAME}.exe" 0 migration_done_${LEGACY_NAME}
+    Delete "$0\${LEGACY_NAME}.exe"
+    Delete "$0\wechat-agent.exe"
+    Delete "$0\uninst.exe"
+    ; Preserve unrecognized files and HKCU settings in the old installation.
+    RMDir "$0"
+    Delete "$DESKTOP\${LEGACY_NAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACY_NAME}\${LEGACY_NAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACY_NAME}\卸载.lnk"
+    RMDir "$SMPROGRAMS\${LEGACY_NAME}"
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_NAME}"
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${LEGACY_NAME}.exe"
+    migration_done_${LEGACY_NAME}:
+!macroend
+
 Function .onInit
     ; Close both product generations before replacing binaries.
     nsExec::ExecToLog 'taskkill /F /IM "${PRODUCT_NAME}.exe"'
     nsExec::ExecToLog 'taskkill /F /IM "${OLD_PRODUCT_NAME}.exe"'
+    nsExec::ExecToLog 'taskkill /F /IM "${OLD_ASSISTANT_NAME}.exe"'
     nsExec::ExecToLog 'taskkill /F /IM "wechat-agent.exe"'
 FunctionEnd
 
 ; ── 安装区段 ──
 Section "Install"
-    ; Remove the previous product shell without touching HKCU wx4py settings.
-    Delete "$DESKTOP\${OLD_PRODUCT_NAME}.lnk"
-    Delete "$SMPROGRAMS\${OLD_PRODUCT_NAME}\${OLD_PRODUCT_NAME}.lnk"
-    Delete "$SMPROGRAMS\${OLD_PRODUCT_NAME}\卸载.lnk"
-    RMDir "$SMPROGRAMS\${OLD_PRODUCT_NAME}"
-    RMDir /r "$PROGRAMFILES\${OLD_PRODUCT_NAME}"
-    DeleteRegKey HKLM "${OLD_PRODUCT_UNINST_KEY}"
-    DeleteRegKey HKLM "${OLD_PRODUCT_DIR_REGKEY}"
+    !insertmacro MigrateLegacyProduct "${OLD_PRODUCT_NAME}"
+    !insertmacro MigrateLegacyProduct "${OLD_ASSISTANT_NAME}"
 
     SetOutPath "$INSTDIR"
 

@@ -32,9 +32,6 @@ class TestBackendProperties:
         with qtbot.waitSignal(backend.templateTextChanged, timeout=1000):
             backend.templateText = "Hi {name}"
 
-    def test_use_forward_notify(self, backend, qtbot):
-        with qtbot.waitSignal(backend.useForwardChanged, timeout=1000):
-            backend.useForward = True
 
     def test_file_paths_notify_on_add(self, backend, qtbot):
         with qtbot.waitSignal(backend.filePathsChanged, timeout=1000):

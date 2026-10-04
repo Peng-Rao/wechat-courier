@@ -43,6 +43,34 @@ def test_plan_is_identical_across_modes_and_has_unique_single_item_tasks(harness
     assert len(set(texts)) == 3
 
 
+def test_gui_friend_csv_matches_current_name_contract_without_changing_defaults(harness):
+    from app.friend_import import load_friend_records
+    item = harness.make_case("names", 1)["request"]["items"][0]
+    records = load_friend_records(harness.friend_import_rows(item))
+    assert len(records) == 1 and records[0].valid and not records[0].selected
+    assert records[0].remark == item["remark"]
+    assert records[0].rendered_greeting == item["greeting"]
+
+
+def test_evidence_keeps_non_private_timer_and_risk_fields(harness):
+    event = {"taskId": "one", "itemId": "row-2", "step": "account_searched",
+             "timestamp": "2026-10-04T07:25:33Z", "itemElapsedMs": 15001,
+             "riskKind": "friend_frequency", "detail": "private account"}
+    evidence = harness.result_evidence({"elapsedSeconds": 16.2, "events": [event]})
+    assert evidence["elapsedSeconds"] == 16.2
+    assert evidence["events"][0]["itemElapsedMs"] == 15001
+    assert evidence["events"][0]["riskKind"] == "friend_frequency"
+    assert evidence["events"][0]["timestamp"] == event["timestamp"]
+    assert "detail" not in evidence["events"][0]
+
+
+def test_source_gui_can_be_validated_without_packaging(harness):
+    args = harness.parse_args(["--mode", "gui", "--gui-source", "--execute",
+                               "--confirm-send", "--confirm-friend-preflight"])
+    harness.validate_args(args)
+    assert args.gui_source is True and args.gui_exe is None
+
+
 @pytest.mark.parametrize("mutation", ["target", "account", "attachment", "forward", "batch"])
 def test_rejects_unpermitted_requests(harness, mutation):
     case = harness.make_plan("safety", 2)[mutation == "account"]
@@ -402,7 +430,8 @@ def test_default_cli_writes_machine_readable_plan_without_adapter(harness, tmp_p
     assert data["taskAttempts"] == 0
     assert data["buildFingerprint"]["source"]["sha256"]
     assert len(data["plan"]) == 6
-    assert data["coverage"]["fullV032Gate"] is False
+    assert data["acceptanceVersion"] == "1.0.0"
+    assert data["coverage"]["fullV100Gate"] is False
     assert "attachments" in data["coverage"]["excluded"]
 
 
@@ -619,7 +648,7 @@ def test_changed_runtime_fingerprint_stops_independent_schedule(harness):
 def test_delivery_plan_and_files_are_explicit_generated_and_tamper_checked(harness, tmp_path):
     plan = harness.make_plan("delivery", profile="delivery", artifact_dir=tmp_path)
     assert len(plan) == 2
-    assert [c["request"]["options"]["useForward"] for c in plan] == [False, True]
+    assert all("useForward" not in c["request"]["options"] for c in plan)
     assert not list(tmp_path.iterdir()), "Planning must not generate attachments"
     for case in plan:
         harness.materialize_delivery(case, tmp_path)
@@ -652,13 +681,32 @@ def test_delivery_requires_sub_boundaries_and_no_duplicate_observations(harness,
             "text": {"started": 1, "completed": 1, "verified": True},
             "attachment": {"started": 1, "completed": 1, "verified": True},
         },
-        "observed": {"text": 1, "attachment": 1, "merged": 0},
-        "baseline": {"text": 0, "attachment": 0, "merged": 0},
+        "observed": {"text": 1, "attachment": 1},
+        "baseline": {"text": 0, "attachment": 0},
     }
     harness.validate_result(case, result, set())
     result["deliveryEvidence"]["observed"]["attachment"] = 2
     with pytest.raises(ValueError, match="duplicate"):
         harness.validate_result(case, result, set())
+
+
+def test_tray_close_resolution_waits_for_fresh_visible_control(harness, monkeypatch):
+    control = SimpleNamespace(GetRuntimeId=lambda: [1, 2], ProcessId=7, Name="close")
+    resolutions, actions = [], []
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    def resolve():
+        resolutions.append(True)
+        if len(resolutions) == 1:
+            raise LookupError("Close has not appeared after window restore")
+        return control
+
+    harness.hide_to_tray(resolve, lambda c: actions.append("invoke"),
+                         lambda c: actions.append("click"), lambda: "invoke" in actions,
+                         lambda c: True, lambda value: None)
+
+    assert len(resolutions) == 2
+    assert actions == ["invoke"]
 
 
 def test_tray_invoke_no_effect_allows_one_revalidated_bounds_fallback(harness):
@@ -704,7 +752,7 @@ def test_safe_traceback_has_locations_and_timeout_not_private_message(harness):
         assert "secret" not in json.dumps(harness.failure_evidence(exc))
 
 
-def test_delivery_observation_counts_unique_uia_bubbles_and_new_merged_card(harness, tmp_path):
+def test_delivery_observation_counts_only_unique_text_and_file_bubbles(harness, tmp_path):
     case = harness.make_plan("observe", profile="delivery", artifact_dir=tmp_path)[1]
     text = case["request"]["items"][0]["message"]
     filename = Path(case["request"]["options"]["filePaths"][0]).name
@@ -713,8 +761,8 @@ def test_delivery_observation_counts_unique_uia_bubbles_and_new_merged_card(harn
     after = [old, {"id": "text", "text": text}, {"id": "file", "text": filename},
              {"id": "forward", "text": "聊天记录"}]
     baseline, observed = harness.delivery_counts(case, before, after)
-    assert baseline == {"text": 0, "attachment": 0, "merged": 1}
-    assert observed == {"text": 1, "attachment": 1, "merged": 1}
+    assert baseline == {"text": 0, "attachment": 0}
+    assert observed == {"text": 1, "attachment": 1}
     after.append({"id": "secondfile", "text": filename})
     assert harness.delivery_counts(case, before, after)[1]["attachment"] == 2
 
@@ -783,13 +831,45 @@ def test_delivery_log_reader_filters_task_and_build_and_omits_context(harness, t
         harness.read_delivery_actions(tmp_path, "wanted", "sha256:" + "b" * 64)
 
 
+def test_delivery_log_reader_reads_bounded_tail_of_oversized_rotation(harness, tmp_path):
+    fingerprint = "sha256:" + "a" * 64
+    row = {"taskId": "wanted", "action": "trigger_send", "actionId": "one", "outcome": "success",
+           "build": {"buildFingerprint": fingerprint}}
+    (tmp_path / "uia-diagnostics.jsonl.2").write_bytes(
+        b"x" * (2 * 1024 * 1024 + 13) + b"\n" + json.dumps(row).encode() + b"\n")
+
+    assert harness.read_delivery_actions(tmp_path, "wanted", fingerprint) == [
+        {"action": "trigger_send", "actionId": "one", "outcome": "success"}]
+
+
+def test_post_send_evidence_failure_preserves_completed_task_without_replay(harness, tmp_path, monkeypatch):
+    case = harness.make_plan("proof", profile="delivery", artifact_dir=tmp_path)[0]
+    result = successful_result(case)
+    desktop = SimpleNamespace(delivery_snapshot=lambda: [])
+
+    def fail(*_args):
+        raise ValueError("private diagnostic context")
+
+    monkeypatch.setattr(harness, "read_delivery_actions", fail)
+    returned = harness.attach_delivery_evidence(case, result, [], desktop, tmp_path)
+    assert returned is result
+    assert returned["outcome"] == "success"
+    assert returned["taskId"]
+    assert returned["deliveryVerificationError"]["errorType"] == "ValueError"
+    safe = harness.result_evidence(returned)
+    assert safe["deliveryVerificationError"]["errorType"] == "ValueError"
+    assert "private" not in json.dumps(safe)
+    with pytest.raises(ValueError, match="Post-send"):
+        harness.validate_result(case, returned, set())
+
+
 def test_gui_delivery_cannot_remove_an_unrelated_attachment(harness):
     gui = harness.GuiAdapter.__new__(harness.GuiAdapter)
     gui.loaded_files = set()
     gui.editor_state = lambda: {"options": {"filePaths": ["private.txt"]}}
     gui.click = lambda name: pytest.fail("Must not alter unrelated attachment")
     with pytest.raises(ValueError, match="unrelated"):
-        gui.configure_delivery({"options": {"filePaths": ["generated.txt"], "useForward": True}})
+        gui.configure_delivery({"options": {"filePaths": ["generated.txt"]}})
 
 
 def test_delivery_evidence_redaction_drops_unrecognized_fields(harness):

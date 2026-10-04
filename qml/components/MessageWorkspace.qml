@@ -50,13 +50,15 @@ Item {
                 spacing: 0
 
                 ScrollView {
+                    id: editorScroll
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.preferredWidth: 7
+                    Layout.preferredWidth: root.width * 0.53
+                    Layout.minimumWidth: 360
                     clip: true
 
                     ColumnLayout {
-                        width: Math.max(560, parent.width)
+                        width: editorScroll.availableWidth
                         spacing: 10
                         enabled: !root.interactionLocked
 
@@ -82,17 +84,32 @@ Item {
                             }
                         }
 
-                        TextArea {
-                            id: recipients
-                            objectName: "messageRecipientsInput"
-                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                ? "messageRecipientsInput" : "接收人"
+                        ScrollView {
+                            id: recipientsScroll
                             Layout.fillWidth: true
                             Layout.preferredHeight: 126
                             Layout.leftMargin: 16
                             Layout.rightMargin: 16
+                            contentWidth: availableWidth
+                            clip: true
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                            ScrollBar.vertical: ScrollBar {
+                                objectName: "messageRecipientsScrollBar"
+                                policy: ScrollBar.AsNeeded
+                                opacity: 1
+                            }
+                            background: WxGlassSurface {
+                                fillColor: WxTheme.clFieldFill
+                                borderColor: recipients.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
+                                focused: recipients.activeFocus
+                            }
+                            TextArea {
+                            id: recipients
+                            objectName: "messageRecipientsInput"
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "messageRecipientsInput" : "接收人"
                             leftPadding: 12
-                            rightPadding: 12
+                            rightPadding: 24
                             topPadding: 10
                             bottomPadding: 10
                             wrapMode: TextEdit.Wrap
@@ -108,10 +125,7 @@ Item {
                                         && root.messageBackend.recipientsText !== text)
                                     root.messageBackend.recipientsText = text
                             }
-                            background: WxGlassSurface {
-                                fillColor: WxTheme.clFieldFill
-                                borderColor: recipients.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
-                                focused: recipients.activeFocus
+                            background: null
                             }
                         }
 
@@ -160,17 +174,31 @@ Item {
                             color: WxTheme.clTextPrimary
                         }
 
-                        TextArea {
-                            id: template
-                            objectName: "messageTemplateInput"
-                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                ? "messageTemplateInput" : "消息内容"
+                        ScrollView {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 150
                             Layout.leftMargin: 16
                             Layout.rightMargin: 16
+                            contentWidth: availableWidth
+                            clip: true
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                            ScrollBar.vertical: ScrollBar {
+                                objectName: "messageTemplateScrollBar"
+                                policy: ScrollBar.AsNeeded
+                                opacity: 1
+                            }
+                            background: WxGlassSurface {
+                                fillColor: WxTheme.clFieldFill
+                                borderColor: template.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
+                                focused: template.activeFocus
+                            }
+                            TextArea {
+                            id: template
+                            objectName: "messageTemplateInput"
+                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                ? "messageTemplateInput" : "消息内容"
                             leftPadding: 12
-                            rightPadding: 12
+                            rightPadding: 24
                             topPadding: 10
                             bottomPadding: 10
                             wrapMode: TextEdit.Wrap
@@ -186,10 +214,7 @@ Item {
                                         && root.messageBackend.templateText !== text)
                                     root.messageBackend.templateText = text
                             }
-                            background: WxGlassSurface {
-                                fillColor: WxTheme.clFieldFill
-                                borderColor: template.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
-                                focused: template.activeFocus
+                            background: null
                             }
                         }
 
@@ -342,7 +367,8 @@ Item {
                 Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.preferredWidth: 6
+                    Layout.preferredWidth: root.width * 0.47
+                    Layout.minimumWidth: 300
 
                     ColumnLayout {
                         anchors.fill: parent
@@ -391,7 +417,7 @@ Item {
                                     color: WxTheme.isDark ? "#476477" : "#7b98a9"
                                     Text {
                                         anchors.centerIn: parent
-                                        text: "五"
+                                        text: "福"
                                         color: "white"
                                         font.bold: true
                                         font.family: WxTheme.fontFamily
@@ -424,74 +450,109 @@ Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             color: WxTheme.isDark ? "#171d21" : "#e9eff2"
-
-                            Text {
-                                anchors.top: parent.top
-                                anchors.topMargin: 18
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: Qt.formatDateTime(new Date(), "yyyy年M月d日 hh:mm")
-                                color: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTiny
-                            }
-
-                            Rectangle {
-                                id: bubble
-                                anchors.top: parent.top
-                                anchors.topMargin: 64
-                                anchors.right: parent.right
-                                anchors.rightMargin: 56
-                                width: Math.min(parent.width - 92, 360)
-                                height: Math.max(70, previewText.implicitHeight + 30)
-                                radius: WxTheme.radiusMedium
-                                color: WxTheme.clBubbleBg
-                                visible: root.messageBackend && root.messageBackend.previewMessage
-
-                                Text {
-                                    id: previewText
-                                    anchors.fill: parent
-                                    anchors.margins: 14
-                                    text: root.messageBackend ? root.messageBackend.previewMessage : ""
-                                    wrapMode: Text.Wrap
-                                    color: WxTheme.isDark ? "#f1f7f2" : "#172217"
-                                    font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeNormal
-                                }
-                            }
-
-                            Rectangle {
-                                anchors.top: bubble.top
-                                anchors.left: bubble.right
-                                anchors.leftMargin: 10
-                                width: 34
-                                height: 34
-                                radius: WxTheme.radiusMedium
-                                color: WxTheme.isDark ? "#476477" : "#607f91"
-                                visible: bubble.visible
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: "我"
-                                    color: "white"
-                                    font.bold: true
-                                    font.family: WxTheme.fontFamily
-                                }
-                            }
-
-                            Column {
-                                anchors.centerIn: parent
-                                visible: !bubble.visible
-                                spacing: 8
-                                WxIcon {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    iconSource: "../icons/chat_empty.svg"
-                                    iconColor: WxTheme.clTextHint
-                                    iconSize: 38
-                                }
-                                Text {
-                                    text: "填写名单和模板后显示预览"
-                                    color: WxTheme.clTextHint
-                                    font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeSmall
+                            ScrollView {
+                                id: previewScroll
+                                objectName: "messagePreviewScrollView"
+                                anchors.fill: parent
+                                clip: true
+                                contentWidth: availableWidth
+                                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                ColumnLayout {
+                                    width: previewScroll.availableWidth
+                                    spacing: 14
+                                    Text {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        Layout.topMargin: 18
+                                        Layout.bottomMargin: 18
+                                        text: Qt.formatDateTime(new Date(), "yyyy年M月d日 hh:mm")
+                                        color: WxTheme.clTextHint
+                                        font.family: WxTheme.fontFamily
+                                        font.pixelSize: WxTheme.fontSizeTiny
+                                    }
+                                    Item {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.max(70, previewText.implicitHeight + 30)
+                                        visible: !!(root.messageBackend && root.messageBackend.previewMessage)
+                                        Rectangle {
+                                            id: bubble
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: 56
+                                            width: Math.max(80, Math.min(parent.width - 84, 360))
+                                            height: parent.height
+                                            radius: WxTheme.radiusMedium
+                                            color: WxTheme.clBubbleBg
+                                            Text {
+                                                id: previewText
+                                                width: parent.width - 28
+                                                x: 14
+                                                y: 14
+                                                text: root.messageBackend ? root.messageBackend.previewMessage : ""
+                                                wrapMode: Text.Wrap
+                                                color: WxTheme.isDark ? "#f1f7f2" : "#172217"
+                                                font.family: WxTheme.fontFamily
+                                                font.pixelSize: WxTheme.fontSizeNormal
+                                            }
+                                        }
+                                        Rectangle {
+                                            anchors.top: parent.top
+                                            anchors.left: bubble.right
+                                            anchors.leftMargin: 10
+                                            width: 34; height: 34
+                                            radius: WxTheme.radiusMedium
+                                            color: WxTheme.isDark ? "#476477" : "#607f91"
+                                            Text { anchors.centerIn: parent; text: "我"; color: "white"; font.bold: true; font.family: WxTheme.fontFamily }
+                                        }
+                                    }
+                                    Repeater {
+                                        model: root.messageBackend && root.messageBackend.attachmentPreviews
+                                            ? root.messageBackend.attachmentPreviews : []
+                                        delegate: Item {
+                                            required property var modelData
+                                            required property int index
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: filePreview.implicitHeight
+                                            AttachmentPreview {
+                                                id: filePreview
+                                                objectName: "previewAttachment-" + index
+                                                anchors.right: parent.right
+                                                anchors.rightMargin: 56
+                                                width: Math.max(80, Math.min(parent.width - 84, 360))
+                                                height: implicitHeight
+                                                attachment: modelData
+                                                fileIndex: index
+                                                onImageRequested: function(source, name) {
+                                                    imageViewer.sourceUrl = source
+                                                    imageViewer.fileName = name
+                                                    imageViewer.open()
+                                                }
+                                                onFileRequested: function(fileIndex) {
+                                                    if (root.messageBackend) root.messageBackend.openAttachment(fileIndex)
+                                                }
+                                            }
+                                            Rectangle {
+                                                anchors.top: parent.top
+                                                anchors.left: filePreview.right
+                                                anchors.leftMargin: 10
+                                                width: 34; height: 34
+                                                radius: WxTheme.radiusMedium
+                                                color: WxTheme.isDark ? "#476477" : "#607f91"
+                                                Text { anchors.centerIn: parent; text: "我"; color: "white"; font.bold: true; font.family: WxTheme.fontFamily }
+                                            }
+                                        }
+                                    }
+                                    Item {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.max(140, previewScroll.availableHeight - 85)
+                                        visible: !(root.messageBackend && (root.messageBackend.previewMessage
+                                            || root.messageBackend.attachmentPreviews && root.messageBackend.attachmentPreviews.length))
+                                        Column {
+                                            anchors.centerIn: parent
+                                            spacing: 8
+                                            WxIcon { anchors.horizontalCenter: parent.horizontalCenter; iconSource: "../icons/chat_empty.svg"; iconColor: WxTheme.clTextHint; iconSize: 38 }
+                                            Text { text: "暂无消息预览"; color: WxTheme.clTextHint; font.family: WxTheme.fontFamily; font.pixelSize: WxTheme.fontSizeSmall }
+                                        }
+                                    }
+                                    Item { Layout.preferredHeight: 16 }
                                 }
                             }
                         }
@@ -542,23 +603,6 @@ Item {
                     anchors.rightMargin: 16
                     spacing: 12
 
-                    Switch {
-                        objectName: "messageUseForwardSwitch"
-                        Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
-                            ? "messageUseForwardSwitch" : "合并转发附件"
-                        checked: root.messageBackend ? root.messageBackend.useForward : false
-                        enabled: !root.interactionLocked
-                        onToggled: {
-                            if (!root.interactionLocked && root.messageBackend)
-                                root.messageBackend.useForward = checked
-                        }
-                    }
-                    Text {
-                        text: "合并转发附件"
-                        color: WxTheme.clTextPrimary
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeSmall
-                    }
                     Text {
                         text: root.messageBackend
                             ? "随机间隔 " + root.messageBackend.intervalMin + "–" + root.messageBackend.intervalMax + " 秒"
@@ -579,9 +623,9 @@ Item {
                             Layout.alignment: Qt.AlignRight
                         }
                         Text {
-                            text: root.appBackend && root.appBackend.agent.automationReady
+                            text: root.appBackend && root.appBackend.agent && root.appBackend.agent.automationReady
                                 ? "微信 4.1.13.65 与 UIA 已就绪"
-                                : root.appBackend && root.appBackend.agent.canStartTask
+                                : root.appBackend && root.appBackend.agent && root.appBackend.agent.canStartTask
                                     ? "会话待恢复，开始时恢复窗口" : "请先连接受支持的微信"
                             color: WxTheme.clTextHint
                             font.family: WxTheme.fontFamily
@@ -593,7 +637,7 @@ Item {
                         Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                             ? "startMessageButton" : text
                         text: "开始发送 " + (root.messageBackend ? root.messageBackend.recipientCount : 0) + " 人"
-                        enabled: root.appBackend && root.appBackend.agent.canStartTask
+                        enabled: root.appBackend && root.appBackend.agent && root.appBackend.agent.canStartTask
                             && !root.interactionLocked
                             && root.messageBackend && root.messageBackend.recipientCount > 0
                         onClicked: root.startTask()
@@ -624,6 +668,11 @@ Item {
             taskKind: "message_send"
             onRequestEdit: root.dismissMonitor()
         }
+    }
+
+    AttachmentImageViewer {
+        id: imageViewer
+        parent: root
     }
 
     FileDialog {

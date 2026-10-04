@@ -17,10 +17,7 @@ from app.agent.native_driver import (
     RiskControlError,
     SearchCandidate,
     extract_contact_results,
-    extract_exact_forward_candidates,
-    filter_recent_message_bubbles,
     find_exact_control,
-    has_new_forward_confirmation,
     raise_for_risk_controls,
     resolve_friend_form_fields,
 )
@@ -397,60 +394,6 @@ def test_search_returns_after_stable_empty_result_instead_of_full_timeout(monkey
     assert waiter.outcomes == [True, True]
 
 
-def test_open_exact_chat_supports_repeated_file_transfer_helper_searches():
-    candidate = SearchCandidate(
-        "文件传输助手",
-        frozenset({"文件传输助手"}),
-        "function",
-        "search_item_function_1",
-        0,
-        1,
-    )
-    class SearchEdit(FakeControl):
-        value = "文件传输助手"
-
-    class Actions:
-        @staticmethod
-        def set_text(control, value, **_kwargs):
-            control.value = value
-
-        @staticmethod
-        def read_text(control):
-            return control.value
-
-    class PollingWaiter:
-        def wait(self, predicate, *_args, **_kwargs):
-            for _ in range(6):
-                if predicate():
-                    return True
-            return False
-
-    selected = []
-    snapshots = iter(
-        (
-            ([candidate], [object()]),
-            None,
-            ([candidate], [object()]),
-            ([candidate], [object()]),
-            ([candidate], [object()]),
-            None,
-            ([candidate], [object()]),
-            ([candidate], [object()]),
-        )
-    )
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver.ensure_search_ready = lambda: True
-    driver._search_edit = SearchEdit()
-    driver._actions = Actions()
-    driver._waiter = PollingWaiter()
-    driver._search_rows = lambda: next(snapshots, ([candidate], [object()]))
-    driver.select_search_result = lambda value: selected.append(value)
-    driver.current_chat_title = lambda: "文件传输助手"
-
-    driver._open_exact_chat("文件传输助手")
-    driver._open_exact_chat("文件传输助手")
-
-    assert selected == [candidate, candidate]
 
 
 def test_search_ready_refreshes_a_stale_main_root_before_using_keyboard():
@@ -1841,244 +1784,30 @@ def test_send_files_uses_attachment_snapshot_and_never_text_name_verification(
     assert [entry[0] for entry in calls] == ["click", "keys", "send"]
 
 
-def test_forward_candidates_require_one_exact_interactive_identity():
-    nested_text = FakeControl("Alice", "TextControl", "mmui::Label")
-    alice = FakeControl(
-        "Alice", "ListItemControl", "mmui::ForwardContactCell", "forward_item_1"
-    )
-    alice_team = FakeControl(
-        "Alice Team", "ListItemControl", "mmui::ForwardContactCell", "forward_item_2"
-    )
-
-    assert extract_exact_forward_candidates(
-        [(nested_text, 3), (alice, 2), (alice_team, 2)], " Alice "
-    ) == [alice]
 
 
-def test_forward_candidates_preserve_duplicate_rows_with_distinct_runtime_ids():
-    first = FakeControl(
-        "Alice", "ListItemControl", "mmui::ForwardContactCell", "forward_item_1"
-    )
-    duplicate = FakeControl(
-        "Alice", "ListItemControl", "mmui::ForwardContactCell", "forward_item_1"
-    )
-    first.GetRuntimeId = lambda: (42, 1)
-    duplicate.GetRuntimeId = lambda: (42, 2)
-
-    assert extract_exact_forward_candidates(
-        [(first, 2), (duplicate, 2)], "Alice"
-    ) == [first, duplicate]
 
 
-def test_forward_recipient_requires_explicit_selected_state_not_only_empty_search():
-    candidate = FakeControl(
-        "Alice", "ListItemControl", "mmui::ForwardContactCell", "forward_item_1"
-    )
-    selection = type("Selection", (), {"IsSelected": False})()
-    candidate.GetSelectionItemPattern = lambda: selection
-    search = FakeControl("搜索", "EditControl")
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver._all_nodes = lambda: [(candidate, 2)]
-    driver._actions.read_text = lambda _control: ""
-
-    assert driver._forward_recipient_selected("Alice", search) is False
-
-    selection.IsSelected = True
-
-    assert driver._forward_recipient_selected("Alice", search) is True
 
 
-def test_forward_recipient_rejects_an_additional_selected_recipient():
-    target = FakeControl(
-        "Alice", "ListItemControl", "mmui::ForwardContactCell", "forward_item_1"
-    )
-    extra = FakeControl(
-        "Bob",
-        "ListItemControl",
-        "mmui::ForwardContactCell",
-        "forward_item_2",
-        IsOffscreen=True,
-    )
-    target.GetSelectionItemPattern = lambda: type(
-        "Selection", (), {"IsSelected": True}
-    )()
-    extra.GetSelectionItemPattern = lambda: type(
-        "Selection", (), {"IsSelected": True}
-    )()
-    search = FakeControl("搜索", "EditControl")
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver._all_nodes = lambda: [(target, 2), (extra, 2)]
-
-    assert driver._forward_recipient_selected("Alice", search) is False
 
 
-def test_forward_bundle_revalidates_recipients_immediately_before_send():
-    source = inspect.getsource(NativeWeixinDriver.forward_bundle)
-    final_send = source[source.index("fresh_send =") :]
-
-    assert final_send.index("self._forward_recipient_selected") < final_send.index(
-        "self._invoke_once(fresh_send)"
-    )
 
 
-def test_forward_bundle_does_not_use_pattern_actions_that_can_replay_stale_controls():
-    source = inspect.getsource(NativeWeixinDriver.forward_bundle)
-
-    assert "self._actions.invoke(" not in source
-    assert "self._actions.select(" not in source
 
 
-def test_bound_forward_control_is_freshly_resolved_and_clicked_only_once():
-    original = FakeControl(
-        "合并转发", "ButtonControl", "mmui::XButton", "merge_forward"
-    )
-    fresh = FakeControl(
-        "合并转发", "ButtonControl", "mmui::XButton", "merge_forward"
-    )
-    original.GetRuntimeId = lambda: (42, 11)
-    fresh.GetRuntimeId = lambda: (42, 11)
-    calls = []
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver._matching_all_controls = lambda **_selector: [fresh]
-
-    class Actions:
-        @staticmethod
-        def click(control, postcondition, **kwargs):
-            calls.append((control, kwargs["pre_resolve_control"]()))
-            assert postcondition() is True
-
-    driver._actions = Actions()
-
-    driver._click_bound_all_control_once(
-        original,
-        lambda: True,
-        name=("合并转发", "合并发送"),
-        visible=True,
-    )
-
-    assert calls == [(original, fresh)]
 
 
-def test_forward_bubble_selection_uses_one_fresh_click_without_pattern_replay():
-    original = FakeControl(
-        "one.pdf", "ListItemControl", "mmui::ChatFileItemView", "file_1"
-    )
-    fresh = FakeControl(
-        "one.pdf", "ListItemControl", "mmui::ChatFileItemView", "file_1"
-    )
-    original.GetRuntimeId = lambda: (42, 20)
-    fresh.GetRuntimeId = lambda: (42, 20)
-    selection = type("Selection", (), {"IsSelected": False})()
-    fresh.GetSelectionItemPattern = lambda: selection
-    calls = []
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver._resolve_message_bubble = lambda _reference: fresh
-
-    class Actions:
-        @staticmethod
-        def click(control, postcondition, **kwargs):
-            calls.append((control, kwargs["pre_resolve_control"]()))
-            selection.IsSelected = True
-            assert postcondition() is True
-
-        @staticmethod
-        def select(*_args, **_kwargs):
-            pytest.fail("forward bubbles must never use a replaying selection action")
-
-    driver._actions = Actions()
-
-    driver._select_forward_bubble(original)
-
-    assert calls == [(fresh, fresh)]
 
 
-def test_recent_message_bubbles_use_profile_classes_and_keep_order():
-    controls = [
-        FakeControl("old", "ListItemControl", "mmui::ChatBubbleItemView"),
-        FakeControl("ignored", "TextControl", "mmui::Label"),
-        FakeControl("one.pdf", "ListItemControl", "mmui::ChatFileItemView"),
-        FakeControl("two.pdf", "ListItemControl", "mmui::ChatFileItemView"),
-    ]
-
-    assert filter_recent_message_bubbles(
-        [(control, 1) for control in controls],
-        ("mmui::ChatBubbleItemView", "mmui::ChatFileItemView"),
-        2,
-    ) == controls[-2:]
 
 
-def test_forward_confirmation_requires_a_new_forward_record_card():
-    existing = FakeControl(
-        "普通消息", "ListItemControl", "mmui::ChatTextItemView", "old"
-    )
-    unrelated = FakeControl(
-        "新收到的普通消息", "ListItemControl", "mmui::ChatTextItemView", "new"
-    )
-    record = FakeControl(
-        "Alice 的聊天记录",
-        "ListItemControl",
-        "mmui::ChatRecordItemView",
-        "record",
-    )
-    before = {
-        (existing.Name, existing.ClassName, existing.AutomationId, None)
-    }
-
-    assert has_new_forward_confirmation([existing, unrelated], before) is False
-    assert has_new_forward_confirmation([existing, unrelated, record], before) is True
 
 
-def test_forward_confirmation_does_not_treat_moved_existing_record_as_new():
-    record = FakeControl(
-        "Alice 的聊天记录",
-        "ListItemControl",
-        "mmui::ChatRecordItemView",
-        "record",
-        BoundingRectangle=FakeRect(20, 40, 180, 80),
-    )
-    record.GetRuntimeId = lambda: (42, 7)
-    driver = NativeWeixinDriver(gate_backend=object())
-    driver._message_controls = lambda: [record]
-    before = driver.message_snapshot()
-
-    record.BoundingRectangle = FakeRect(20, 80, 180, 120)
-
-    assert has_new_forward_confirmation([record], before) is False
 
 
-def test_forward_confirmation_requires_the_new_record_to_be_the_tail():
-    old = FakeControl(
-        "普通消息", "ListItemControl", "mmui::ChatTextItemView", "old"
-    )
-    record = FakeControl(
-        "Alice 的聊天记录",
-        "ListItemControl",
-        "mmui::ChatRecordItemView",
-        "record",
-    )
-    later = FakeControl(
-        "后到的普通消息",
-        "ListItemControl",
-        "mmui::ChatTextItemView",
-        "later",
-    )
-    old.GetRuntimeId = lambda: (1, 1)
-    record.GetRuntimeId = lambda: (1, 2)
-    later.GetRuntimeId = lambda: (1, 3)
-    before = ((('runtime', (1, 1)), "普通消息"),)
-
-    assert has_new_forward_confirmation([old, record], before) is True
-    assert has_new_forward_confirmation([old, record, later], before) is False
 
 
-def test_forward_bundle_snapshots_the_target_chat_before_transfer_assistant():
-    source = inspect.getsource(NativeWeixinDriver.forward_bundle)
-
-    target_open = source.index('self._open_exact_chat(target)')
-    snapshot = source.index('target_snapshot = self.message_snapshot()')
-    transfer_open = source.index('self._open_exact_chat("文件传输助手")')
-
-    assert target_open < snapshot < transfer_open
 
 
 def test_friend_form_fields_are_resolved_by_exact_accessible_names():

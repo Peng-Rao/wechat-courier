@@ -26,7 +26,6 @@ class SenderWorker(QThread):
         self.friends: list[str] = []
         self.message_template: str = ""
         self.file_paths: list[str] = []
-        self.use_forward: bool = False
         self.send_interval_min: float = 2.0
         self.send_interval_max: float = 3.0
 
@@ -66,23 +65,7 @@ class SenderWorker(QThread):
             self.fatal_error.emit(f"微信客户端连接失败: {e}。请确认微信已登录、未被其他程序占用。")
             return
 
-        # 2. 转发模式：预上传到文件传输助手
-        helper_uploaded = False
-        if self.use_forward and self.file_paths and not helper_uploaded:
-            try:
-                ok = wx.chat_window.upload_files_to_helper(self.file_paths)
-            except Exception as e:
-                ok = False
-                self.log_entry.emit(
-                    "[预上传]", "", "error",
-                    f"上传到文件传输助手失败: {e}，已回退到逐个上传模式",
-                )
-            if ok:
-                helper_uploaded = True
-            else:
-                self.use_forward = False
-
-        # 3. 逐好友发送
+        # 逐好友发送
         for idx, friend in enumerate(self.friends):
             # 检查停止
             if self._stop_flag:
@@ -139,17 +122,7 @@ class SenderWorker(QThread):
             final_message = self.message_template
 
         try:
-            if self.use_forward:
-                ok = wx.chat_window.forward_recent_merge_to(
-                    count=len(self.file_paths),
-                    target=friend,
-                    target_type="contact",
-                    leave_message=final_message,
-                )
-                if not ok:
-                    raise RuntimeError("合并转发失败（详见日志）")
-                detail = f"文件 {len(self.file_paths)} 个（合并转发 + 留言）"
-            elif self.file_paths:
+            if self.file_paths:
                 ok = wx.chat_window.send_message_and_file_to(
                     friend, final_message, self.file_paths, target_type="contact",
                 )

@@ -16,7 +16,6 @@ def worker():
     w.friends = ["Alice", "Bob"]
     w.message_template = "Hello {name}"
     w.file_paths = []
-    w.use_forward = False
     return w
 
 
@@ -96,24 +95,6 @@ class TestProcessOneFriendWithFiles:
 
         assert result.status == "error"
         assert "发送失败" in result.detail
-
-
-class TestProcessOneFriendForwardMode:
-    def test_success_forward_mode(self, worker, mock_wechat_client):
-        worker.use_forward = True
-        worker.file_paths = ["C:/test.pdf"]
-        result = worker._process_one_friend(mock_wechat_client, "Alice")
-        assert result.status == "success"
-        assert "合并转发" in result.detail
-        mock_wechat_client.chat_window.forward_recent_merge_to.assert_called_once()
-
-    def test_forward_failure_falls_back_to_error(self, worker, mock_wechat_client):
-        worker.use_forward = True
-        worker.file_paths = ["C:/test.pdf"]
-        mock_wechat_client.chat_window.forward_recent_merge_to.return_value = False
-        result = worker._process_one_friend(mock_wechat_client, "Alice")
-        assert result.status == "error"
-        assert "合并转发失败" in result.detail
 
 
 class TestWorkerSignals:

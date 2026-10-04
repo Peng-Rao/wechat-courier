@@ -14,7 +14,6 @@ def test_profile_for_verified_weixin_build_is_exact():
     assert profile.main_root_class == "mmui::MainWindow"
     assert profile.search_edit_class == "mmui::XValidatorTextEdit"
     assert profile.chat_message_list_automation_id == "chat_message_list"
-    assert "search_edit" in profile.forward_search_automation_ids
     assert profile.search_popup_class == "mmui::XPopover"
     assert profile.search_list_automation_id == "search_list"
     assert profile.chat_input_automation_id == "chat_input_field"

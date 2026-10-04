@@ -23,7 +23,6 @@ class WeixinProfile:
     chat_input_class: str
     chat_message_list_automation_id: str
     chat_message_classes: tuple[str, ...]
-    forward_search_automation_ids: tuple[str, ...]
     add_friend_root_class: str
     verify_friend_root_class: str
 
@@ -44,12 +43,7 @@ _PROFILES = {
             "mmui::ChatTextItemView",
             "mmui::ChatBubbleItemView",
             "mmui::ChatFileItemView",
-        ),
-        forward_search_automation_ids=(
-            "search_edit",
-            "search_input",
-            "forward_search",
-            "search",
+            "mmui::ChatBubbleReferItemView",
         ),
         add_friend_root_class="mmui::AddFriendWindow",
         verify_friend_root_class="mmui::VerifyFriendWindow",

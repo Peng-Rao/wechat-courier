@@ -53,6 +53,24 @@ Item {
         return -1
     }
 
+    function locateRiskStop() {
+        if (!root.taskBackend || !root.taskBackend.riskStopItemId) return
+        var items = root.taskBackend.items
+        if (!items || typeof items.indexOfItem !== "function") return
+        var row = items.indexOfItem(root.taskBackend.riskStopItemId)
+        if (row >= 0) Qt.callLater(function() {
+            queueList.currentIndex = row
+            queueList.positionViewAtIndex(row, ListView.Contain)
+        })
+    }
+
+    Connections {
+        target: root.taskBackend
+        ignoreUnknownSignals: true
+        function onExecutionStateChanged() { root.locateRiskStop() }
+    }
+    Component.onCompleted: locateRiskStop()
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -92,13 +110,21 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
+                    objectName: "taskElapsedTime"
+                    text: "累计耗时 " + (root.taskBackend && root.taskBackend.elapsedLabel
+                        ? root.taskBackend.elapsedLabel : "00:00:00")
+                    color: WxTheme.clTextPrimary
+                    font.family: WxTheme.fontFamilyLog
+                    font.pixelSize: WxTheme.fontSizeSmall
+                }
+                Text {
                     text: "处理进度"
                     color: WxTheme.clTextHint
                     font.family: WxTheme.fontFamily
                     font.pixelSize: WxTheme.fontSizeTiny
                 }
                 Rectangle {
-                    Layout.preferredWidth: 190
+                    Layout.preferredWidth: root.width < 1100 ? 100 : 190
                     Layout.preferredHeight: 5
                     radius: 3
                     color: WxTheme.clProgressTrack
@@ -142,6 +168,26 @@ Item {
         }
 
         Rectangle {
+            visible: !!(root.taskBackend && root.taskBackend.riskStopItemId)
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? riskStopText.implicitHeight + 20 : 0
+            color: WxTheme.clDangerSoft
+            Text {
+                id: riskStopText
+                objectName: "taskRiskStopLocation"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.margins: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.taskBackend && root.taskBackend.riskStopLabel ? root.taskBackend.riskStopLabel : ""
+                wrapMode: Text.Wrap
+                color: WxTheme.clDangerNew
+                font.pixelSize: WxTheme.fontSizeSmall
+                font.bold: true
+            }
+        }
+
+        Rectangle {
             visible: root.taskBackend && Object.keys(root.taskBackend.cleanupResult).length > 0
             Layout.fillWidth: true
             Layout.preferredHeight: visible ? cleanupText.implicitHeight + 20 : 0
@@ -179,7 +225,7 @@ Item {
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.preferredWidth: 7
+                Layout.preferredWidth: root.width * 0.64
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -194,7 +240,7 @@ Item {
                             anchors.fill: parent
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
-                            Text { text: "#"; Layout.preferredWidth: 32; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                            Text { text: "#"; Layout.preferredWidth: 44; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
                             Text { text: taskKind === "message_send" ? "好友" : "账号"; Layout.preferredWidth: 190; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeTiny }
                             Text { text: "当前状态"; Layout.fillWidth: true; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeTiny }
                             Text { text: "结果"; Layout.preferredWidth: 90; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeTiny }
@@ -204,22 +250,34 @@ Item {
 
                     ListView {
                         id: queueList
+                        objectName: "taskQueueList"
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(230, contentHeight)
                         model: root.taskBackend ? root.taskBackend.items : null
                         clip: true
+                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         delegate: Rectangle {
                             required property int index
+                            required property string itemId
+                            required property int sourceRow
                             required property string target
                             required property string detail
                             required property string result
                             required property string duration
                             required property string stepCode
+                            readonly property bool riskStoppedRow: !!(root.taskBackend
+                                && root.taskBackend.riskStopItemId === itemId)
                             width: queueList.width
                             height: 44
-                            color: result === "working" ? WxTheme.clBgSelected
+                            color: riskStoppedRow ? WxTheme.clDangerSoft : result === "working" ? WxTheme.clBgSelected
                                 : (result === "error" || result === "unknown"
                                     ? (WxTheme.isDark ? "#332326" : "#fff2f2") : "transparent")
+                            Rectangle {
+                                width: 3
+                                height: parent.height
+                                visible: parent.riskStoppedRow
+                                color: WxTheme.clDangerNew
+                            }
                             Rectangle {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
@@ -232,9 +290,9 @@ Item {
                                 anchors.leftMargin: 10
                                 anchors.rightMargin: 10
                                 Text {
-                                    text: String(index + 1).padStart(2, "0")
-                                    Layout.preferredWidth: 32
-                                    color: WxTheme.clTextSecondary
+                                    text: String(sourceRow > 0 ? sourceRow : index + 1).padStart(2, "0")
+                                    Layout.preferredWidth: 44
+                                    color: riskStoppedRow ? WxTheme.clDangerNew : WxTheme.clTextSecondary
                                     font.family: WxTheme.fontFamily
                                     font.pixelSize: WxTheme.fontSizeSmall
                                 }
@@ -268,7 +326,9 @@ Item {
                                         : WxTheme.clNeutralSoft
                                     Text {
                                         anchors.centerIn: parent
-                                        text: result === "success"
+                                        text: riskStoppedRow
+                                            ? (root.taskBackend.riskStopKind === "friend_frequency" ? "频繁限制" : "风控停止")
+                                            : result === "success"
                                             ? (taskKind === "friend_add"
                                                 ? (root.friendPreflightMode ? "预检完成" : "已提交")
                                                 : "成功")
@@ -357,6 +417,7 @@ Item {
                         clip: true
                         delegate: Rectangle {
                             required property string timestamp
+                            required property string localTime
                             required property string level
                             required property string message
                             required property string stepCode
@@ -369,7 +430,7 @@ Item {
                                 anchors.rightMargin: 12
                                 spacing: 12
                                 Text {
-                                    text: timestamp.length >= 19 ? timestamp.slice(11, 19) : timestamp
+                                    text: localTime
                                     Layout.preferredWidth: 62
                                     color: WxTheme.clTextHint
                                     font.family: WxTheme.fontFamilyLog
@@ -404,14 +465,24 @@ Item {
             }
 
             Rectangle {
+                objectName: "taskStatusSidebar"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.preferredWidth: 3.7
+                Layout.preferredWidth: root.width * 0.36
+                Layout.minimumWidth: 280
                 color: WxTheme.clPanelFill
 
-                ColumnLayout {
+                ScrollView {
+                    id: statusScroll
+                    objectName: "taskStatusScroll"
                     anchors.fill: parent
                     anchors.margins: 16
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                ColumnLayout {
+                    width: statusScroll.availableWidth
                     spacing: 14
                     Text {
                         text: taskKind === "message_send" ? "消息发送状态"
@@ -423,6 +494,7 @@ Item {
                     }
                     ListView {
                         id: stepList
+                        objectName: "taskStepList"
                         Layout.fillWidth: true
                         Layout.preferredHeight: contentHeight
                         interactive: false
@@ -587,7 +659,7 @@ Item {
                         onClicked: root.taskBackend.restartWechatAfterFailure()
                         Layout.fillWidth: true
                     }
-                    Item { Layout.fillHeight: true }
+                }
                 }
             }
         }
@@ -621,12 +693,14 @@ Item {
                         Accessible.name: text
                         text: root.taskBackend && root.taskBackend.active
                             ? (root.taskBackend.phase === "paused" ? "已暂停"
+                                : root.taskBackend.phase === "pausing" ? "正在安全暂停"
                                 : root.taskBackend.phase === "stopping" ? "正在安全停止"
                                 : root.taskBackend.waitingRemaining > 0
                                     ? "下一条将在 " + Math.ceil(root.taskBackend.waitingRemaining) + " 秒后开始"
                                     : "正在处理当前项目")
                                 + (root.taskBackend.intervalLabel ? " · " + root.taskBackend.intervalLabel : "")
-                            : "暂停和停止会在安全步骤生效"
+                            : "任务已结束" + (root.taskBackend && root.taskBackend.intervalLabel
+                                ? " · " + root.taskBackend.intervalLabel : "")
                         color: WxTheme.clTextHint
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeTiny
@@ -648,6 +722,7 @@ Item {
                 Button {
                     text: root.taskBackend && root.taskBackend.phase === "paused" ? "继续" : "暂停"
                     enabled: root.taskBackend && root.taskBackend.active
+                        && (root.taskBackend.phase === "running" || root.taskBackend.phase === "paused")
                     onClicked: {
                         if (root.taskBackend.phase === "paused") root.taskBackend.resume()
                         else root.taskBackend.pause()

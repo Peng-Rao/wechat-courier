@@ -31,15 +31,7 @@ class TestMockWeChatClient:
         # 不应抛出异常
         wx.chat_window.send_to("Alice", "Hello")
 
-    def test_mock_upload_files(self):
-        wx = MockWeChatClient(auto_connect=False)
-        result = wx.chat_window.upload_files_to_helper(["a.pdf"])
-        assert result is True
 
-    def test_mock_forward(self):
-        wx = MockWeChatClient(auto_connect=False)
-        result = wx.chat_window.forward_recent_merge_to(count=1, target="Alice")
-        assert result is True
 
     def test_mock_disconnect(self):
         wx = MockWeChatClient(auto_connect=False)

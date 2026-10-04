@@ -149,13 +149,14 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="五阿哥微信助手",
+    name="福格微信助手",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=False,
     icon=icon_path if os.path.exists(icon_path) else None,
+    version=os.path.join(ROOT, "build", "version_info.txt"),
 )
 
 agent_exe = EXE(
@@ -169,6 +170,7 @@ agent_exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    version=os.path.join(ROOT, "build", "version_info.txt"),
 )
 
 coll = COLLECT(
@@ -182,5 +184,5 @@ coll = COLLECT(
     agent_analysis.datas,
     strip=False,
     upx=True,
-    name="五阿哥微信助手",
+    name="福格微信助手",
 )

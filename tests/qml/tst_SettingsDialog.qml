@@ -17,7 +17,6 @@ TestCase {
         id: mockMessage
         property real intervalMin: 2
         property real intervalMax: 3
-        property bool useForward: false
     }
 
     QtObject {

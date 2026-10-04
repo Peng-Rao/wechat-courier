@@ -108,6 +108,7 @@ def test_friend_limit_is_snapshotted_locked_and_unlocked_after_task(tmp_path, qa
     backend.friends.model.replace_records(load_friend_records(
         [["姓名", "账号"], *[["示例学生", f"wxid_batch{i:04d}"] for i in range(151)]]))
     backend.friends.model.selectFirstValid()
+    backend.friends.model.selectFirstValid()
     assert backend.task.startFriends()
     payload = client.calls[-1][2]
     assert payload["options"]["friendBatchLimit"] == 150
@@ -150,7 +151,7 @@ def test_backend_exposes_five_stable_qobject_facades(tmp_path, qapp):
     assert isinstance(backend.task, QObject)
     assert isinstance(backend.settings, QObject)
     assert isinstance(backend.agent, QObject)
-    assert backend.versionInfo == "五阿哥微信助手 v0.3.0-test"
+    assert backend.versionInfo == "福格微信助手 v0.3.0-test"
 
 
 def test_backend_shutdown_requests_graceful_agent_exit(tmp_path, qapp):
@@ -318,6 +319,7 @@ def test_friend_task_uses_default_precedence_and_limits(tmp_path, qapp):
             ]
         )
     )
+    backend.friends.model.selectFirstValid()
     backend.friends.defaultGreeting = "默认问候"
     backend.friends.defaultRelationship = "姐姐"
 
@@ -338,6 +340,7 @@ def test_friend_task_refuses_agent_without_submit_capability(tmp_path, qapp):
             [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
+    backend.friends.model.selectFirstValid()
 
     assert backend.task.startFriends() is False
     assert "提交能力" in backend.task.error
@@ -389,6 +392,7 @@ def test_acceptance_mode_keeps_friend_task_as_non_submitting_preflight(
             [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
+    backend.friends.model.selectFirstValid()
 
     assert backend.task.startFriends() is True
     payload = client.calls[-1][2]
@@ -408,6 +412,7 @@ def test_friend_task_recovery_refuses_replacement_agent_without_submit_capabilit
             [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
+    backend.friends.model.selectFirstValid()
     assert backend.task.startFriends() is True
     assert len([call for call in client.calls if call[1] == "task.start"]) == 1
 
@@ -436,6 +441,7 @@ def test_friend_task_rechecks_submit_capability_immediately_before_resume(
             [["账号", "打招呼语", "姓名"], ["18896904196", "你好", "示例学生"]]
         )
     )
+    backend.friends.model.selectFirstValid()
     assert backend.task.startFriends() is True
 
     client.connected = False
@@ -604,22 +610,6 @@ def test_agent_restart_limit_stops_active_task_safely(tmp_path, qapp):
     assert "重启次数" in backend.task.error
 
 
-def test_merged_forward_task_is_not_resumed_after_agent_disconnect(tmp_path, qapp):
-    backend, client = make_backend(tmp_path)
-    backend.message.recipientsText = "Alice\nBob"
-    backend.message.templateText = "hello"
-    backend.message.useForward = True
-    backend.message._files = ["one.pdf"]
-    assert backend.task.startMessage()
-
-    client.connected = False
-    client.connectedChanged.emit(False)
-
-    assert backend.task.active is False
-    assert backend.task.phase == "error"
-    assert "不会自动恢复" in backend.task.error
-    fire_scheduled_agent_restart(backend)
-    assert client.restart_count == 1
 
 
 def test_unavailable_uia_requests_one_confirmed_wechat_restart(tmp_path, qapp):

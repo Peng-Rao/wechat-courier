@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+import math
 from typing import Any, Iterable
 from uuid import uuid4
 
@@ -51,6 +52,7 @@ class FriendImportModel(QAbstractListModel):
     selectionLimitChanged = Signal(int)
     importErrorChanged = Signal(str)
     importWarningChanged = Signal(str)
+    selectionErrorChanged = Signal(str)
 
     _ROLE_NAMES = {
         AccountRole: b"account",
@@ -70,7 +72,9 @@ class FriendImportModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._records: list[FriendRecord] = []
-        self._manual_rows_pending_selection: set[str] = set()
+        self.dataset_generation = 0
+        self._interaction_locked = False
+        self._selection_error = ""
         self._import_error = ""
         self._import_warning = ""
         self._default_greeting = ""
@@ -161,7 +165,6 @@ class FriendImportModel(QAbstractListModel):
 
     def _refresh(self) -> None:
         self._validate()
-        self._select_newly_valid_manual_records()
         if self._records:
             self.dataChanged.emit(self.index(0, 0), self.index(len(self._records) - 1, 0), list(self._ROLE_NAMES))
         self.countsChanged.emit()
@@ -177,23 +180,63 @@ class FriendImportModel(QAbstractListModel):
     def record_at(self, row: int) -> FriendRecord:
         return self._records[row]
 
-    def _select_newly_valid_manual_records(self) -> None:
-        selected_count = self.selectedCount
+    def set_interaction_locked(self, locked: bool) -> None:
+        self._interaction_locked = bool(locked)
+
+    @Property(str, notify=selectionErrorChanged)
+    def selectionError(self):
+        return self._selection_error
+
+    def _set_selection_error(self, value: str) -> None:
+        if value != self._selection_error:
+            self._selection_error = value
+            self.selectionErrorChanged.emit(value)
+
+    def _selection_changed(self) -> None:
+        if self._records:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._records) - 1, 0), [self.SelectedRole])
+        self.countsChanged.emit()
+
+    @Slot(int, int, result=bool)
+    def selectRange(self, start: int, end: int) -> bool:
+        if self._interaction_locked:
+            self._set_selection_error("任务运行期间不能修改选择")
+            return False
+        if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(self._records):
+            self._set_selection_error("请输入有效起止序号，起始不能大于结束")
+            return False
+        self._validate()
+        selected = [record for record in self._records[start - 1:end] if record.valid]
+        if not selected:
+            self._set_selection_error("该区间没有有效记录")
+            return False
+        if len(selected) > self._selection_limit:
+            self._set_selection_error(f"区间包含 {len(selected)} 条有效记录，超过每批上限 {self._selection_limit}")
+            return False
+        selected_ids = {record.item_id for record in selected}
         for record in self._records:
-            if (
-                record.item_id not in self._manual_rows_pending_selection
-                or not record.valid
-            ):
-                continue
-            self._manual_rows_pending_selection.discard(record.item_id)
-            if selected_count < self._selection_limit:
-                record.selected = True
-                selected_count += 1
+            record.selected = record.item_id in selected_ids
+        self._set_selection_error("")
+        self._selection_changed()
+        return True
+
+    @Slot(result=bool)
+    def clearSelection(self) -> bool:
+        if self._interaction_locked:
+            return False
+        for record in self._records:
+            record.selected = False
+        self._set_selection_error("")
+        self._selection_changed()
+        return True
 
     def replace_records(self, records: Iterable[FriendRecord]) -> None:
+        if self._interaction_locked:
+            return
         self.beginResetModel()
         self._records = list(records)
-        self._manual_rows_pending_selection.clear()
+        self.dataset_generation += 1
+        self._set_selection_error("")
         self._validate()
         self._trim_selected_records()
         self.endResetModel()
@@ -201,27 +244,25 @@ class FriendImportModel(QAbstractListModel):
 
     @Slot(result=int)
     def appendEmptyRecord(self) -> int:
+        if self._interaction_locked:
+            return -1
         row = len(self._records)
         record = FriendRecord(item_id=f"manual-{uuid4().hex}", account="")
         self.beginInsertRows(QModelIndex(), row, row)
         self._records.append(record)
         self._validate()
-        self._manual_rows_pending_selection.add(record.item_id)
         self.endInsertRows()
         self.countsChanged.emit()
         return row
 
     @Slot(int, result=bool)
     def removeRecord(self, row: int) -> bool:
-        if not 0 <= row < len(self._records):
+        if self._interaction_locked or not 0 <= row < len(self._records):
             return False
-        item_id = self._records[row].item_id
         self.beginRemoveRows(QModelIndex(), row, row)
         self._records.pop(row)
-        self._manual_rows_pending_selection.discard(item_id)
         self.endRemoveRows()
         self._validate()
-        self._select_newly_valid_manual_records()
         if self._records:
             self.dataChanged.emit(
                 self.index(0, 0),
@@ -233,9 +274,10 @@ class FriendImportModel(QAbstractListModel):
 
     @Slot(result=bool)
     def clearRecords(self) -> bool:
+        if self._interaction_locked:
+            return False
         changed = bool(
             self._records
-            or self._manual_rows_pending_selection
             or self._import_error
             or self._import_warning
         )
@@ -244,7 +286,8 @@ class FriendImportModel(QAbstractListModel):
 
         self.beginResetModel()
         self._records.clear()
-        self._manual_rows_pending_selection.clear()
+        self.dataset_generation += 1
+        self._set_selection_error("")
         self.endResetModel()
         if self._import_error:
             self._import_error = ""
@@ -256,6 +299,8 @@ class FriendImportModel(QAbstractListModel):
 
     @Slot(str, result=bool)
     def importFile(self, path: str) -> bool:
+        if self._interaction_locked:
+            return False
         if QUrl(path).isLocalFile():
             path = QUrl(path).toLocalFile()
         try:
@@ -270,14 +315,12 @@ class FriendImportModel(QAbstractListModel):
         self._import_warning = "；".join(warnings)
         self.importWarningChanged.emit(self._import_warning)
         self.replace_records(records)
-        # Selection must use the actual global template, not loader defaults.
-        self.selectFirstValid()
         return True
 
     @Slot(int, str, object, result=bool)
     @Slot(int, str, str, result=bool)
     def setCell(self, row: int, field: str, value: Any) -> bool:
-        if not 0 <= row < len(self._records):
+        if self._interaction_locked or not 0 <= row < len(self._records):
             return False
         if field not in {"account", "greeting", "name", "relationship"}:
             return False
@@ -300,7 +343,7 @@ class FriendImportModel(QAbstractListModel):
 
     @Slot(int, bool, result=bool)
     def setSelected(self, row: int, selected: bool) -> bool:
-        if not 0 <= row < len(self._records):
+        if self._interaction_locked or not 0 <= row < len(self._records):
             return False
         record = self._records[row]
         if record.selected == selected:
@@ -315,6 +358,8 @@ class FriendImportModel(QAbstractListModel):
 
     @Slot()
     def selectFirstValid(self) -> None:
+        if self._interaction_locked:
+            return
         selected = 0
         for record in self._records:
             record.selected = record.valid and selected < self._selection_limit
@@ -336,7 +381,7 @@ class FriendImportModel(QAbstractListModel):
                               self._default_relationship if default_relationship is None else default_relationship)
         self._validate()
         payload = []
-        for record in self._records:
+        for row, record in enumerate(self._records, start=1):
             if not record.valid or not record.selected:
                 continue
             payload.append(
@@ -345,6 +390,8 @@ class FriendImportModel(QAbstractListModel):
                     "account": record.account,
                     "greeting": record.rendered_greeting,
                     "remark": record.remark,
+                    "sourceRow": row,
+                    "sourceFileRow": record.source_row,
                 }
             )
         return payload
@@ -368,6 +415,8 @@ class TaskDisplayItem:
     duration: str = "--"
     step_code: str = ""
     item_id: str = ""
+    source_row: int = 0
+    source_file_row: int = 0
 
 
 class TaskItemModel(QAbstractListModel):
@@ -377,6 +426,8 @@ class TaskItemModel(QAbstractListModel):
     DurationRole = Qt.UserRole + 4
     StepCodeRole = Qt.UserRole + 5
     ItemIdRole = Qt.UserRole + 6
+    SourceRowRole = Qt.UserRole + 7
+    SourceFileRowRole = Qt.UserRole + 8
 
     _ROLE_NAMES = {
         TargetRole: b"target",
@@ -385,6 +436,8 @@ class TaskItemModel(QAbstractListModel):
         DurationRole: b"duration",
         StepCodeRole: b"stepCode",
         ItemIdRole: b"itemId",
+        SourceRowRole: b"sourceRow",
+        SourceFileRowRole: b"sourceFileRow",
     }
 
     def __init__(self, parent=None):
@@ -409,6 +462,8 @@ class TaskItemModel(QAbstractListModel):
             self.DurationRole: item.duration,
             self.StepCodeRole: item.step_code,
             self.ItemIdRole: item.item_id,
+            self.SourceRowRole: item.source_row,
+            self.SourceFileRowRole: item.source_file_row,
         }.get(role)
 
     def replace(self, items: Iterable[TaskDisplayItem]) -> None:
@@ -416,6 +471,10 @@ class TaskItemModel(QAbstractListModel):
         self._items = list(items)
         self._started_at.clear()
         self.endResetModel()
+
+    @Slot(str, result=int)
+    def indexOfItem(self, item_id: str) -> int:
+        return next((row for row, item in enumerate(self._items) if item.item_id == item_id), -1)
 
     def apply_event(self, event: dict[str, Any]) -> None:
         item_id = str(event.get("itemId", ""))
@@ -429,7 +488,14 @@ class TaskItemModel(QAbstractListModel):
             item.result, terminal = _display_result(event)
             item.step_code = str(event.get("step", ""))
             started = self._started_at.get(item_id)
-            if terminal and started is not None and timestamp is not None:
+            elapsed_ms = event.get("itemElapsedMs")
+            if isinstance(elapsed_ms, (int, float)) and not isinstance(elapsed_ms, bool) and math.isfinite(elapsed_ms) and elapsed_ms >= 0:
+                item.duration = f"{elapsed_ms / 1000:.1f}s"
+            elif terminal and started is not None and timestamp is not None:
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
                 elapsed = max(0.0, (timestamp - started).total_seconds())
                 item.duration = f"{elapsed:.1f}s"
             index = self.index(row, 0)
@@ -450,11 +516,13 @@ class RuntimeLogModel(QAbstractListModel):
     LevelRole = Qt.UserRole + 2
     MessageRole = Qt.UserRole + 3
     StepCodeRole = Qt.UserRole + 4
+    LocalTimeRole = Qt.UserRole + 5
     _ROLE_NAMES = {
         TimestampRole: b"timestamp",
         LevelRole: b"level",
         MessageRole: b"message",
         StepCodeRole: b"stepCode",
+        LocalTimeRole: b"localTime",
     }
 
     def __init__(self, parent=None):
@@ -471,11 +539,15 @@ class RuntimeLogModel(QAbstractListModel):
         if not index.isValid() or not 0 <= index.row() < len(self._entries):
             return None
         entry = self._entries[index.row()]
+        parsed = _event_time({"timestamp": entry.timestamp})
+        if parsed is not None and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return {
             self.TimestampRole: entry.timestamp,
             self.LevelRole: entry.level,
             self.MessageRole: entry.message,
             self.StepCodeRole: entry.step_code,
+            self.LocalTimeRole: parsed.astimezone().strftime("%H:%M:%S") if parsed is not None else "--:--:--",
         }.get(role)
 
     def clear(self) -> None:

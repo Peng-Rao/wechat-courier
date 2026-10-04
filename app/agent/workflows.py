@@ -6,6 +6,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
+from app.clocks import ElapsedClock
 
 from .contracts import TaskEvent, TaskItem, TaskRequest
 from .retry import LayeredRetry, RetryExhausted, TransientUiError, classify_exception
@@ -102,6 +103,7 @@ class WeixinWorkflowEngine:
         self._last_failure_code = ""
         self._safety_failure_code = ""
         self._task_kind = ""
+        self._item_clock = ElapsedClock()
 
     def _get_driver(self):
         if self._driver is None:
@@ -265,73 +267,10 @@ class WeixinWorkflowEngine:
         self._progress_emit = emit
         self._active_task_id = request.task_id
         try:
-            if request.kind == "message_send" and request.options.use_forward:
-                if not request.options.file_paths:
-                    raise ValueError("merged forwarding requires at least one file")
-                first_item = request.items[0]
-                self._mark_boundary(
-                    request, first_item, "forward_source_upload", 0
-                )
-                try:
-                    preparation = self._driver_action(
-                        "send_triggered",
-                        "prepare_forward_bundle",
-                        lambda: driver.prepare_forward_bundle(
-                            request.options.file_paths
-                        ),
-                    )
-                except Exception as exc:
-                    preparation = {
-                        "outcome": "unknown",
-                        "detail": f"源文件上传后自动化连接中断：{exc}",
-                    }
-                if preparation.get("outcome") != "success":
-                    detail = str(
-                        preparation.get("detail", "合并转发源文件准备失败")
-                    )
-                    outcome = (
-                        "unknown"
-                        if preparation.get("outcome") == "unknown"
-                        else "error"
-                    )
-                    for index, item in enumerate(request.items):
-                        if index == 0:
-                            self._finish_boundary(
-                                emit,
-                                request,
-                                item,
-                                "send_verified",
-                                outcome,
-                                detail,
-                                index,
-                                control,
-                            )
-                        else:
-                            self._event(
-                                emit,
-                                request,
-                                item,
-                                "send_verified",
-                                outcome,
-                                detail,
-                                index + 1,
-                            )
-                    return {
-                        "outcome": outcome,
-                        "done": len(request.items),
-                        "total": len(request.items),
-                        "success": 0,
-                        "error": len(request.items) if outcome == "error" else 0,
-                        "unknown": (
-                            len(request.items) if outcome == "unknown" else 0
-                        ),
-                        "stopped": 0,
-                    }
-                self._mark_boundary(
-                    request, first_item, "forward_source_ready", 0
-                )
             for index, item in enumerate(request.items):
                 self._active_item_id = item.item_id
+                self._item_clock.reset()
+                self._item_clock.resume()
                 try:
                     self._safe_point(control)
                     if request.kind == "message_send":
@@ -413,6 +352,7 @@ class WeixinWorkflowEngine:
                         index + 1,
                         recoverable=False,
                         error_code="RISK_CONTROL",
+                        risk_kind=str(getattr(exc, "risk_kind", "")),
                     )
                     forced_stop = True
                 except Exception as exc:
@@ -433,6 +373,7 @@ class WeixinWorkflowEngine:
                         error_code="AUTOMATION_ERROR",
                     )
                     forced_stop = True
+                self._item_clock.pause()
                 counts[outcome] += 1
                 done += 1
                 if forced_stop:
@@ -449,13 +390,6 @@ class WeixinWorkflowEngine:
         finally:
             self._progress_emit = None
             self._active_task_id = ""
-        if (
-            request.kind == "message_send"
-            and request.options.use_forward
-            and self._journal is not None
-            and not control.stop_requested
-        ):
-            self._journal.clear(task_id=request.task_id)
 
         overall = "success"
         if counts["stopped"]:
@@ -481,8 +415,11 @@ class WeixinWorkflowEngine:
         self._driver = None
 
     def _safe_point(self, control) -> bool:
-        paused = bool(getattr(control, "paused", False))
-        if paused:
+        paused = False
+
+        def before_pause():
+            nonlocal paused
+            paused = True
             finish = getattr(self._driver, "finish_task", None)
             if callable(finish):
                 cleanup = self._driver_action("cleanup", "finish_task", finish)
@@ -490,11 +427,21 @@ class WeixinWorkflowEngine:
                     self._cleanup_blocked = True
                     raise WorkflowError("cleanup", "暂停前窗口清理失败",
                                         error_code="CLEANUP_FAILED", fatal_batch=True)
+            self._item_clock.pause()
             if self._progress_emit:
                 self._progress_emit("agent.status", {"status": "paused", "taskId": self._active_task_id})
-        if not control.wait_if_paused():
+
+        wait = getattr(control, "wait_at_safe_point", None)
+        if callable(wait):
+            allowed = wait(before_pause)
+        else:
+            if bool(getattr(control, "paused", False)):
+                before_pause()
+            allowed = control.wait_if_paused()
+        if not allowed:
             raise StopRequested()
         if paused:
+            self._item_clock.resume()
             begin = getattr(self._driver, "begin_task", None)
             if callable(begin):
                 begin(self._task_kind)
@@ -579,6 +526,7 @@ class WeixinWorkflowEngine:
             control,
             error_code=error_code or "RESULT_UNKNOWN",
             wechat_responsive=wechat_responsive,
+            risk_kind=str(getattr(cause, "risk_kind", "")),
         )
         if (
             fatal_batch
@@ -604,6 +552,7 @@ class WeixinWorkflowEngine:
         control,
         *,
         error_code: str = "",
+        risk_kind: str = "",
         wechat_responsive: bool = True,
     ) -> str:
         self._event(
@@ -624,6 +573,7 @@ class WeixinWorkflowEngine:
                 if outcome == "error"
                 else ""
             ),
+            risk_kind=risk_kind,
         )
         if control.wait_for_result_ack(item.item_id, timeout=5.0):
             self._clear_boundary(request, item)
@@ -649,6 +599,7 @@ class WeixinWorkflowEngine:
         destructive_boundary_crossed: bool = False,
         wechat_responsive: bool = True,
         error_code: str = "",
+        risk_kind: str = "",
     ) -> None:
         if outcome in {"error", "unknown"}:
             self._remember_safety_failure(error_code)
@@ -692,6 +643,8 @@ class WeixinWorkflowEngine:
                 destructive_boundary_crossed=destructive_boundary_crossed,
                 wechat_responsive=wechat_responsive,
                 error_code=error_code,
+                item_elapsed_ms=round(self._item_clock.seconds * 1000, 1),
+                risk_kind=risk_kind,
             ).to_payload(),
         )
 
@@ -756,64 +709,6 @@ class WeixinWorkflowEngine:
                 emit=emit, control=control,
             )
         boundary_marked = False
-        if request.options.use_forward:
-            self._mark_boundary(request, item, "send_triggered", index)
-            boundary_marked = True
-            try:
-                result = self._driver_action(
-                    "send_triggered",
-                    "forward_bundle",
-                    lambda: driver.forward_bundle(
-                        item.target, item.message, request.options.file_paths
-                    ),
-                )
-                self._success_step(
-                    emit, request, item, "send_triggered", "已触发合并转发", index
-                )
-            except Exception as exc:
-                return self._boundary_exception(
-                    emit,
-                    request,
-                    item,
-                    "send_verified",
-                    f"转发已触发，但自动化连接中断：{exc}；不会自动重发",
-                    index,
-                    control,
-                    cause=exc,
-                )
-            outcome = str(result.get("outcome", "unknown"))
-            if outcome == "unknown":
-                return self._finish_boundary(
-                    emit,
-                    request,
-                    item,
-                    "send_verified",
-                    "unknown",
-                    str(result.get("detail", "合并转发结果无法确认；不会自动重发")),
-                    index,
-                    control,
-                )
-            if outcome != "success":
-                return self._finish_boundary(
-                    emit,
-                    request,
-                    item,
-                    "send_verified",
-                    "error",
-                    str(result.get("detail", "合并转发失败")),
-                    index,
-                    control,
-                )
-            return self._finish_boundary(
-                emit,
-                request,
-                item,
-                "send_verified",
-                "success",
-                str(result.get("detail", "合并转发结果已确认")),
-                index,
-                control,
-            )
 
         if item.message:
             before = self._driver_action(
@@ -927,11 +822,15 @@ class WeixinWorkflowEngine:
                     index,
                     control,
                 )
-            detail = (
-                f"文本及 {len(file_results)} 个附件已确认"
-                if item.message
-                else f"{len(file_results)} 个附件已确认"
-            )
+            if any(result.get("verificationSkipped") is True for result in file_results):
+                prefix = "文本已发送，" if item.message else ""
+                detail = f"{prefix}{len(file_results)} 个附件发送成功"
+            else:
+                detail = (
+                    f"文本及 {len(file_results)} 个附件已确认"
+                    if item.message
+                    else f"{len(file_results)} 个附件已确认"
+                )
         return self._finish_boundary(
             emit,
             request,
@@ -1096,6 +995,9 @@ class WeixinWorkflowEngine:
                 )
                 wrapped = RiskControlError(f"{action} 风控阻止：{exc}")
                 wrapped.step = step
+                wrapped.risk_kind = str(getattr(exc, "risk_kind", ""))
+                if wrapped.risk_kind == "frequency" and self._task_kind == "friend_add":
+                    wrapped.risk_kind = "friend_frequency"
                 raise wrapped from exc
             except Exception as exc:
                 retry_error = classify_exception(exc)
@@ -1241,6 +1143,8 @@ class WeixinWorkflowEngine:
             )
         except RetryExhausted as exc:
             cause = exc.cause
+            if isinstance(cause, RiskControlError):
+                raise cause
             if isinstance(cause, WorkflowError):
                 cause.attempt = exc.attempt
                 cause.max_attempts = exc.max_attempts
@@ -1418,6 +1322,8 @@ class WeixinWorkflowEngine:
         except Exception as exc:
             if self._destructive_trigger_state(exc) is False:
                 self._clear_boundary(request, item)
+                if isinstance(exc, RiskControlError) or isinstance(exc, WorkflowError) and exc.fatal_batch:
+                    raise
                 self._event(
                     emit,
                     request,

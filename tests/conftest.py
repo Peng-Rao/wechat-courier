@@ -23,7 +23,6 @@ class FakeSenderWorker(QObject):
         self.friends = []
         self.message_template = ""
         self.file_paths = []
-        self.use_forward = False
         self.send_interval_min = 2.0
         self.send_interval_max = 3.0
         self.pause_called = False
@@ -91,7 +90,5 @@ def mock_wechat_client():
     wx.chat_window = MagicMock()
     wx.chat_window.send_to = MagicMock(return_value=True)
     wx.chat_window.send_message_and_file_to = MagicMock(return_value=True)
-    wx.chat_window.upload_files_to_helper = MagicMock(return_value=True)
-    wx.chat_window.forward_recent_merge_to = MagicMock(return_value=True)
     wx.disconnect = MagicMock()
     return wx

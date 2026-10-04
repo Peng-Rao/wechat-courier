@@ -113,6 +113,7 @@ def test_countdown_snapshot_pause_stop_and_stale_notifications(tmp_path, qapp):
     assert backend.task.waitingRemaining == 4.5
     backend.task.pause()
     assert backend.task.waitingRemaining == 0
+    client.notificationReceived.emit("agent.status", {"status": "paused", "taskId": payload["taskId"]})
     backend.task.resume()
     wait(payload["taskId"], 3)
     assert backend.task.waitingRemaining == 3

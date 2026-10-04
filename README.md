@@ -1,20 +1,23 @@
-# 五阿哥微信助手
+# 福格微信助手
 
-面向 Windows 个人微信客户端的批量消息与批量添加好友助手。v0.3.5 候选版使用 PySide6/QML 提供桌面界面，并将所有微信 UI Automation 操作隔离到独立的 `wechat-agent.exe` 进程。
+面向 Windows 个人微信客户端的批量消息与批量添加好友助手。1.0.0 候选版使用 PySide6/QML 提供桌面界面，并将所有微信 UI Automation 操作隔离到独立的 `wechat-agent.exe` 进程。
 
-> 当前提交是稳定性修复检查点，不是已通过完整实机验收的正式版。40 次独立 GUI 任务、附件与合并转发、60 分钟混合运行及安装升级门禁尚未全部通过。单元测试和构建成功不代表软件实机稳定性已获确认。
+> 当前代码是 1.0.0 修复检查点，不是已通过完整实机验收的正式包。40 次独立 GUI 任务、普通附件、60 分钟混合运行及安装升级门禁尚未全部通过。单元测试和构建成功不代表软件实机稳定性已获确认。
 
 > 当前自动化仅放行经过验证的微信 Windows 客户端 `4.1.13.65`。其他版本可以编辑任务，但不能启动自动化。
 
 ## 功能
 
 - 消息群发：逐个精确匹配好友、回读聊天标题和输入内容、发送后核对新增消息。
-- 附件发送：支持逐人附件；合并模式会先上传到文件传输助手，再执行真正的多选合并转发。
+- 附件发送：仅逐人发送普通附件；预览按顺序显示文字和所有附件，图片可在窗口内放大，其他文件通过系统关联程序打开。旧转发选项 `useForward` 会被 RPC 契约明确拒绝。
+- 编辑与计时：名单、模板和消息预览独立滚动；两类任务均显示单调时钟累计耗时，暂停停表，包含重试、等待和清理，结束保留耗时。
 - 模板称呼：消息中的 `{name}` 会按好友备注生成称呼。
-- 批量加好友：导入 XLSX 或 CSV，编辑姓名、账号、逐行后缀和打招呼语，自动生成备注；点击开始后需在危险操作提示中再次确认，才会逐条提交好友申请。
+- 自动发送好友申请：导入 XLSX 或 CSV，编辑姓名、账号、逐行后缀和打招呼语，自动生成备注；点击开始后需在危险操作提示中再次确认，才会逐条提交好友申请。
 - 中文状态机：执行页显示当前项目、步骤、结果、进度和本次任务运行日志。
 - 安全恢复：Agent 卡死或崩溃不拖死 GUI；越过发送或提交边界的项目恢复后只标记为“结果未知”，绝不自动重放。
 - 无边框窗口与毛玻璃：浅色/深色模式、玻璃开关和 `45%~90%` 透明度均可在运行中调整。
+
+已知限制：[图片发送结果核验待修复](docs/issues/image-delivery-verification.md)。目前图片发送触发成功且输入框清空后，界面显示成功；尚不代表送达已核验。普通文件、文本核验及防重复发送机制保持不变。
 
 ## 自动化边界
 
@@ -54,7 +57,13 @@ XLSX 读取第一个工作表；CSV 支持 UTF-8 BOM 和 GB18030。表头要求�
 
 例如“示例学生姐姐”导入后拆成姓名“示例学生”和后缀“姐姐”；自动备注及 `{称呼}` 均为“示例学生姐姐”。改为“无”后，备注及 `{称呼}` 为“示例学生”，`{后缀}` 为空。点击行内编辑区域可看最终内容预览；占位符按钮插入全局模板，不覆盖行内打招呼语。未知占位符或格式错误会阻止受影响行执行。任务开始时固定最终内容并锁定编辑。`{关系}` 作为 `{后缀}` 的兼容别名继续可用。
 
-额外列会被忽略。每批默认最多选择 100 条有效记录，可在“参数设置 → 批量加好友 → 每批添加人数”中设置为 1–1000 人，修改后自动保存在本机。导入和“选择前 N 条”使用当前上限；降低上限时按表格顺序保留前 N 条已选记录，提高上限时保留原有选择。任务开始后固定本次上限并锁定修改，未选记录留在表格中。验证码、操作频繁、风险提示或账号限制会立即停止整批。正常模式在资料、打招呼语和备注回读一致后点击最终“确定”；提交后无法撤回。设置 `WECHAT_COURIER_ACCEPTANCE=1` 的验收模式和 `tools/safe_uia_preflight.py` 始终停在提交前并安全关闭表单。
+额外列会被忽略。导入和新增记录均不自动勾选。输入“起始序号”和“结束序号”后选择区间，序号按当前表格从 1 开始并包含两端，跳过异常行；成功时替换原选择。非法、无有效记录或有效条数超限的区间会被拒绝并保留原选择，也可手动勾选或清除选择。
+
+每批默认最多选择 100 条有效记录，可在“参数设置 → 自动发送好友申请 → 每批添加人数”设置为 1–1000 人。降低上限时保留表格顺序前 N 条已选记录，提高上限不会自动勾选。任务开始后冻结选择、源行号、内容和参数，并锁定编辑；未选记录仍保留。
+
+验证码、操作或好友申请频繁、风控和账号限制会立即停止整批，无重试或后续等待。监控页高亮停止账号及原表序号，返回编辑页仍定位该记录，其余条目显示未执行。已触发但未能核对的结果保持未知，不重发。运行日志将 UTC 时间按系统本地时区显示，诊断数据保留 UTC。
+
+正常模式在资料、打招呼语和备注回读一致后点击最终“确定”；提交后无法撤回。设置 `WECHAT_COURIER_ACCEPTANCE=1` 的验收模式和 `tools/safe_uia_preflight.py` 始终停在提交前并安全关闭表单。内置和用户自定义打招呼语不随品牌更名改写。
 
 ## 开发
 
@@ -87,20 +96,20 @@ python build/build.py
 构建输出：
 
 ```text
-dist/五阿哥微信助手/五阿哥微信助手.exe
-dist/五阿哥微信助手/wechat-agent.exe
-dist/五阿哥微信助手_Setup.exe
+dist/福格微信助手/福格微信助手.exe
+dist/福格微信助手/wechat-agent.exe
+dist/福格微信助手_Setup.exe
 ```
 
-安装器会关闭并迁移旧“五阿哥群发助手”，清理旧快捷方式，但保留 `QSettings("wx4py", "WeChatCourier")` 中的外观和任务参数。
+安装器兼容旧“五阿哥微信助手”和“五阿哥群发助手”：仅处理注册信息和产品可执行文件共同确认的旧安装及快捷方式，保留未知文件与 `QSettings("wx4py", "WeChatCourier")` 外观和任务参数。本轮仅修改构建配置，不生成安装包。
 
 ## 兼容性
 
 `src.WeChatClient` 的公共导入仍保留，便于旧调用方迁移；v0.3.1 的生产 GUI 不再依赖它执行任务。活动队列和结果不跨 GUI 重启恢复，短期安全日志只用于防止 Agent 重启后重复发送。UIA 诊断采用滚动 JSONL，并可从任务监控页导出脱敏诊断包。
 
-## v0.3.2 Acceptance Harness
+## 1.0.0 Acceptance Harness
 
-`tests/manual_v032_gui_acceptance.py` has four opt-in profiles: `smoke` (six alternating text/preflight tasks), `independent` (exactly 40 alternating tasks, 20 sends + 20 preflights), `soak` (60 minutes), and `delivery` (two text/file tasks, ordinary then merged-forward). Every invocation defaults to plan-only. Each report declares its coverage; no single profile claims the complete v0.3.2 release gate.
+`tests/manual_v032_gui_acceptance.py` keeps its historical filename and has four opt-in profiles: `smoke` (six alternating text/preflight tasks), `independent` (exactly 40 alternating tasks, 20 sends + 20 preflights), `soak` (60 minutes), and `delivery` (two independent text/file tasks). Every invocation defaults to plan-only. Reports use acceptance version 1.0.0 and declare their coverage; no single profile claims the complete release gate.
 
 Dependencies: Windows 10/11, Python 3.10+, `requirements-dev.txt` (PySide6, pywin32, comtypes, pyperclip, pytest). UIA uses the repository's `src/core/uiautomation.py`; no additional UI automation package or Computer Use is required. Live tests require an interactive, unlocked desktop and logged-in supported WeChat. Close other Courier instances before starting. Do not interact with either application during a run.
 
@@ -111,40 +120,42 @@ python -m pytest tests/test_v032_acceptance.py -o addopts= -q
 python tests/manual_v032_gui_acceptance.py --mode gui --report .artifacts/v032-plan.json
 ```
 
-The following commands are **live and opt-in**. Run modes sequentially, never concurrently. Do not run until the operator explicitly authorizes sending unique test texts to `文件传输助手` and searching/filling/cancelling the friend form for `18896904196`. No other recipient or friend submission is accepted. Attachments/forwarding require the separate `delivery` profile and `--confirm-delivery`. A smoke run performs six separate one-item tasks: text then friend preflight, each from visible, minimized, and tray-hidden WeChat states. These states concern **WeChat**, not Courier; Courier remains visible for UIA button actions. Closing WeChat must be configured to hide to tray; unexpected exit aborts the run.
+For development without packaging, `--mode gui --gui-source` launches the real QML GUI and real Named Pipe Agent using a temporary settings file. It drives the same accessible controls as packaged GUI mode; it is not the direct-workflow `source` mode. This preserves user settings, but does not certify an installer or packaged binaries. Live authorization flags are still required.
+
+The following commands are **live and opt-in**. Run modes sequentially, never concurrently. Do not run until the operator explicitly authorizes sending unique test texts to `文件传输助手` and searching/filling/cancelling the friend form for `18896904196`. No other recipient or friend submission is accepted. Attachments require the separate `delivery` profile and `--confirm-delivery`. A smoke run performs six separate one-item tasks: text then friend preflight, each from visible, minimized, and tray-hidden WeChat states. These states concern **WeChat**, not Courier; Courier remains visible for UIA button actions. Closing WeChat must be configured to hide to tray; unexpected exit aborts the run.
 
 ```powershell
 # The harness sets these flags only in its packaged GUI child process:
 # WECHAT_COURIER_ACCEPTANCE=1 and QT_ACCESSIBILITY=1
-python tests/manual_v032_gui_acceptance.py --mode gui --profile smoke --gui-exe "dist/五阿哥微信助手/五阿哥微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-smoke.json
+python tests/manual_v032_gui_acceptance.py --mode gui --profile smoke --gui-exe "dist/福格微信助手/福格微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-smoke.json
 
 # Same cases, repeatedly as independent tasks for 60 minutes; default gap is 60s.
-python tests/manual_v032_gui_acceptance.py --mode gui --profile soak --gui-exe "dist/五阿哥微信助手/五阿哥微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-soak.json
+python tests/manual_v032_gui_acceptance.py --mode gui --profile soak --gui-exe "dist/福格微信助手/福格微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-soak.json
 
 # Fixed task count, independent of soak duration: 20 sends + 20 friend preflights.
-python tests/manual_v032_gui_acceptance.py --mode gui --profile independent --gui-exe "dist/五阿哥微信助手/五阿哥微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-independent.json
+python tests/manual_v032_gui_acceptance.py --mode gui --profile independent --gui-exe "dist/福格微信助手/福格微信助手.exe" --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-gui-independent.json
 
 # Explicit delivery authorization; preselect File Transfer Assistant for the read-only baseline.
-python tests/manual_v032_gui_acceptance.py --mode gui --profile delivery --gui-exe "dist/五阿哥微信助手/五阿哥微信助手.exe" --execute --confirm-send --confirm-delivery --report .artifacts/v032-gui-delivery.json
+python tests/manual_v032_gui_acceptance.py --mode gui --profile delivery --gui-exe "dist/福格微信助手/福格微信助手.exe" --execute --confirm-send --confirm-delivery --report .artifacts/v032-gui-delivery.json
 
 # Comparison entrypoints. Neither can substitute for packaged GUI acceptance.
 python tests/manual_v032_gui_acceptance.py --mode source --profile smoke --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-source-smoke.json
-python tests/manual_v032_gui_acceptance.py --mode rpc --agent-exe "dist/五阿哥微信助手/wechat-agent.exe" --profile smoke --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-rpc-smoke.json
+python tests/manual_v032_gui_acceptance.py --mode rpc --agent-exe "dist/福格微信助手/wechat-agent.exe" --profile smoke --execute --confirm-send --confirm-friend-preflight --report .artifacts/v032-rpc-smoke.json
 ```
 
 For standalone inspection of the accessibility metadata, explicitly launch the packaged GUI with `$env:WECHAT_COURIER_ACCEPTANCE="1"` and `$env:QT_ACCESSIBILITY="1"`; remove those environment variables afterwards. This does not itself authorize task execution. Normal application runs must not expose raw editor/task metadata.
 
 GUI mode uses only UIA to populate the actual editors, open settings, import its generated single-row CSV through the native Open dialog, and invoke Start. It never calls controllers, the Agent RPC, or the workflow engine. Invoke/Value patterns are preferred; unavailable patterns permit a fresh accessible-control-bounds fallback, with input readback. Invoke exceptions are never retried. The sole no-effect exception is non-destructive WeChat tray hiding: after Invoke returns but the window stays visible, the harness revalidates the same close control RuntimeId and main-window owner, then attempts one bounds click and verifies hidden state. Start/send never receive that retry. Message settings must match the canonical defaults (2/3 seconds), friend settings 15/30 seconds, unknown policy `continue`; mismatched pending GUI payloads abort before Start. Settings are inspected, not overwritten.
 
-Delivery generates one fresh, uniquely named ASCII `.txt` per task, containing only a test marker and benign text. Arbitrary paths, changed content, additional files, and unrelated GUI attachments are rejected. GUI mode selects the file with the actual `messageAddFileButton` and native file dialog, verifies attachment readback, and sets `messageUseForwardSwitch` using TogglePattern (bounds fallback only when unavailable). The second task removes only the harness's previous attachment through `messageRemoveFileButton-0`. All sends, including the merged-forward source upload, remain restricted to File Transfer Assistant.
+Delivery generates one fresh, uniquely named ASCII `.txt` per task, containing only a test marker and benign text. Arbitrary paths, changed content, additional files, and unrelated GUI attachments are rejected. GUI mode selects the file with the actual `messageAddFileButton` and native file dialog and verifies attachment readback. The second task removes only the harness's previous attachment through `messageRemoveFileButton-0`. All text and ordinary attachment sends remain restricted to File Transfer Assistant.
 
-Delivery evidence combines exact single started/completed action pairs from bounded, already-redacted production diagnostics with read-only UIA observations of the selected File Transfer Assistant message list. Text and filename must be absent before the task and each appear exactly once afterwards; merged forwarding additionally requires exactly one new merged card. The source-upload and merged-forward boundaries are distinguished from ordinary text/attachment sends. Missing evidence, repeated actions, duplicate bubbles, or changed runtime build identity fail the profile. The operator must preselect this chat for the baseline; the audit itself does not navigate WeChat. Counts cover the exposed current message-list snapshot, not an unbounded historical/account-wide duplicate audit.
+Delivery evidence combines exact single started/completed action pairs from bounded, already-redacted production diagnostics with read-only UIA observations of the selected File Transfer Assistant message list. Text and filename must be absent before the task and each appear exactly once afterwards. Missing evidence, repeated actions, duplicate bubbles, or changed runtime build identity fail the profile. The operator must preselect this chat for the baseline; the audit itself does not navigate WeChat. Counts cover the exposed current message-list snapshot, not an unbounded historical/account-wide duplicate audit. Evidence retains UTC timestamps, per-item monotonic elapsed milliseconds and risk categories without copying private log details.
 
 Acceptance-only `Accessible.name` contract:
 
 - `App.qml`: `messageWorkspaceTab`, `friendWorkspaceTab`, `acceptanceEditorState`, `acceptanceTaskState`.
-- `MessageWorkspace.qml`: `messageRecipientsInput`, `messageTemplateInput`, `startMessageButton`; delivery also uses `messageAddFileButton`, `messageUseForwardSwitch`, `messageRemoveFileButton-0`.
-- `FriendWorkspace.qml`: `importFriendsButton`, `friendAccountField`, `startFriendsButton`.
+- `MessageWorkspace.qml`: `messageRecipientsInput`, `messageTemplateInput`, `startMessageButton`; delivery also uses `messageAddFileButton`, `messageRemoveFileButton-0`.
+- `FriendWorkspace.qml`: `importFriendsButton`, `friendAccountField`, `friendRangeStart`, `friendRangeEnd`, `selectFriendRangeButton`, `startFriendsButton`. Import leaves all rows unselected; the harness selects its one-row range explicitly.
 - `WxTitleBar.qml`: `settingsButton`, exposed as an accessible button with a press action.
 - `SettingsDialog.qml`: `settingsMessageIntervalMin`, `settingsMessageIntervalMax`, `settingsCloseButton`.
 - `TaskMonitor.qml`: `taskReturnToEditorButton`, `taskStopButton`.

@@ -65,7 +65,7 @@ def test_import_requires_account_header_and_rejects_unknown_formats(tmp_path):
         load_friend_records(unknown)
 
 
-def test_model_marks_invalid_and_duplicate_accounts_and_selects_first_100(qapp):
+def test_model_marks_invalid_and_duplicate_accounts_without_auto_selection(qapp):
     rows = [["账号", "打招呼语", "姓名"]]
     rows.extend([[f"wxid_valid{i:03d}", "", "示例学生"] for i in range(102)])
     rows.extend([["wxid_valid000", "duplicate", "示例学生"], ["张三", "", "示例学生"]])
@@ -75,7 +75,7 @@ def test_model_marks_invalid_and_duplicate_accounts_and_selects_first_100(qapp):
 
     assert model.count == 104
     assert model.validCount == 102
-    assert model.selectedCount == 100
+    assert model.selectedCount == 0
     assert model.record_at(102).valid is False
     assert "重复" in model.record_at(102).error
     assert model.record_at(103).valid is False
@@ -114,6 +114,7 @@ def test_selected_payload_applies_row_then_global_then_preserve_defaults(qapp):
         )
     )
 
+    assert model.selectRange(1, 2)
     payload = model.selected_payload("全局问候", "姐姐")
     assert payload[0]["greeting"] == "行内问候"
     assert payload[0]["remark"] == "行内备注姐姐"
@@ -145,7 +146,7 @@ def test_manual_rows_are_blank_invalid_and_have_unique_ids(qapp):
     assert (model.count, model.validCount, model.selectedCount) == (2, 0, 0)
 
 
-def test_manual_row_auto_selects_only_when_it_first_becomes_valid(qapp):
+def test_manual_row_never_auto_selects_when_it_becomes_valid(qapp):
     model = FriendImportModel()
     row = model.appendEmptyRecord()
     model.setCell(row, "name", "示例学生")
@@ -155,7 +156,8 @@ def test_manual_row_auto_selects_only_when_it_first_becomes_valid(qapp):
 
     assert model.setCell(row, "account", "wxid_manual1")
     assert model.record_at(row).valid is True
-    assert model.record_at(row).selected is True
+    assert model.record_at(row).selected is False
+    assert model.setSelected(row, True)
 
     assert model.setSelected(row, False)
     assert model.setCell(row, "account", "wxid_manual2")
@@ -168,6 +170,7 @@ def test_manual_row_stays_unselected_at_configured_twenty_row_limit(qapp):
     model = FriendImportModel()
     model.set_selection_limit(20)
     model.replace_records(load_friend_records(rows))
+    assert model.selectRange(1, 20)
 
     row = model.appendEmptyRecord()
     model.setCell(row, "name", "示例学生")
@@ -203,7 +206,7 @@ def test_removing_a_row_revalidates_the_remaining_duplicate(qapp):
     assert model.removeRecord(1) is False
 
 
-def test_deleting_duplicate_selects_manual_row_on_first_valid_transition(qapp):
+def test_deleting_duplicate_keeps_manual_row_unselected(qapp):
     model = FriendImportModel()
     model.replace_records(
         load_friend_records(
@@ -222,11 +225,11 @@ def test_deleting_duplicate_selects_manual_row_on_first_valid_transition(qapp):
     assert model.removeRecord(0) is True
 
     assert model.record_at(0).valid is True
-    assert model.record_at(0).selected is True
-    assert model.selectedCount == 1
+    assert model.record_at(0).selected is False
+    assert model.selectedCount == 0
 
 
-def test_editing_other_duplicate_consumes_manual_rows_first_valid_selection(qapp):
+def test_editing_other_duplicate_never_selects_manual_rows(qapp):
     model = FriendImportModel()
     model.replace_records(
         load_friend_records(
@@ -244,7 +247,7 @@ def test_editing_other_duplicate_consumes_manual_rows_first_valid_selection(qapp
     assert model.setCell(0, "account", "wxid_changed")
 
     assert model.record_at(manual_row).valid is True
-    assert model.record_at(manual_row).selected is True
+    assert model.record_at(manual_row).selected is False
 
     assert model.setSelected(manual_row, False)
     assert model.setCell(0, "account", "wxid_changed_again")
@@ -284,7 +287,7 @@ def test_clear_records_resets_table_counts_pending_selection_and_import_error(
     model.appendEmptyRecord()
     assert model.importFile(str(tmp_path / "missing.csv")) is False
     assert model.importError
-    assert (model.count, model.validCount, model.selectedCount) == (2, 1, 1)
+    assert (model.count, model.validCount, model.selectedCount) == (2, 1, 0)
 
     assert hasattr(model, "clearRecords"), "好友模型必须暴露清空表格接口"
     assert model.clearRecords() is True
@@ -296,4 +299,4 @@ def test_clear_records_resets_table_counts_pending_selection_and_import_error(
     row = model.appendEmptyRecord()
     model.setCell(row, "name", "示例学生")
     assert model.setCell(row, "account", "wxid_after_clear")
-    assert model.record_at(row).selected is True
+    assert model.record_at(row).selected is False

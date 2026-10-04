@@ -29,22 +29,6 @@ Rectangle {
         RowLayout {
             spacing: WxTheme.spSmall
 
-            WxSwitch {
-                id: forwardSwitch
-                checked: barBackend ? barBackend.useForward : false
-                enabled: barBackend ? barBackend.inputsEnabled : false
-                onToggled: function(checked) {
-                    if (barBackend) barBackend.useForward = checked
-                }
-            }
-
-            Text {
-                text: "合并转发"
-                font.family: WxTheme.fontFamily
-                font.pixelSize: WxTheme.fontSizeSmall
-                color: WxTheme.clTextSecondary
-            }
-
             Text {
                 text: "间隔"
                 font.family: WxTheme.fontFamily

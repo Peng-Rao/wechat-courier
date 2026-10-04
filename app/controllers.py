@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, Property, QSettings, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QImageReader
 
 from .agent.client import AgentClient
 from .agent.diagnostics import default_log_dir, redact_identifier
 from .agent.workflows import normalize_identity
 from .models import extract_greeting_name
+from .clocks import ElapsedClock
 from .constants import (
     FRIEND_BATCH_LIMIT_DEFAULT,
     FRIEND_BATCH_LIMIT_MIN,
@@ -122,8 +124,8 @@ def _redact_diagnostic(value: Any) -> Any:
 class MessageController(QObject):
     recipientsTextChanged = Signal(str)
     templateTextChanged = Signal(str)
-    useForwardChanged = Signal(bool)
     filePathsChanged = Signal(list)
+    fileActionFailed = Signal(str)
     intervalMinChanged = Signal(float)
     intervalMaxChanged = Signal(float)
     previewChanged = Signal()
@@ -133,7 +135,6 @@ class MessageController(QObject):
         self._settings = settings
         self._recipients = ""
         self._template = ""
-        self._use_forward = False
         self._files: list[str] = []
         self._interval_min = float(settings.value("message/intervalMin", 2.0))
         self._interval_max = float(settings.value("message/intervalMax", 3.0))
@@ -166,21 +167,52 @@ class MessageController(QObject):
 
     templateText = Property(str, _get_template, _set_template, notify=templateTextChanged)
 
-    def _get_forward(self):
-        return self._use_forward
-
-    def _set_forward(self, value):
-        value = bool(value)
-        if value == self._use_forward:
-            return
-        self._use_forward = value
-        self.useForwardChanged.emit(value)
-
-    useForward = Property(bool, _get_forward, _set_forward, notify=useForwardChanged)
-
     @Property(list, notify=filePathsChanged)
     def filePaths(self):
         return list(self._files)
+
+    @Property("QVariantList", notify=filePathsChanged)
+    def attachmentPreviews(self):
+        previews = []
+        for path in self._files:
+            file = Path(path)
+            try:
+                size = file.stat().st_size if file.is_file() else 0
+                exists = file.is_file()
+            except OSError:
+                size, exists = 0, False
+            reader = QImageReader(path)
+            is_image = exists and reader.canRead()
+            units = ("B", "KB", "MB", "GB")
+            amount, unit = float(size), 0
+            while amount >= 1024 and unit < len(units) - 1:
+                amount, unit = amount / 1024, unit + 1
+            previews.append({
+                "path": path, "url": QUrl.fromLocalFile(path).toString(),
+                "name": file.name, "size": size,
+                "sizeLabel": f"{amount:.1f} {units[unit]}" if unit else f"{size} B",
+                "isImage": is_image, "type": "image" if is_image else file.suffix.lstrip(".").lower(),
+                "exists": exists,
+            })
+        return previews
+
+    @Slot(int, result=bool)
+    def openAttachment(self, index: int) -> bool:
+        if not 0 <= index < len(self._files):
+            self.fileActionFailed.emit("附件已移除，请重新选择")
+            return False
+        path = self._files[index]
+        try:
+            if not Path(path).is_file():
+                raise OSError("文件不存在或无法读取")
+            with open(path, "rb"):
+                pass
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                raise OSError("没有可用的关联程序，或程序启动失败")
+        except Exception as exc:
+            self.fileActionFailed.emit("无法打开附件：" + str(exc))
+            return False
+        return True
 
     def _get_interval_min(self):
         return self._interval_min
@@ -262,10 +294,13 @@ class MessageController(QObject):
 
     @Slot(str)
     def addFile(self, file_url: str) -> None:
-        path = file_url.replace("file:///", "")
-        if sys.platform == "win32":
-            path = path.lstrip("/")
-        if path and path not in self._files:
+        url = QUrl(file_url)
+        path = url.toLocalFile() if url.isLocalFile() else file_url
+        if not path or (url.scheme() and not url.isLocalFile() and len(url.scheme()) != 1):
+            self.fileActionFailed.emit("请选择本地附件")
+            return
+        path = os.path.normpath(path)
+        if os.path.normcase(path) not in {os.path.normcase(value) for value in self._files}:
             self._files.append(path)
             self.filePathsChanged.emit(list(self._files))
             self.previewChanged.emit()
@@ -346,6 +381,7 @@ class FriendController(QObject):
 
     def set_batch_limit_locked(self, locked: bool) -> None:
         self._batch_limit_locked = locked
+        self._model.set_interaction_locked(locked)
 
     def _get_greeting(self):
         return self._default_greeting
@@ -874,6 +910,7 @@ class TaskController(QObject):
     recoveryRequiredChanged = Signal()
     executionStateChanged = Signal()
     acceptanceStateChanged = Signal()
+    elapsedChanged = Signal()
 
     def __init__(
         self,
@@ -912,6 +949,14 @@ class TaskController(QObject):
         self._task_events: list[dict[str, Any]] = []
         self._finished_result: dict[str, Any] = {}
         self._waiting_remaining = 0.0
+        self._elapsed_clock = ElapsedClock()
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(250)
+        self._elapsed_timer.timeout.connect(self.elapsedChanged.emit)
+        self._risk_stop_item_id = ""
+        self._risk_stop_source_row = 0
+        self._risk_stop_kind = ""
+        self._friend_dataset_generation = -1
         self._acceptance_enabled = os.environ.get("WECHAT_COURIER_ACCEPTANCE") == "1"
         self._error = ""
         self._original_payload: dict[str, Any] | None = None
@@ -944,10 +989,11 @@ class TaskController(QObject):
         self._agent.replyReceived.connect(self._on_agent_reply)
         self._agent.rpcErrorReceived.connect(self._on_agent_rpc_error)
         self._agent.inspectionChanged.connect(self.executionStateChanged.emit)
+        friends.model.countsChanged.connect(self.executionStateChanged.emit)
         for signal in (
             self.activeChanged, self.phaseChanged, self.kindChanged, self.progressChanged, self.executionStateChanged,
             message.recipientsTextChanged, message.templateTextChanged, message.filePathsChanged,
-            message.useForwardChanged, message.intervalMinChanged, message.intervalMaxChanged,
+            message.intervalMinChanged, message.intervalMaxChanged,
             friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRelationshipChanged,
             friends.intervalMinChanged, friends.intervalMaxChanged, friends.batchLimitChanged,
             settings.unknownPolicyChanged,
@@ -967,7 +1013,6 @@ class TaskController(QObject):
             "intervalMax": editor.intervalMax,
             "unknownPolicy": self._settings.unknownPolicy,
             "filePaths": self._message.filePaths if kind == "message_send" else [],
-            "useForward": self._message.useForward if kind == "message_send" else False,
         }
         if kind == "friend_add":
             options["friendBatchLimit"] = self._friends.batchLimit
@@ -1017,11 +1062,14 @@ class TaskController(QObject):
             "error": sum(item.result == "error" for item in self._items._items),
             "unknown": self.unknownCount,
             "stopped": sum(item.result == "stopped" for item in self._items._items),
+            "elapsedSeconds": self.elapsedSeconds,
+            "elapsedLabel": self.elapsedLabel,
             "echoedItems": copy.deepcopy((self._original_payload or {}).get("items", [])),
             "cleanup": copy.deepcopy(self._finished_result.get("cleanup", {})),
             "health": copy.deepcopy(self._finished_result.get("health", {})),
             "buildFingerprint": self._agent.buildFingerprint,
-            "events": [{key: event.get(key, "") for key in ("taskId", "itemId", "step", "outcome")}
+            "events": [{key: event[key] for key in ("taskId", "itemId", "step", "outcome",
+                       "timestamp", "itemElapsedMs", "riskKind", "errorCode") if key in event}
                        for event in self._task_events if "itemId" in event and "step" in event],
         }
 
@@ -1122,6 +1170,53 @@ class TaskController(QObject):
     @Property(float, notify=executionStateChanged)
     def waitingRemaining(self):
         return self._waiting_remaining if self._active and self._phase == "running" else 0.0
+
+    @Property(float, notify=elapsedChanged)
+    def elapsedSeconds(self):
+        return self._elapsed_clock.seconds
+
+    @Property(str, notify=elapsedChanged)
+    def elapsedLabel(self):
+        seconds = int(self.elapsedSeconds)
+        return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+    def _sync_elapsed_clock(self) -> None:
+        if self._active and self._phase != "paused":
+            self._elapsed_clock.resume()
+            self._elapsed_timer.start()
+        else:
+            self._elapsed_clock.pause()
+            self._elapsed_timer.stop()
+        self.elapsedChanged.emit()
+
+    @Property(str, notify=executionStateChanged)
+    def riskStopItemId(self):
+        return self._risk_stop_item_id
+
+    @Property(int, notify=executionStateChanged)
+    def riskStopSourceRow(self):
+        return self._risk_stop_source_row
+
+    @Property(int, notify=executionStateChanged)
+    def riskStopModelRow(self):
+        model = self._friends.model
+        if not self._risk_stop_item_id or model.dataset_generation != self._friend_dataset_generation:
+            return -1
+        return next((row for row, record in enumerate(model._records)
+                     if record.item_id == self._risk_stop_item_id), -1)
+
+    @Property(str, notify=executionStateChanged)
+    def riskStopKind(self):
+        return self._risk_stop_kind
+
+    @Property(str, notify=executionStateChanged)
+    def riskStopLabel(self):
+        if not self._risk_stop_item_id:
+            return ""
+        location = f"第 {self._risk_stop_source_row} 条" if self._risk_stop_source_row else "当前记录"
+        reason = "好友申请频繁限制" if self._risk_stop_kind == "friend_frequency" else "微信风控限制"
+        target = next((item.target for item in self._items._items if item.item_id == self._risk_stop_item_id), "")
+        return f"{reason}，已停止在{location}" + (f" · {target}" if target else "")
 
     @Property(str, notify=executionStateChanged)
     def intervalLabel(self):
@@ -1233,6 +1328,7 @@ class TaskController(QObject):
             self._phase = phase
             if phase != "running":
                 self._waiting_remaining = 0.0
+            self._sync_elapsed_clock()
             self.phaseChanged.emit()
             self.executionStateChanged.emit()
 
@@ -1241,6 +1337,7 @@ class TaskController(QObject):
             self._active = active
             self._friends.set_batch_limit_locked(active)
             self._waiting_remaining = 0.0
+            self._sync_elapsed_clock()
             self.activeChanged.emit()
             self.executionStateChanged.emit()
 
@@ -1283,12 +1380,17 @@ class TaskController(QObject):
         self._cleanup_result = {}
         self._task_events.clear()
         self._finished_result = {}
+        self._risk_stop_item_id = ""
+        self._risk_stop_source_row = 0
+        self._risk_stop_kind = ""
         self._error = ""
         self._logs.clear()
         self._items.replace(
             TaskDisplayItem(
                 target=item.get("target") or item.get("account", ""),
                 item_id=item["itemId"],
+                source_row=int(item.get("sourceRow", 0)),
+                source_file_row=int(item.get("sourceFileRow", 0)),
             )
             for item in items
         )
@@ -1317,6 +1419,8 @@ class TaskController(QObject):
             self._pending_start_request_id = 0
             self._set_error(str(exc))
             return False
+        self._elapsed_clock.reset()
+        self._friend_dataset_generation = self._friends.model.dataset_generation if kind == "friend_add" else -1
         self._set_active(True)
         self._set_phase("running")
         self.phaseChanged.emit()
@@ -1332,7 +1436,7 @@ class TaskController(QObject):
         if not self._active:
             return
         recovery = self._agent.recoverySnapshot()
-        if self._phase == "stopping":
+        if self._phase == "stopping" or self._risk_stop_item_id:
             self._pending_start_request_id = 0
             self._pending_resume = False
             self._retry_candidate = None
@@ -1352,7 +1456,18 @@ class TaskController(QObject):
                         "itemId": item.item_id,
                         "boundary": "submit_triggered" if self._kind == "friend_add" else "send_triggered",
                     })
-            self._set_error("停止任务时 Agent 已断开；未确认的结果与清理状态请人工核对，任务不会自动恢复")
+            if self._risk_stop_item_id:
+                self._cleanup_result = {"success": False, "reasonCode": "AGENT_DISCONNECTED"}
+                for item in self._items._items:
+                    if item.result == "pending":
+                        event = {"itemId": item.item_id, "outcome": "stopped", "step": "",
+                                 "detail": "未执行：风控已停止整批"}
+                        self._items.apply_event(event)
+                        if self._kind == "friend_add":
+                            self._friends.model.apply_event(event)
+            self._set_error("风控停止后的清理过程中 Agent 已断开；不会恢复剩余项目，请检测微信恢复"
+                            if self._risk_stop_item_id else
+                            "停止任务时 Agent 已断开；未确认的结果与清理状态请人工核对，任务不会自动恢复")
             self._set_phase("error")
             self._set_active(False)
             self.executionStateChanged.emit()
@@ -1364,18 +1479,6 @@ class TaskController(QObject):
             self._set_phase("error")
             self._set_error(
                 "Agent 在破坏性动作后中断，本条已标记为结果未知；当前批次不会自动恢复"
-            )
-            self._schedule_agent_restart(for_readiness=True)
-            return
-        if (
-            self._original_payload
-            and self._original_payload.get("options", {}).get("useForward")
-        ):
-            self._pending_resume = False
-            self._set_active(False)
-            self._set_phase("error")
-            self._set_error(
-                "合并转发任务已中断，为避免重复上传或转发，不会自动恢复"
             )
             self._schedule_agent_restart(for_readiness=True)
             return
@@ -1660,7 +1763,6 @@ class TaskController(QObject):
                 "intervalMin": self._message.intervalMin,
                 "intervalMax": self._message.intervalMax,
                 "unknownPolicy": self._settings.unknownPolicy,
-                "useForward": self._message.useForward,
                 "filePaths": self._message.filePaths,
             },
         )
@@ -1694,7 +1796,7 @@ class TaskController(QObject):
     def pause(self) -> None:
         if self._active and self._phase == "running":
             self._agent.call("task.pause", {"taskId": self._task_id})
-            self._set_phase("paused")
+            self._set_phase("pausing")
 
     @Slot()
     def resume(self) -> None:
@@ -1740,6 +1842,13 @@ class TaskController(QObject):
             )
             self._wechat_responsive = bool(params.get("wechatResponsive", True))
             item_id = str(params.get("itemId", ""))
+            if self._current_error_code == "RISK_CONTROL":
+                self._risk_stop_item_id = item_id
+                self._risk_stop_kind = str(params.get("riskKind", ""))
+                row = next((item for item in self._items._items if item.item_id == item_id), None)
+                self._risk_stop_source_row = row.source_row if row is not None else 0
+                self._recoverable = False
+                self._retry_candidate = None
             if (
                 self._destructive_boundary_crossed
                 or self._current_outcome == "unknown"
@@ -1754,6 +1863,7 @@ class TaskController(QObject):
                 and not self._destructive_boundary_crossed
                 and self._wechat_responsive
                 and item_id not in self._non_retryable_item_ids
+                and not self._risk_stop_item_id
             ):
                 source = next(
                     (
@@ -1818,6 +1928,8 @@ class TaskController(QObject):
                     self.executionStateChanged.emit()
                 elif status in {"uia_action_started", "paused"}:
                     self._waiting_remaining = 0.0
+                    if status == "paused" and self._phase == "pausing":
+                        self._set_phase("paused")
                     self.executionStateChanged.emit()
             if status == "recovered" and self._pending_resume:
                 self._agent.inspect()

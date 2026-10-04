@@ -15,11 +15,13 @@ TestCase {
         property int selectedCount: count
         property string importError: ""
         property string importWarning: ""
+        property string selectionError: ""
         function preview(row) { return { greeting: "", remark: "", error: "" } }
         function appendEmptyRecord() { return -1 }
         function clearRecords() { clear(); selectedCount = 0; return true }
         function removeRecord() { return false }
-        function selectFirstValid() {}
+        function selectRange() { return true }
+        function clearSelection() { return true }
         function setCell() { return false }
         function setSelected() { return false }
     }
@@ -34,7 +36,6 @@ TestCase {
         property int recipientCount: 1
         property string recipientsText: "文件传输助手"
         property string templateText: "hello"
-        property bool useForward: false
         function addFile() {}
         function removeFile() {}
     }
@@ -92,6 +93,7 @@ TestCase {
         property string currentStepLabel: "等待任务开始"
         property int done: 0
         property string error: ""
+        property string elapsedLabel: "00:01:02"
         property int failureCount: 0
         property var items: taskItems
         property string kind: ""
@@ -166,7 +168,7 @@ TestCase {
     }
 
     function test_recovered_health_unlocks_both_start_buttons_only_after_task_finishes() {
-        friendModel.append({friendName: "Mock", relationshipChoice: "", account: "mock_only", greeting: "hello", remark: "",
+        friendModel.append({itemId: "mock", friendName: "Mock", relationshipChoice: "", account: "mock_only", greeting: "hello", remark: "",
                             valid: true, error: "", status: "pending", selected: true,
                             relationship: "", relationshipSource: "global"})
         friendModel.selectedCount = 1
@@ -217,6 +219,22 @@ TestCase {
         compare(friends.monitorVisible, true)
         friends.dismissMonitor()
         compare(friends.monitorVisible, false)
+    }
+
+    function test_switching_workspace_keeps_shared_task_clock_and_locks_inputs() {
+        taskBackend.kind = "message_send"
+        taskBackend.active = true
+        var tab = findChild(app, "friendWorkspaceTab")
+        verify(tab.enabled)
+        mouseClick(tab)
+        compare(app.workspaceIndex, 1)
+        compare(taskBackend.kind, "message_send")
+        compare(findChild(messageWorkspace(), "taskElapsedTime").text, "累计耗时 00:01:02")
+        compare(findChild(friendWorkspace(), "taskElapsedTime").text, "累计耗时 00:01:02")
+        verify(!findChild(friendWorkspace(), "selectFriendRangeButton").enabled)
+        mouseClick(findChild(app, "messageWorkspaceTab"))
+        compare(app.workspaceIndex, 0)
+        compare(findChild(messageWorkspace(), "taskElapsedTime").text, "累计耗时 00:01:02")
     }
 
     function test_active_task_forces_owner_tab_and_resets_dismissal() {

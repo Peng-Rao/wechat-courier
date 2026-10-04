@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.agent.contracts import TaskItem, TaskOptions, TaskRequest
 from app.agent.runtime import TaskControl
-from app.agent.workflows import WeixinWorkflowEngine
+from app.agent.workflows import WeixinWorkflowEngine, normalize_identity
 
 
 def _emit_collector(events: list[dict[str, Any]]):
@@ -134,7 +134,7 @@ def _message_request(count: int) -> TaskRequest:
             TaskItem(
                 item_id=f"message-{index + 1}",
                 target="文件传输助手",
-                message=f"五阿哥微信助手 v0.3.1 稳定性测试 {stamp}-{index + 1:02d}",
+                message=f"福格微信助手 v0.3.1 稳定性测试 {stamp}-{index + 1:02d}",
             )
             for index in range(count)
         ),
@@ -215,7 +215,16 @@ def run_probe(args) -> dict[str, Any]:
         if args.inspect_message_tail:
             driver = engine._get_driver()
             driver.bind_window()
-            driver._open_exact_chat("文件传输助手")
+            if not driver.ensure_search_ready():
+                raise RuntimeError("Message inspection search is not ready")
+            candidates = [candidate for candidate in driver.search_contacts("文件传输助手")
+                          if normalize_identity("文件传输助手") in {
+                              normalize_identity(value) for value in candidate.identities}]
+            if len(candidates) != 1:
+                raise RuntimeError("Message inspection target is not unique")
+            driver.select_search_result(candidates[0])
+            if normalize_identity(driver.current_chat_title()) != normalize_identity("文件传输助手"):
+                raise RuntimeError("Message inspection chat title mismatch")
             snapshot = driver.message_snapshot()
             report["messageTail"] = [
                 {

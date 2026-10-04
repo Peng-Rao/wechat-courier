@@ -67,19 +67,16 @@ Rectangle {
                 spacing: 6
 
                 Repeater {
-                    model: ["消息群发", "批量加好友"]
+                    model: ["消息群发", "自动发送好友申请"]
                     Button {
                         required property int index
                         required property string modelData
                         objectName: index === 0 ? "messageWorkspaceTab" : "friendWorkspaceTab"
                         Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                             ? objectName : modelData
-                        Layout.preferredWidth: index === 0 ? 92 : 116
+                        Layout.preferredWidth: index === 0 ? 100 : 160
                         Layout.fillHeight: true
-                        enabled: !root.interactionLocked
-                        onClicked: {
-                            if (!root.interactionLocked) root.workspaceIndex = index
-                        }
+                        onClicked: root.workspaceIndex = index
                         contentItem: Text {
                             text: modelData
                             color: root.workspaceIndex === index

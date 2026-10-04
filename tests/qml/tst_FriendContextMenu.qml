@@ -13,10 +13,11 @@ TestCase {
         property int selectedCount: 0
         property string importError: ""
         property string importWarning: ""
+        property string selectionError: ""
         function preview(row) { return { greeting: "", remark: "", error: "" } }
 
         function appendEmptyRecord() {
-            append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "", greeting: "", remark: "", valid: false,
+            append({ itemId: "manual-" + count, friendName: "示例学生", relationshipChoice: "使用全局", account: "", greeting: "", remark: "", valid: false,
                      error: "账号不能为空", status: "pending", selected: false })
             return count - 1
         }
@@ -30,7 +31,8 @@ TestCase {
         }
         function setSelected(row, selected) { setProperty(row, "selected", selected); return true }
         function setCell(row, field, value) { setProperty(row, field, value); return true }
-        function selectFirstValid() {}
+        function selectRange(start, end) { return true }
+        function clearSelection() { selectedCount = 0; return true }
     }
 
     QtObject {
@@ -113,7 +115,7 @@ TestCase {
         menu().close()
         tryCompare(menu(), "visible", false)
         friendModel.clear()
-        friendModel.append({ friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_original", greeting: "", remark: "", valid: true,
+        friendModel.append({ itemId: "original", friendName: "示例学生", relationshipChoice: "使用全局", account: "wxid_original", greeting: "", remark: "", valid: true,
                              error: "", status: "pending", selected: false })
         friendModel.selectedCount = 1
         wait(100)
@@ -123,13 +125,13 @@ TestCase {
 
     function test_batch_limit_labels_follow_settings() {
         var countLabel = findChild(workspace, "friendSelectionCount")
-        var selectButton = findChild(workspace, "selectFirstFriendsButton")
+        var selectButton = findChild(workspace, "selectFriendRangeButton")
         verify(countLabel !== null)
         verify(selectButton !== null)
         friendBackend.batchLimit = 250
         friendModel.selectedCount = 5
         tryCompare(countLabel, "text", "已选择 5 / 250")
-        compare(selectButton.text, "选择前 250 条")
+        compare(selectButton.text, "选择区间")
         taskBackend.active = true
         verify(!selectButton.enabled)
     }

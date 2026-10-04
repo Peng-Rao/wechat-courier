@@ -140,12 +140,6 @@ def _records_from_rows(rows: Iterable[Sequence[Any]], warnings: list[str] | None
             )
         )
     validate_records(records)
-    selected = 0
-    selection_limit = normalize_friend_batch_limit(selection_limit)
-    for record in records:
-        if record.valid and selected < selection_limit:
-            record.selected = True
-            selected += 1
     return records
 
 

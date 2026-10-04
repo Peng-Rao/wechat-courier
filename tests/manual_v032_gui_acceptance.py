@@ -1,4 +1,4 @@
-"""Opt-in v0.3.2 acceptance. Default: write a plan, never touch the desktop.
+"""Opt-in 1.0.0 acceptance. Default: write a plan, never touch the desktop.
 
 GUI mode drives a packaged Courier exclusively through UIA. Source and RPC
 are comparison modes, not substitutes for GUI acceptance. See README for the
@@ -15,10 +15,12 @@ import os
 import platform
 import re
 import subprocess
+import struct
 import sys
 import time
 import traceback
 import uuid
+import zlib
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,55 +32,70 @@ FRIEND_ACCOUNT = "18896904196"
 STATES = ("visible", "minimized", "tray")
 MAX_NODES = 512
 MAX_EVENTS = 256
-PROFILE_COUNTS = {"smoke": 6, "independent": 40, "delivery": 2}
+PROFILE_COUNTS = {"smoke": 6, "independent": 40, "delivery": 2, "images": 3}
 GUI_NAMES = {
     "editor": ["messageWorkspaceTab", "friendWorkspaceTab", "messageRecipientsInput",
                "messageTemplateInput", "startMessageButton", "settingsButton",
                "acceptanceEditorState", "acceptanceTaskState"],
     "settings": ["settingsSection0", "settingsMessageIntervalMin", "settingsMessageIntervalMax", "settingsCloseButton"],
-    "friend": ["importFriendsButton", "startFriendsButton", "friendAccountField"],
+    "friend": ["importFriendsButton", "startFriendsButton", "friendAccountField",
+               "friendRangeStart", "friendRangeEnd", "selectFriendRangeButton"],
     "monitor": ["taskReturnToEditorButton", "taskStopButton", "acceptanceTaskState"],
-    "delivery": ["messageAddFileButton", "messageUseForwardSwitch", "messageRemoveFileButton-0"],
+    "delivery": ["messageAddFileButton", "messageRemoveFileButton-0"],
 }
 
 
 def make_case(run_id, index):
     kind = "message_send" if index % 2 == 0 else "friend_add"
-    marker = f"v032-{run_id}-{index + 1:04d}"
+    marker = f"v100-{run_id}-{index + 1:04d}"
     item = {"itemId": marker + "-item"}
     if kind == "message_send":
-        item.update(target=SEND_TARGET, message=f"WeChat Courier acceptance {marker}")
+        item.update(target=SEND_TARGET, message=f"Fuge WeChat Assistant acceptance {marker}")
     else:
         item.update(account=FRIEND_ACCOUNT, greeting=f"Acceptance preflight {marker}",
-                    remark=f"v032-{index + 1:04d}")
+                    remark=f"v100-{index + 1:04d}\u5988\u5988")
     case = {"index": index + 1, "windowState": STATES[(index // 2) % 3],
             "request": {"taskId": marker, "kind": kind, "items": [item],
                         "options": {"intervalMin": 2.0 if kind == "message_send" else 15.0,
                                     "intervalMax": 3.0 if kind == "message_send" else 30.0,
-                                    "unknownPolicy": "continue", "filePaths": [],
-                                    "useForward": False}}}
+                                    "unknownPolicy": "continue", "filePaths": []}}}
     if kind == "friend_add":
         case["request"]["options"]["friendBatchLimit"] = 100
     return case
 
 
 def benign_content(task_id):
-    return f"WeChat Courier v0.3.2 benign acceptance attachment\nTask: {task_id}\nNo private data.\n".encode("ascii")
+    return f"Fuge WeChat Assistant 1.0.0 benign acceptance attachment\nTask: {task_id}\nNo private data.\n".encode("ascii")
+
+
+def benign_image(task_id):
+    """A small task-specific PNG with no desktop or private content."""
+    color = hashlib.sha256(task_id.encode("ascii")).digest()
+    width, height = 128, 96
+    pixels = b"".join(b"\0" + bytes(color[:3]) * width for _ in range(height))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
 
 
 def make_plan(run_id, count=None, *, profile="smoke", artifact_dir=None):
     count = count if count is not None else PROFILE_COUNTS.get(profile, 6)
-    if profile == "delivery":
+    if profile in {"delivery", "images"}:
         if artifact_dir is None:
             raise ValueError("Delivery planning requires a dedicated artifact directory")
         cases = []
-        for index in range(2):
+        for index in range(PROFILE_COUNTS[profile]):
             case = make_case(run_id, index * 2)
             case.update(index=index + 1, windowState="visible", delivery=True)
             request = case["request"]
-            path = Path(artifact_dir).resolve() / (request["taskId"] + ".txt")
-            request["options"].update(filePaths=[str(path)], useForward=bool(index))
-            content = benign_content(request["taskId"])
+            extensions = ([".png"] if index == 0 else [".txt"] if index == 1 else [".png", ".txt"]) if profile == "images" else [".txt"]
+            paths = [Path(artifact_dir).resolve() / (request["taskId"] + ext) for ext in extensions]
+            path = paths[0]
+            request["options"].update(filePaths=[str(p) for p in paths])
+            content = benign_image(request["taskId"]) if path.suffix == ".png" else benign_content(request["taskId"])
             case["attachment"] = {"path": str(path), "sha256": hashlib.sha256(content).hexdigest(),
                                   "size": len(content)}
             cases.append(case)
@@ -87,12 +104,14 @@ def make_plan(run_id, count=None, *, profile="smoke", artifact_dir=None):
 
 
 def materialize_delivery(case, artifact_dir):
-    path = Path(case["request"]["options"]["filePaths"][0])
-    if path.parent.resolve() != Path(artifact_dir).resolve():
-        raise ValueError("Generated attachment must stay in the run directory")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as stream:
-        stream.write(benign_content(case["request"]["taskId"]))
+    for value in case["request"]["options"]["filePaths"]:
+        path = Path(value)
+        if path.parent.resolve() != Path(artifact_dir).resolve():
+            raise ValueError("Generated attachment must stay in the run directory")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = benign_image(case["request"]["taskId"]) if path.suffix == ".png" else benign_content(case["request"]["taskId"])
+        with path.open("xb") as stream:
+            stream.write(content)
 
 
 def validate_request(request, *, delivery=False, artifact_dir=None):
@@ -100,16 +119,20 @@ def validate_request(request, *, delivery=False, artifact_dir=None):
     if len(items) != 1 or not request.get("taskId"):
         raise ValueError("Each independent task must contain exactly one item and a taskId")
     options = request.get("options", {})
-    if options.get("filePaths") or options.get("useForward"):
+    if "useForward" in options:
+        raise ValueError("Retired useForward option is not permitted")
+    if options.get("filePaths"):
         if not delivery or request.get("kind") != "message_send" or artifact_dir is None:
-            raise ValueError("Attachments and forwarding require explicit delivery authorization")
+            raise ValueError("Attachments require explicit delivery authorization")
         paths = options.get("filePaths", [])
-        if len(paths) != 1:
-            raise ValueError("Delivery requires exactly one generated benign attachment")
-        path = Path(paths[0]).resolve(strict=True)
-        expected = Path(artifact_dir).resolve() / (request["taskId"] + ".txt")
-        if path != expected or path.stat().st_size > 1024 or path.read_bytes() != benign_content(request["taskId"]):
-            raise ValueError("Attachment path/content does not match the generated acceptance file")
+        if not 1 <= len(paths) <= 2 or len(set(paths)) != len(paths):
+            raise ValueError("Delivery requires one or two distinct generated benign attachments")
+        for value in paths:
+            path = Path(value).resolve(strict=True)
+            expected = Path(artifact_dir).resolve() / (request["taskId"] + path.suffix)
+            content = benign_image(request["taskId"]) if path.suffix == ".png" else benign_content(request["taskId"])
+            if path.suffix not in {".png", ".txt"} or path != expected or path.stat().st_size > 65536 or path.read_bytes() != content:
+                raise ValueError("Attachment path/content does not match the generated acceptance file")
     item = items[0]
     if request.get("kind") == "message_send":
         if item.get("target") != SEND_TARGET or not item.get("message"):
@@ -122,16 +145,22 @@ def validate_request(request, *, delivery=False, artifact_dir=None):
 
 
 def semantic_items(items):
-    return [{key: value for key, value in item.items() if key != "itemId"} for item in items]
+    return [{key: value for key, value in item.items() if key not in {"itemId", "sourceRow", "sourceFileRow"}} for item in items]
+
+
+def friend_import_rows(item):
+    # A known inline suffix makes the fixture independent of the user's defaults.
+    return [["\u59d3\u540d", "\u8d26\u53f7", "\u6253\u62db\u547c\u8bed"],
+            [item["remark"], item["account"], item["greeting"]]]
 
 
 def result_evidence(result):
     keys = {"taskId", "mode", "outcome", "done", "total", "success", "error", "unknown",
             "stopped", "windowStateEvidence", "settingsEvidence", "echoedItems", "buildFingerprint",
-            "active", "phase"}
+            "active", "phase", "elapsedSeconds", "elapsedLabel"}
     clean = {key: value for key, value in result.items() if key in keys}
     event_keys = {"taskId", "itemId", "step", "outcome", "errorCode", "attempt",
-                  "maxAttempts", "retryLevel", "wechatResponsive"}
+                  "maxAttempts", "retryLevel", "wechatResponsive", "itemElapsedMs", "riskKind", "timestamp"}
     clean["events"] = [{key: value for key, value in event.items() if key in event_keys}
                        for event in result.get("events", [])[:MAX_EVENTS]]
     cleanup, health = result.get("cleanup", {}), result.get("health", {})
@@ -154,11 +183,13 @@ def result_evidence(result):
             "boundaries": {name: {key: value for key, value in boundary.items()
                                   if key in {"started", "completed", "verified"} and type(value) in (int, bool)}
                            for name, boundary in evidence.get("boundaries", {}).items()
-                           if name in {"text", "attachment", "sourceUpload", "mergedForward"}},
+                           if name in {"text", "attachment"}},
             **{field: {key: value for key, value in evidence.get(field, {}).items()
-                       if key in {"text", "attachment", "merged"} and type(value) is int}
+                       if key in {"text", "attachment"} and type(value) is int}
                for field in ("baseline", "observed")},
         }
+    if "deliveryVerificationError" in result:
+        clean["deliveryVerificationError"] = result["deliveryVerificationError"]
     return clean
 
 
@@ -201,18 +232,19 @@ def validate_result(case, result, seen_ids):
 
 
 def validate_delivery(case, result):
+    if result.get("deliveryVerificationError"):
+        raise ValueError("Post-send evidence collection failed; do not replay the completed task")
     evidence = result.get("deliveryEvidence", {})
     if evidence.get("taskId") != result["taskId"]:
         raise ValueError("Missing task-correlated delivery sub-boundary evidence")
-    forward = case["request"]["options"]["useForward"]
-    names = {"sourceUpload", "mergedForward"} if forward else {"text", "attachment"}
+    names = {"text", "attachment"}
     boundaries = evidence.get("boundaries", {})
     if set(boundaries) != names or any(
         boundary.get("started") != 1 or boundary.get("completed") != 1 or boundary.get("verified") is not True
         for boundary in boundaries.values()
     ):
         raise ValueError("Delivery sub-boundary missing, unverified, or repeated")
-    expected = {"text": 1, "attachment": 1, "merged": int(forward)}
+    expected = {"text": 1, "attachment": len(case["request"]["options"]["filePaths"])}
     baseline = evidence.get("baseline", {})
     observed = evidence.get("observed", {})
     if baseline.get("text") != 0 or baseline.get("attachment") != 0:
@@ -223,22 +255,24 @@ def validate_delivery(case, result):
 
 def delivery_counts(case, before, after):
     text = case["request"]["items"][0]["message"]
-    filename = Path(case["request"]["options"]["filePaths"][0]).name
+    paths = [Path(value) for value in case["request"]["options"]["filePaths"]]
+    filenames = {path.name for path in paths}
+    has_image = any(path.suffix == ".png" for path in paths)
+    old_ids = {row["id"] for row in before}
 
     def selected(rows, kind):
-        if kind == "merged":
-            return {row["id"] for row in rows if any(token in row["text"] for token in
-                    ("\u804a\u5929\u8bb0\u5f55", "\u5408\u5e76\u8f6c\u53d1"))}
-        expected = text if kind == "text" else filename
-        return {row["id"] for row in rows if row["text"].strip() == expected}
+        if kind == "text":
+            return {row["id"] for row in rows if row["text"].strip() == text}
+        return {row["id"] for row in rows
+                if filenames.intersection(line.strip() for line in row["text"].splitlines())
+                or (has_image and row.get("isImage") is True and row["id"] not in old_ids)}
 
-    baseline = {key: len(selected(before, key)) for key in ("text", "attachment", "merged")}
+    baseline = {key: len(selected(before, key)) for key in ("text", "attachment")}
     observed = {key: len(selected(after, key)) for key in ("text", "attachment")}
-    observed["merged"] = len(selected(after, "merged") - selected(before, "merged"))
     return baseline, observed
 
 
-DELIVERY_ACTIONS = {"trigger_send", "verify_sent", "send_files", "prepare_forward_bundle", "forward_bundle"}
+DELIVERY_ACTIONS = {"trigger_send", "verify_sent", "send_files"}
 
 
 def delivery_boundaries(case, records):
@@ -255,15 +289,10 @@ def delivery_boundaries(case, records):
             good = good and finished[0].get("result", {}).get("value") is value
         return {"started": len(starts), "completed": len(finished), "verified": bool(good)}
 
-    if case["request"]["options"]["useForward"]:
-        result = {"sourceUpload": boundary("prepare_forward_bundle"),
-                  "mergedForward": boundary("forward_bundle")}
-        unexpected = {"trigger_send", "send_files", "verify_sent"}
-    else:
-        result = {"text": boundary("trigger_send"), "attachment": boundary("send_files", length=1)}
-        result["text"]["verified"] &= boundary("verify_sent", value=True)["verified"]
-        unexpected = {"prepare_forward_bundle", "forward_bundle"}
-    if any(row["action"] in unexpected for row in records):
+    result = {"text": boundary("trigger_send"),
+              "attachment": boundary("send_files", length=len(case["request"]["options"]["filePaths"]))}
+    result["text"]["verified"] &= boundary("verify_sent", value=True)["verified"]
+    if any(row["action"] not in DELIVERY_ACTIONS for row in records):
         raise ValueError("Unexpected delivery action implies an unplanned or repeated send")
     return result
 
@@ -278,10 +307,11 @@ def read_delivery_actions(log_dir, task_id, fingerprint):
             continue
         with path.open("rb") as stream:
             stream.seek(0, 2)
-            if stream.tell() > 2 * 1024 * 1024:
-                raise ValueError("Delivery diagnostic file exceeds bounded evidence budget")
-            stream.seek(0)
+            offset = max(0, stream.tell() - 2 * 1024 * 1024)
+            stream.seek(offset)
             lines = stream.read(2 * 1024 * 1024).splitlines()
+            if offset:
+                lines = lines[1:]  # Discard a potentially truncated first record.
         for line in lines:
             if len(line) > 65536:
                 continue
@@ -303,12 +333,15 @@ def attach_delivery_evidence(case, result, baseline, desktop, log_dir):
     if (not case.get("delivery") or result.get("outcome") != "success"
             or result.get("cleanup", {}).get("success") is not True):
         return result
-    after = desktop.delivery_snapshot()
-    initial, observed = delivery_counts(case, baseline, after)
-    records = read_delivery_actions(log_dir, result["taskId"], result["buildFingerprint"])
-    result["deliveryEvidence"] = {"taskId": result["taskId"], "baseline": initial, "observed": observed,
-                                  "boundaries": delivery_boundaries(case, records),
-                                  "observationScope": "current_chat_uia_message_list"}
+    try:
+        after = desktop.delivery_snapshot()
+        initial, observed = delivery_counts(case, baseline, after)
+        records = read_delivery_actions(log_dir, result["taskId"], result["buildFingerprint"])
+        result["deliveryEvidence"] = {"taskId": result["taskId"], "baseline": initial, "observed": observed,
+                                      "boundaries": delivery_boundaries(case, records),
+                                      "observationScope": "current_chat_uia_message_list"}
+    except Exception as exc:
+        result["deliveryVerificationError"] = failure_evidence(exc)
     return result
 
 
@@ -326,13 +359,13 @@ def run_schedule(run_case, run_id, profile, interval, duration, *,
     fingerprint = None
     index = 0
     limit = PROFILE_COUNTS.get(profile)
-    delivery_plan = make_plan(run_id, profile=profile, artifact_dir=artifact_dir) if profile == "delivery" else None
+    delivery_plan = make_plan(run_id, profile=profile, artifact_dir=artifact_dir) if profile in {"delivery", "images"} else None
     while (index < limit if limit is not None else monotonic() - started < duration):
         case = delivery_plan[index] if delivery_plan is not None else make_case(run_id, index)
         entry = {"case": case, "ok": False}
         report["tasks"].append(entry)
         try:
-            validate_request(case["request"], delivery=profile == "delivery", artifact_dir=artifact_dir)
+            validate_request(case["request"], delivery=profile in {"delivery", "images"}, artifact_dir=artifact_dir)
             result = run_case(case)
             entry["result"] = result
             validate_result(case, result, seen)
@@ -521,7 +554,7 @@ def hide_to_tray(resolve, invoke, click, hidden, owner_valid, notice, *, wait=wa
         return runtime_id, control.ProcessId, control.Name
 
     notice({"stage": "wechat.tray.find_close"})
-    close = resolve()
+    close = wait_until(resolve, timeout=3, stage="wechat.tray.find_close")
     reference = identity(close)
     notice({"stage": "wechat.tray.invoke_close"})
     invoke(close)
@@ -534,7 +567,7 @@ def hide_to_tray(resolve, invoke, click, hidden, owner_valid, notice, *, wait=wa
     if hidden():
         return
     notice({"stage": "wechat.tray.revalidate_close"})
-    current = resolve()
+    current = wait_until(resolve, timeout=3, stage="wechat.tray.revalidate_close")
     if identity(current) != reference:
         raise ValueError("Tray close identity changed; refusing fallback")
     notice({"stage": "wechat.tray.bounds_fallback"})
@@ -781,7 +814,8 @@ class Desktop:
             raise LookupError("Delivery message list is inaccessible")
         pending = deque([message_list])
         visited, result, seen = 0, [], set()
-        accepted = {"mmui::ChatTextItemView", "mmui::ChatBubbleItemView", "mmui::ChatFileItemView"}
+        accepted = {"mmui::ChatTextItemView", "mmui::ChatBubbleItemView", "mmui::ChatFileItemView",
+                    "mmui::ChatBubbleReferItemView"}
         while pending:
             node = pending.popleft()
             visited += 1
@@ -792,7 +826,8 @@ class Desktop:
                 if not runtime_id:
                     raise ValueError("Delivery bubble has no stable runtime identity")
                 if runtime_id not in seen:
-                    result.append({"id": hashlib.sha256(repr(runtime_id).encode()).hexdigest(), "text": node.Name})
+                    result.append({"id": hashlib.sha256(repr(runtime_id).encode()).hexdigest(), "text": node.Name,
+                                   "isImage": node.ClassName == "mmui::ChatBubbleReferItemView" and node.Name in {"图片", "[图片]"}})
                     seen.add(runtime_id)
             children = node.GetChildren()
             if visited + len(pending) + len(children) > MAX_NODES:
@@ -894,7 +929,7 @@ class SourceAdapter:
         self.args = args
         self.build = build_info()
         self.notice = notice
-        self.diagnostics = UiaDiagnostics(log_dir=args.artifact_dir) if args.profile == "delivery" else None
+        self.diagnostics = UiaDiagnostics(log_dir=args.artifact_dir) if args.profile in {"delivery", "images"} else None
         self.engine = WeixinWorkflowEngine(friend_submit_enabled=False, diagnostics=self.diagnostics)
         self.desktop = Desktop(notice)
         notice({"buildFingerprint": self.build["buildFingerprint"]})
@@ -903,7 +938,7 @@ class SourceAdapter:
         from app.agent.contracts import TaskRequest
         from app.agent.runtime import TaskControl
 
-        validate_request(case["request"], delivery=self.args.profile == "delivery", artifact_dir=self.args.artifact_dir)
+        validate_request(case["request"], delivery=self.args.profile in {"delivery", "images"}, artifact_dir=self.args.artifact_dir)
         state = self.desktop.prepare_wechat(case["windowState"])
         baseline = None
         if case.get("delivery"):
@@ -984,7 +1019,7 @@ class RpcAdapter:
             self.finished[payload["taskId"]] = payload
 
     def run(self, case):
-        validate_request(case["request"], delivery=self.args.profile == "delivery", artifact_dir=self.args.artifact_dir)
+        validate_request(case["request"], delivery=self.args.profile in {"delivery", "images"}, artifact_dir=self.args.artifact_dir)
         state = self.desktop.prepare_wechat(case["windowState"])
         baseline = None
         if case.get("delivery"):
@@ -1023,8 +1058,12 @@ class GuiAdapter:
         self.notice = notice
         self.log_dir = default_log_dir()
         self.loaded_files = set()
-        self.process = subprocess.Popen([str(Path(args.gui_exe).resolve())],
-                                        cwd=str(Path(args.gui_exe).resolve().parent),
+        source_gui = getattr(args, "gui_source", False)
+        command = ([sys.executable, str(REPO_ROOT / "tests/manual_v100_source_gui.py"),
+                    str(Path(args.artifact_dir) / "gui-settings.ini")] if source_gui
+                   else [str(Path(args.gui_exe).resolve())])
+        self.process = subprocess.Popen(command,
+                                        cwd=str(REPO_ROOT if source_gui else Path(args.gui_exe).resolve().parent),
                                         env=environment, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
         notice({"pid": self.process.pid, "role": "gui"})
@@ -1110,12 +1149,14 @@ class GuiAdapter:
         path = Path(self.args.artifact_dir) / f"friend-{index:04d}.csv"
         with path.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream)
-            writer.writerow(["\u8d26\u53f7", "\u6253\u62db\u547c\u8bed", "\u5907\u6ce8"])
-            writer.writerow([item["account"], item["greeting"], item["remark"]])
+            writer.writerows(friend_import_rows(item))
         self.click("importFriendsButton")
         self.choose_file(path)
         if self.desktop.read(self.control("friendAccountField")) != FRIEND_ACCOUNT:
             raise ValueError("Friend import did not populate the permitted account")
+        self.desktop.fill(self.control("friendRangeStart"), "1")
+        self.desktop.fill(self.control("friendRangeEnd"), "1")
+        self.click("selectFriendRangeButton")
 
     def choose_file(self, path):
         self.notice({"stage": "gui.file_dialog.find"})
@@ -1142,25 +1183,25 @@ class GuiAdapter:
 
     def configure_delivery(self, request):
         old = self.editor_state()["options"].get("filePaths", [])
-        if len(old) > 1 or any(str(Path(path).resolve()) not in self.loaded_files for path in old):
+        if len(old) > 2 or any(str(Path(path).resolve()) not in self.loaded_files for path in old):
             raise ValueError("Refusing to remove unrelated GUI attachments")
-        if old:
+        for _ in old:
             self.click("messageRemoveFileButton-0")
-            wait_until(lambda: not self.editor_state()["options"]["filePaths"], 3,
+            old = old[1:]
+            wait_until(lambda: len(self.editor_state()["options"]["filePaths"]) == len(old), 3,
                        stage="gui.delivery.remove_attachment")
-        path = Path(request["options"]["filePaths"][0])
-        self.click("messageAddFileButton")
-        self.choose_file(path)
-        self.loaded_files.add(str(path.resolve()))
+        for value in request["options"]["filePaths"]:
+            path = Path(value)
+            self.click("messageAddFileButton")
+            self.choose_file(path)
+            self.loaded_files.add(str(path.resolve()))
         wait_until(lambda: normalized_options(self.editor_state()["options"])["filePaths"]
                    == normalized_options(request["options"])["filePaths"], 3,
                    stage="gui.delivery.attachment_readback")
-        self.desktop.set_toggle(self.control("messageUseForwardSwitch"), request["options"]["useForward"],
-                                lambda: self.editor_state()["options"]["useForward"])
 
     def run(self, case):
         request = case["request"]
-        validate_request(request, delivery=self.args.profile == "delivery", artifact_dir=self.args.artifact_dir)
+        validate_request(request, delivery=self.args.profile in {"delivery", "images"}, artifact_dir=self.args.artifact_dir)
         self.desktop.win.ShowWindow(self.hwnd, 9)
         self.desktop.activate_gui(self.hwnd, self.process.pid)
         kind = request["kind"]
@@ -1207,8 +1248,14 @@ class GuiAdapter:
         return attach_delivery_evidence(case, result, baseline, self.desktop, self.log_dir)
 
     def close(self):
-        # Leave the packaged GUI and its logs available for operator inspection.
-        pass
+        # A source acceptance window is temporary; never force-kill a live task.
+        if getattr(self.args, "gui_source", False) and self.process.poll() is None:
+            if self.snapshot("acceptanceTaskState").get("active") is False:
+                self.desktop.win.PostMessage(self.hwnd, 0x0010, 0, 0)
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
 
 
 def worker_main(connection, args):
@@ -1328,12 +1375,13 @@ class WorkerSession:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("source", "rpc", "gui"), default="gui")
-    parser.add_argument("--profile", choices=("smoke", "soak", "independent", "delivery"), default="smoke")
+    parser.add_argument("--profile", choices=("smoke", "soak", "independent", "delivery", "images"), default="smoke")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-send", action="store_true")
     parser.add_argument("--confirm-friend-preflight", action="store_true")
     parser.add_argument("--confirm-delivery", action="store_true")
     parser.add_argument("--gui-exe")
+    parser.add_argument("--gui-source", action="store_true")
     parser.add_argument("--agent-exe")
     parser.add_argument("--report", default=str(REPO_ROOT / ".artifacts" / "v032-acceptance.json"))
     parser.add_argument("--interval-seconds", type=float, default=60)
@@ -1343,17 +1391,19 @@ def parse_args(argv=None):
 
 
 def validate_args(args):
+    if args.gui_source and (args.mode != "gui" or args.gui_exe):
+        raise ValueError("gui-source requires GUI mode and cannot be combined with gui-exe")
     if not 10 <= args.interval_seconds <= 600:
         raise ValueError("interval-seconds must be between 10 and 600")
     if not 5 <= args.startup_timeout <= 30 or not 15 <= args.task_timeout <= 180:
         raise ValueError("Bounded timeouts required: startup 5..30s, task 15..180s")
     if args.execute:
-        if args.profile == "delivery":
+        if args.profile in {"delivery", "images"}:
             if not args.confirm_send or not args.confirm_delivery:
                 raise ValueError("Delivery requires --confirm-send AND --confirm-delivery")
         elif not args.confirm_send or not args.confirm_friend_preflight:
             raise ValueError("Live runs require --confirm-send AND --confirm-friend-preflight")
-        if args.mode == "gui" and not args.gui_exe:
+        if args.mode == "gui" and not args.gui_exe and not args.gui_source:
             raise ValueError("GUI acceptance requires --gui-exe pointing to a packaged .exe")
         if args.mode == "rpc" and not args.agent_exe:
             raise ValueError("RPC comparison requires --agent-exe pointing to packaged wechat-agent.exe")
@@ -1376,23 +1426,23 @@ def main(argv=None):
     args = parse_args(argv)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:12]
     args.artifact_dir = str(Path(args.report).resolve().parent / run_id)
-    report = {"schemaVersion": 1, "acceptanceVersion": "0.3.2", "runId": run_id,
-              "mode": args.mode, "profile": args.profile, "status": "planned", "ok": False,
+    report = {"schemaVersion": 1, "acceptanceVersion": "1.0.0", "runId": run_id,
+              "mode": args.mode, "guiSource": args.gui_source, "profile": args.profile, "status": "planned", "ok": False,
               "taskAttempts": 0, "liveTasksExecuted": 0,
               "startedAt": datetime.now(timezone.utc).isoformat(),
               "plan": make_plan(run_id, profile=args.profile, artifact_dir=args.artifact_dir),
               "accessibilityContract": GUI_NAMES,
-              "coverage": {"scope": "text-and-friend-preflight-subset", "fullV032Gate": False,
+              "coverage": {"scope": "text-and-friend-preflight-subset", "fullV100Gate": False,
                            "included": ["text_send", "friend_preflight", "mixed_window_states"],
-                           "excluded": ["attachments", "merged_forwarding"]},
+                           "excluded": ["attachments"]},
               "safety": {"sendTarget": SEND_TARGET, "friendAccount": FRIEND_ACCOUNT,
                          "friendSubmitEnabled": False, "retryFailedTasks": False}}
     session = None
     try:
         validate_args(args)
-        if args.profile == "delivery":
-            report["coverage"] = {"scope": "delivery-subset", "fullV032Gate": False,
-                                  "included": ["text_send", "attachments", "merged_forwarding", "duplicate_check"],
+        if args.profile in {"delivery", "images"}:
+            report["coverage"] = {"scope": "delivery-subset", "fullV100Gate": False,
+                                  "included": ["text_send", "attachments", "duplicate_check"],
                                   "excluded": ["friend_preflight", "mixed_window_states", "independent_40", "soak"]}
         report["buildFingerprint"] = build_fingerprint(args)
         if not args.execute:
@@ -1400,7 +1450,7 @@ def main(argv=None):
             print(json.dumps({"status": "planned", "report": str(Path(args.report).resolve())}))
             return 0
         Path(args.artifact_dir).mkdir(parents=True)
-        if args.profile == "delivery":
+        if args.profile in {"delivery", "images"}:
             for case in report["plan"]:
                 materialize_delivery(case, args.artifact_dir)
         report["status"] = "starting"

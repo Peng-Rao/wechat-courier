@@ -14,6 +14,7 @@ env/
 *.log
 *.jsonl
 *.txt
+!build/version_info.txt
 EOF
 
 docs/
