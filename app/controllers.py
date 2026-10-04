@@ -79,6 +79,16 @@ FAILED_STEP_LABELS = {
 }
 
 ERROR_RECOVERY_HINTS = {
+    "AGENT_ALREADY_RUNNING": "另一个自动化 Agent 正在操作微信，请关闭其他助手实例后检测恢复。",
+    "GATE_RECOVERING": "正在恢复异常退出后遗留的自动化状态，请等待。",
+    "GATE_RESTARTING": "正在安全重启微信一次；如出现登录确认，请手动完成。",
+    "GATE_WAITING_LOGIN": "请完成微信登录，随后检测微信恢复。",
+    "GATE_LOGIN_TIMEOUT": "等待登录超时；请登录微信后检测恢复，不会再次自动重启。",
+    "GATE_RESTART_LIMIT": "本次故障已重启过微信，请手动处理后检测恢复。",
+    "GATE_RECOVERY_BLOCKED": "租约恢复被安全检查阻断，请导出诊断包查看具体原因。",
+    "GATE_RECOVERY_TIMEOUT": "租约恢复超时，请检测恢复或导出诊断包。",
+    "GATE_RECOVERY_CANCELLED": "恢复已取消；请处理微信状态后检测恢复。",
+    "GATE_RESTART_REQUIRED": "遗留自动化状态需要通过微信重启恢复。",
     "TRANSIENT_UI": "微信界面暂时未就绪；可在任务结束后安全重试本条。",
     "STALE_ELEMENT": "微信控件已变化；Agent 已刷新会话，可安全重试本条。",
     "WECHAT_UNRESPONSIVE": "微信窗口无响应；请先检测恢复，仍无响应时再重启微信。",
@@ -664,13 +674,14 @@ class AgentController(QObject):
         self._restorable = False
         self._wechat_version = ""
         self._detail = "等待检测微信"
+        self._connection_reason = ""
         self._inspect_request_id = 0
         self._client.stateChanged.connect(self._on_state)
         self._client.connectedChanged.connect(self._on_connected)
         self._client.replyReceived.connect(self._on_reply)
         self._client.rpcError.connect(self._on_rpc_error)
         self._client.notificationReceived.connect(self._on_notification)
-        self._client.processError.connect(self.errorOccurred)
+        self._client.processError.connect(self._on_process_error)
         if hasattr(self._client, "helloReceived"):
             self._client.helloReceived.connect(self._on_hello)
 
@@ -690,6 +701,8 @@ class AgentController(QObject):
         build = result.get("build", {}) if isinstance(result, dict) else {}
         fingerprint = build.get("buildFingerprint", "") if isinstance(build, dict) else ""
         self._build_fingerprint = fingerprint if isinstance(fingerprint, str) else ""
+        if isinstance(result, dict) and isinstance(result.get("health"), dict) and result["health"]:
+            self.applyInspection(result["health"])
         self.inspectionChanged.emit()
         self.helloReceived.emit(result)
 
@@ -744,7 +757,7 @@ class AgentController(QObject):
     @Property(str, notify=inspectionChanged)
     def reasonCode(self):
         if not self._connected:
-            return "AGENT_DISCONNECTED"
+            return self._connection_reason or "AGENT_DISCONNECTED"
         return str(self._health_snapshot.get("reasonCode", self._degraded_reason))
 
     @Property(int, notify=inspectionChanged)
@@ -754,6 +767,45 @@ class AgentController(QObject):
     @Property(str, notify=inspectionChanged)
     def degradedReason(self):
         return self._degraded_reason
+
+    @Property("QVariantMap", notify=inspectionChanged)
+    def gateRecovery(self):
+        return copy.deepcopy(self._health_snapshot.get("gateRecovery", {}))
+
+    @Property(bool, notify=inspectionChanged)
+    def gateRecoveryActive(self):
+        return (self._state in {"starting", "connecting", "authenticating", "recovering_gate"}
+                or self.gateRecovery.get("stage", "completed") != "completed")
+
+    @Property(bool, notify=inspectionChanged)
+    def gateRecoveryBusy(self):
+        return (self._state in {"starting", "connecting", "authenticating", "recovering_gate"}
+                or (self._connected and self.gateRecovery.get("stage") in {"checking", "restoring", "restarting", "awaiting_login"}))
+
+    @Property(str, notify=inspectionChanged)
+    def recoveryStatus(self):
+        if self.reasonCode == "AGENT_ALREADY_RUNNING":
+            return "其他实例占用"
+        if self._state in {"starting", "connecting", "authenticating", "recovering_gate"}:
+            return "正在恢复连接"
+        if not self._connected and self.gateRecoveryActive:
+            return "恢复连接已断开"
+        stage = self.gateRecovery.get("stage")
+        return {"checking": "正在恢复连接", "restoring": "正在恢复连接",
+                "restarting": "正在重启微信", "awaiting_login": "等待微信登录",
+                "blocked": "恢复被阻断", "failed": "恢复失败"}.get(stage, "") if self._connected else ""
+
+    @Slot()
+    def cancelGateRecovery(self):
+        if self._connected:
+            self.call("recovery.approve", {"scope": "gate", "decision": "stop"})
+
+    @Slot(str)
+    def _on_process_error(self, message):
+        if "已有自动化 Agent" in message or "already running" in message:
+            self._connection_reason = "AGENT_ALREADY_RUNNING"
+            self.inspectionChanged.emit()
+        self.errorOccurred.emit(message)
 
     @Property(bool, notify=inspectionChanged)
     def restorable(self):
@@ -775,6 +827,7 @@ class AgentController(QObject):
     def canStartTask(self):
         return (
             self._connected
+            and not self.gateRecoveryActive
             and self._process_detected
             and self._version_supported
             and self._window_responsive
@@ -875,6 +928,7 @@ class AgentController(QObject):
     def _on_state(self, state: str) -> None:
         self._state = state
         self.stateChanged.emit()
+        self.inspectionChanged.emit()
 
     @Slot(bool)
     def _on_connected(self, connected: bool) -> None:
@@ -899,6 +953,7 @@ class AgentController(QObject):
         self.stateChanged.emit()
         self.inspectionChanged.emit()
         if connected:
+            self._connection_reason = ""
             self.inspect()
         elif was_connected:
             self.connectionLost.emit()
@@ -1179,6 +1234,8 @@ class TaskController(QObject):
     @Property(str, notify=executionStateChanged)
     def automationStatus(self):
         agent = self._agent
+        if agent.recoveryStatus:
+            return agent.recoveryStatus
         if not agent.connected or not agent.processDetected:
             return "自动化未就绪"
         if not agent.windowResponsive:
@@ -2087,6 +2144,7 @@ class TaskController(QObject):
                 "windowResponsive": self._agent.windowResponsive,
                 "sessionErrorCode": self._current_error_code,
                 "health": self._agent.healthSnapshot,
+                "gateRecovery": self._agent.gateRecovery,
                 "cleanup": self.cleanupResult,
             }
             with zipfile.ZipFile(
@@ -2100,6 +2158,21 @@ class TaskController(QObject):
                     "task-events.jsonl",
                     "".join(json.dumps(_redact_diagnostic(event), ensure_ascii=False) + "\n" for event in self._task_events),
                 )
+                client = self._agent._client
+                lease_path = getattr(client, "_gate_lease_path", "")
+                if lease_path:
+                    base = Path(lease_path)
+                    candidates = [base, base.with_name(base.name + ".recovery.json")]
+                    folder = base.parent / "gate-archive"
+                    if folder.is_dir():
+                        candidates.extend(sorted(folder.glob("*.meta.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20])
+                    for candidate in candidates:
+                        if candidate.is_file() and candidate.stat().st_size <= 1024 * 1024:
+                            try:
+                                data = json.loads(candidate.read_text(encoding="utf-8"))
+                            except (UnicodeError, ValueError):
+                                data = {"source": str(candidate), "invalid": True}
+                            archive.writestr(f"gate/{candidate.name}", json.dumps(_redact_diagnostic(data), ensure_ascii=False, indent=2))
                 if log_dir.is_dir():
                     for candidate in sorted(log_dir.iterdir()):
                         if not candidate.is_file():

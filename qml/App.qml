@@ -106,6 +106,11 @@ Rectangle {
             }
         }
 
+        GateRecoveryBanner {
+            Layout.fillWidth: true
+            appBackend: root.appBackend
+        }
+
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true

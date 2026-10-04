@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
@@ -121,6 +123,8 @@ class _AutomationRunner(QObject):
     recoveryFinished = Signal(object)
     inspectionStarted = Signal(object)
     inspectionFinished = Signal(object)
+    gateProgress = Signal(object)
+    gateFinished = Signal(object)
 
     def __init__(self, engine_factory: Callable[[], Any]):
         super().__init__()
@@ -131,6 +135,14 @@ class _AutomationRunner(QObject):
         if self._engine is None:
             self._engine = self._engine_factory()
         return self._engine
+
+    @Slot(object)
+    def recover_gate(self, envelope):
+        try:
+            envelope["result"] = envelope["manager"].run(envelope["stop"], self.gateProgress.emit)
+        except Exception as exc:
+            envelope["result"] = {"stage": "failed", "reasonCode": "GATE_RECOVERY_BLOCKED", "detail": str(exc)}
+        self.gateFinished.emit(envelope)
 
     @Slot(object)
     def inspect(self, envelope: dict[str, Any]) -> None:
@@ -200,6 +212,7 @@ class AgentRuntime(QObject):
     inspectRequested = Signal(object)
     taskRequested = Signal(object)
     recoveryRequested = Signal(object)
+    gateRecoveryRequested = Signal(object)
     closeRequested = Signal(object)
     shutdownRequested = Signal()
 
@@ -212,6 +225,8 @@ class AgentRuntime(QObject):
         journal: SafetyJournal | None = None,
         diagnostics: UiaDiagnostics | None = None,
         friend_submit_enabled: bool | None = None,
+        gate_recovery: Any | None = None,
+        gate_timeout_ms: int = 15_000,
         fatal_exit: Callable[[int], Any] = os._exit,
         parent: QObject | None = None,
     ):
@@ -235,6 +250,17 @@ class AgentRuntime(QObject):
                 friend_submit_enabled=self._friend_submit_enabled,
             )
         self._notification_sink: Callable[[str, dict[str, Any]], Any] | None = None
+        self._gate_recovery = gate_recovery
+        self._gate_state = dict(gate_recovery.state) if gate_recovery else {"stage": "completed", "reasonCode": ""}
+        self._gate_ready = gate_recovery is None
+        self._gate_verified = gate_recovery is None
+        self._gate_stop: threading.Event | None = None
+        self._health_instance = getattr(self._diagnostics, "agent_instance_id", "") or uuid.uuid4().hex
+        self._health_serial = 0
+        self._gate_timeout_ms = max(1, int(gate_timeout_ms))
+        self._gate_watchdog = QTimer(self)
+        self._gate_watchdog.setSingleShot(True)
+        self._gate_watchdog.timeout.connect(self._on_gate_timeout)
         self._inspect_timeout = inspect_timeout_ms / 1000.0
         self._active_task_id = ""
         self._watch_action_id = ""
@@ -268,13 +294,87 @@ class AgentRuntime(QObject):
         self.inspectRequested.connect(self._runner.inspect)
         self.taskRequested.connect(self._runner.run_task)
         self.recoveryRequested.connect(self._runner.recover_wechat)
+        self.gateRecoveryRequested.connect(self._runner.recover_gate)
         self.closeRequested.connect(self._runner.close)
         self._runner.notice.connect(self._forward_notice)
         self._runner.finished.connect(self._task_finished)
         self._runner.recoveryFinished.connect(self._recovery_finished)
         self._runner.inspectionStarted.connect(self._inspection_started)
         self._runner.inspectionFinished.connect(self._inspection_finished)
+        self._runner.gateProgress.connect(self._gate_progress)
+        self._runner.gateFinished.connect(self._gate_finished)
         self._thread.start()
+
+    def begin_gate_recovery(self, *, allow_restart: bool | None = None) -> None:
+        if self._gate_recovery is None or self._gate_stop is not None or self._shutdown_pending:
+            return
+        if self._active_task_id or self._inspection_pending:
+            raise ValueError("cannot recover gate while automation is active")
+        if allow_restart is not None:
+            self._gate_recovery.allow_restart = bool(allow_restart)
+        self._gate_ready = self._gate_verified = False
+        self._gate_stop = threading.Event()
+        self._gate_watchdog.start(self._gate_timeout_ms)
+        self._gate_state = dict(self._gate_state, stage="checking", reasonCode="GATE_RECOVERING")
+        self._publish_gate_health()
+        self.gateRecoveryRequested.emit({"manager": self._gate_recovery, "stop": self._gate_stop})
+
+    def _stamp_health(self, result):
+        result = dict(result)
+        if self._gate_recovery is not None:
+            self._health_serial += 1
+            result.update(sequence=self._health_serial, agentInstanceId=self._health_instance,
+                          checkedAt=datetime.now(timezone.utc).isoformat(), gateRecovery=dict(self._gate_state))
+        return result
+
+    @staticmethod
+    def _health_allows_task(result):
+        return bool(result.get("versionSupported") and result.get("windowResponsive")
+                    and result.get("windowEnabled") and not result.get("blockingWindow")
+                    and not result.get("reasonCode") and not result.get("degradedReason")
+                    and (result.get("sessionReady") or result.get("restorable")))
+
+    def _gate_health(self):
+        reason = self._gate_state.get("reasonCode") or "GATE_RECOVERING"
+        target = self._gate_state.get("target", {})
+        return {"processDetected": bool(target), "versionSupported": bool(target),
+                "version": target.get("version", ""), "sessionReady": False, "uiaReady": False,
+                "windowResponsive": False, "windowEnabled": False, "restorable": False,
+                "sessionGeneration": 0, "reasonCode": reason, "degradedReason": reason,
+                "detail": self._gate_state.get("detail", "正在检查遗留自动化状态")}
+
+    def _publish_gate_health(self):
+        self._forward_notice("agent.status", {"status": "gate_recovery", "health": self._gate_health()})
+
+    @Slot(object)
+    def _gate_progress(self, state):
+        if state.get("stage") == "awaiting_login" and self._gate_state.get("stage") != "awaiting_login":
+            self._gate_watchdog.start(max(1, int(getattr(self._gate_recovery, "login_timeout", 90) * 1000) + 500))
+        self._gate_state = dict(state)
+        self._publish_gate_health()
+
+    @Slot(object)
+    def _gate_finished(self, envelope):
+        self._gate_watchdog.stop()
+        self._gate_stop = None
+        self._gate_state = dict(envelope["result"])
+        self._gate_ready = self._gate_state.get("stage") == "completed"
+        self._publish_gate_health()
+        if self._shutdown_pending:
+            self._shutdown_deadline.stop()
+            QTimer.singleShot(0, self.shutdownRequested.emit)
+        elif self._gate_ready:
+            self.inspect_async(lambda result, error: None)
+
+    @Slot()
+    def _on_gate_timeout(self):
+        self._gate_ready = self._gate_verified = False
+        if self._gate_stop is not None:
+            self._gate_stop.set()
+        self._gate_state = dict(self._gate_state, stage="failed", reasonCode="GATE_RECOVERY_TIMEOUT",
+                                detail="原生租约恢复超过截止时间")
+        self._publish_gate_health()
+        self._fatal_exit(70)
 
     @property
     def active_task_id(self) -> str:
@@ -297,21 +397,30 @@ class AgentRuntime(QObject):
                 "friendSubmitEnabled": self._friend_submit_enabled,
             },
             "recovery": self._journal.load(),
+            "gateRecovery": dict(self._gate_state),
+            "health": dict(self._last_health),
         }
 
     def inspect(self) -> dict[str, Any]:
+        if not self._gate_ready:
+            return self._stamp_health(self._gate_health())
         envelope: dict[str, Any] = {"event": threading.Event()}
         self.inspectRequested.emit(envelope)
         if not envelope["event"].wait(self._inspect_timeout):
             raise TimeoutError("WeChat inspection timed out")
         if "error" in envelope:
             raise envelope["error"]
-        return dict(envelope["result"])
+        return self._stamp_health(envelope["result"])
 
     def inspect_async(
         self,
         callback: Callable[[dict[str, Any] | None, Exception | None], Any],
     ) -> None:
+        if not self._gate_ready:
+            if self._gate_stop is None:
+                self.begin_gate_recovery(allow_restart=False)
+            callback(self._stamp_health(self._gate_health()), None)
+            return
         self._inspection_callbacks.append(callback)
         if self._inspection_pending:
             return
@@ -320,6 +429,8 @@ class AgentRuntime(QObject):
         self.inspectRequested.emit(self._inspection_envelope)
 
     def start_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._gate_ready or not self._gate_verified:
+            raise ValueError("GATE_RECOVERY_PENDING: verified automation health is required before task start")
         if self._active_task_id:
             raise ValueError(f"task {self._active_task_id} is already active")
         if self._cleanup_failed:
@@ -364,6 +475,21 @@ class AgentRuntime(QObject):
         return {"accepted": True, "pendingSafePoint": True}
 
     def approve_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        scope = payload.get("scope", "task")
+        if scope == "gate":
+            decision = payload.get("decision")
+            if decision == "stop":
+                if self._gate_stop is not None:
+                    self._gate_stop.set()
+            elif decision == "restart_wechat":
+                if self._gate_recovery is None or self._gate_ready:
+                    raise ValueError("no pending gate recovery")
+                self.begin_gate_recovery(allow_restart=True)
+            else:
+                raise ValueError("invalid gate recovery decision")
+            return {"accepted": True, "scope": "gate", "decision": decision}
+        if scope != "task":
+            raise ValueError("invalid recovery scope")
         decision = str(payload.get("decision", ""))
         if decision not in {
             "acknowledge",
@@ -393,12 +519,14 @@ class AgentRuntime(QObject):
         return {"accepted": True, "decision": decision}
 
     def shutdown(self) -> dict[str, Any]:
-        if self._control is not None or self._inspection_pending or self._recovery_stop is not None:
+        if self._control is not None or self._inspection_pending or self._recovery_stop is not None or self._gate_stop is not None:
             self._shutdown_pending = True
             if self._control is not None:
                 self._control.request_stop()
             if self._recovery_stop is not None:
                 self._recovery_stop.set()
+            if self._gate_stop is not None:
+                self._gate_stop.set()
             self._shutdown_deadline.start(
                 max(2_500, self._inspection_watchdog.interval() + 500)
                 if self._inspection_pending or self._recovery_stop is not None else 2_500
@@ -421,7 +549,11 @@ class AgentRuntime(QObject):
                 self._action_watchdog.stop()
         health = params.get("health")
         if isinstance(health, dict):
+            health = self._stamp_health(health)
+            params = dict(params, health=health)
             self._last_health = dict(health)
+            if self._gate_recovery is not None:
+                self._gate_verified = self._gate_ready and self._health_allows_task(health)
         if self._diagnostics is not None and method != "task.event":
             try:
                 self._diagnostics.record(
@@ -431,6 +563,9 @@ class AgentRuntime(QObject):
                     task_id=str(params.get("taskId", self._active_task_id)),
                     item_id=str(params.get("itemId", "")),
                     action_id=str(params.get("actionId", "")),
+                    phase=self._gate_state.get("stage") if status == "gate_recovery" else None,
+                    error_code=self._gate_state.get("reasonCode") if status == "gate_recovery" else None,
+                    context={"gateRecovery": dict(self._gate_state)} if status == "gate_recovery" else None,
                 )
             except Exception:
                 pass
@@ -496,12 +631,20 @@ class AgentRuntime(QObject):
         fallback_callback = envelope.get("callback")
         if fallback_callback is not None and not callbacks:
             callbacks = [fallback_callback]
-        if not callbacks:
-            return
         error = envelope.get("error")
         result = None if error is not None else dict(envelope.get("result") or {})
+        if error is not None and self._gate_recovery is not None:
+            self._gate_verified = False
+            self._forward_notice("agent.status", {"status": "health", "health": {
+                "sessionReady": False, "reasonCode": "HEALTH_CHECK_FAILED",
+                "degradedReason": "HEALTH_CHECK_FAILED", "detail": str(error)}})
         if result is not None:
+            result = self._stamp_health(result)
             self._last_health = dict(result)
+            if self._gate_recovery is not None:
+                self._gate_verified = self._health_allows_task(result)
+                if self._notification_sink is not None:
+                    self._notification_sink("agent.status", {"status": "health", "health": result})
             cleanup_complete = result.get("cleanupComplete")
             if cleanup_complete is False:
                 self._cleanup_failed = True
@@ -531,6 +674,9 @@ class AgentRuntime(QObject):
         self._fatal_exit(70)
 
     def close(self, timeout_ms: int = 2_000) -> None:
+        self._gate_watchdog.stop()
+        if self._gate_stop is not None:
+            self._gate_stop.set()
         if self._recovery_stop is not None:
             self._recovery_stop.set()
         self._action_watchdog.stop()

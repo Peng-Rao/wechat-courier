@@ -89,6 +89,9 @@ class AgentClient(QObject):
         self._retry.timeout.connect(self._retry_connection)
         self._connect_attempts = 0
         self._shutdown_requested = False
+        self._idle_reconnects = 0
+        self._task_active = False
+        self._task_start_ids: set[int] = set()
 
     @property
     def gui_instance_id(self) -> str:
@@ -211,6 +214,8 @@ class AgentClient(QObject):
         )
         self._capture_process_stderr()
         self._process = None
+        self._retry.stop()
+        self._watchdog.stop()
         if int(_exit_code) == AGENT_ALREADY_RUNNING_EXIT_CODE:
             self._retry.stop()
             self._watchdog.stop()
@@ -227,6 +232,9 @@ class AgentClient(QObject):
             # The GUI may exit immediately after waitForFinished returns.
             self._run_gate_recovery()
         elif unexpected:
+            if not self._task_active and self._idle_reconnects < 1:
+                self._idle_reconnects += 1
+                self._pending_start_after_recovery = True
             self._start_gate_recovery_async()
 
     def _capture_process_stderr(self) -> None:
@@ -287,6 +295,9 @@ class AgentClient(QObject):
         if self._socket.write(encode_frame(message)) < 0:
             raise ConnectionError(self._socket.errorString())
         self._socket.flush()
+        if method == "task.start":
+            self._task_active = True
+            self._task_start_ids.add(request_id)
         return request_id
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
@@ -312,10 +323,17 @@ class AgentClient(QObject):
                 params = message.get("params") or {}
                 if method == "heartbeat":
                     self._last_heartbeat_ms = self._now_ms()
+                elif method == "task.finished":
+                    self._task_active = False
+                elif method == "agent.status" and params.get("status") == "running":
+                    self._task_active = True
                 self.notificationReceived.emit(method, params)
                 continue
             request_id = int(message.get("id", 0) or 0)
             if "error" in message:
+                if request_id in self._task_start_ids:
+                    self._task_start_ids.discard(request_id)
+                    self._task_active = False
                 error = message["error"]
                 self.rpcError.emit(
                     request_id,
@@ -324,6 +342,7 @@ class AgentClient(QObject):
                 )
                 continue
             result = message.get("result")
+            self._task_start_ids.discard(request_id)
             if request_id == self._hello_id:
                 self._last_heartbeat_ms = self._now_ms()
                 self._set_connected(True)
@@ -437,6 +456,7 @@ class AgentClient(QObject):
                 detail=detail or (
                     "" if successful else "wechat-agent gate recovery failed"
                 ),
+                can_reconnect=int(exit_code) in (0, 4),
             )
 
         def failed(error):
@@ -461,15 +481,17 @@ class AgentClient(QObject):
         *,
         successful: bool,
         detail: str = "",
+        can_reconnect: bool | None = None,
     ) -> None:
         if self._recovery_process is not process:
             return
         self._gate_recovery_timeout.stop()
         self._recovery_process = None
         should_start = bool(
-            successful
+            (successful if can_reconnect is None else can_reconnect)
             and self._pending_start_after_recovery
             and self._state != "stopped"
+            and not self._shutdown_requested
         )
         self._pending_start_after_recovery = False
         if not successful:
@@ -480,7 +502,11 @@ class AgentClient(QObject):
             )
         process.deleteLater()
         if should_start:
-            QTimer.singleShot(0, self.start)
+            QTimer.singleShot(0, self._reconnect_after_recovery)
+
+    def _reconnect_after_recovery(self):
+        if self._state != "stopped" and not self._shutdown_requested:
+            self.start()
 
     def _on_gate_recovery_timeout(self) -> None:
         process = self._recovery_process
@@ -498,6 +524,9 @@ class AgentClient(QObject):
 
     def restart(self) -> None:
         self.close()
+        self._idle_reconnects = 0
+        self._task_active = False
+        self._task_start_ids.clear()
         self.start(self._executable)
 
     def recovery_snapshot(self) -> dict[str, Any] | None:

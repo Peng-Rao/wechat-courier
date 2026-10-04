@@ -28,6 +28,13 @@ class LeaseBackend:
         self.writes: list[tuple[int, int]] = []
         self.broadcasts = 0
 
+    def process_context(self, pid=None):
+        return {"windowsSessionId": 1, "logonId": "123", "logonTime": "456",
+                "ownerAgentPid": 909, "ownerAgentStartTime": "789"}
+
+    def process_session_id(self, pid):
+        return 1
+
     def find_main_window(self):
         return self.hwnd
 
@@ -86,11 +93,15 @@ def test_foreign_windows_session_lease_is_never_restored(tmp_path, alive):
     backend.screen_reader = True
     backend.process_session_id = lambda _: 1
     backend.process_exists = lambda _: alive
-    with pytest.raises(AccessibilitySafetyError, match="Windows session"):
+    if alive:
+        with pytest.raises(AccessibilitySafetyError, match="Windows session"):
+            restore_gate_lease(backend, journal)
+        assert journal.load() == record
+    else:
         restore_gate_lease(backend, journal)
+        assert not journal.path.exists()
     assert backend.writes == []
     assert backend.screen_reader is True
-    assert journal.load() == record
 
 
 def _stale_lease(journal: GateLeaseJournal, backend: LeaseBackend):
@@ -104,6 +115,7 @@ def _stale_lease(journal: GateLeaseJournal, backend: LeaseBackend):
         gate_owned=True,
         screen_reader_owned=True,
         session_generation=7,
+        lease_context=backend.process_context(),
     )
 
 
@@ -350,7 +362,7 @@ def test_legacy_gate_lease_is_not_touched_while_another_agent_is_alive(
     assert legacy.load() is not None
 
 
-def test_legacy_gate_lease_is_preserved_when_recorded_process_has_exited(
+def test_legacy_gate_lease_is_archived_when_recorded_process_has_exited(
     tmp_path,
 ):
     legacy_path = (
@@ -364,16 +376,70 @@ def test_legacy_gate_lease_is_preserved_when_recorded_process_has_exited(
     backend.started = "134000000000000999"
     backend.screen_reader = True
 
-    with pytest.raises(AccessibilitySafetyError, match="recorded process"):
-        restore_legacy_gate_leases(
-            backend,
-            temp_dir=tmp_path,
-            other_agent_pids=lambda: (),
-        )
+    restore_legacy_gate_leases(
+        backend,
+        temp_dir=tmp_path,
+        other_agent_pids=lambda: (),
+    )
 
     assert backend.writes == []
+    assert backend.screen_reader is False
+    assert legacy.load() is None
+    assert list((tmp_path / "gate-archive").glob("*.gate"))
+
+
+def test_old_schema_dead_process_is_archived_without_system_mutation(tmp_path):
+    backend = LeaseBackend()
+    journal = GateLeaseJournal(tmp_path / "old.json")
+    record = _stale_lease(journal, backend)
+    for field in ("schemaVersion", "logonId", "logonTime", "ownerAgentPid", "ownerAgentStartTime", "windowsSessionId"):
+        record.pop(field, None)
+    journal.path.write_text(json.dumps(record), encoding="utf-8")
+    backend.pid = 303
+    backend.screen_reader = True
+    restore_gate_lease(backend, journal)
+    assert not journal.path.exists()
+    assert backend.writes == []
     assert backend.screen_reader is True
-    assert legacy.load() is not None
+
+
+def test_new_login_with_reused_session_number_never_restores_old_system_flag(tmp_path):
+    backend = LeaseBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    _stale_lease(journal, backend)
+    backend.pid = 303
+    backend.screen_reader = True
+    backend.process_context = lambda pid=None: {"windowsSessionId": 1, "logonId": "new", "logonTime": "new"}
+    restore_gate_lease(backend, journal)
+    assert backend.screen_reader is True
+    assert backend.writes == []
+    assert not journal.path.exists()
+
+
+def test_v2_lease_records_owner_and_login_before_activation(tmp_path):
+    backend = LeaseBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    session = WeixinAccessibilitySession(backend, lease_journal=journal).__enter__()
+    try:
+        record = journal.load()
+        assert record["schemaVersion"] == 2
+        assert record["logonId"] == "123"
+        assert record["ownerAgentPid"] == 909
+    finally:
+        session.close()
+
+
+def test_live_wechat_from_different_login_is_not_patched_even_in_same_windows_session(tmp_path):
+    backend = LeaseBackend()
+    journal = GateLeaseJournal(tmp_path / "gate.json")
+    _stale_lease(journal, backend)
+    backend.memory[backend.address] = 1
+    original = backend.process_context
+    backend.process_context = lambda pid=None: dict(original(), logonId="foreign" if pid == backend.pid else "123")
+    with pytest.raises(AccessibilitySafetyError, match="login"):
+        restore_gate_lease(backend, journal)
+    assert backend.writes == []
+    assert journal.path.exists()
 
 
 def test_invalid_legacy_gate_lease_fails_closed_without_deleting_it(tmp_path):

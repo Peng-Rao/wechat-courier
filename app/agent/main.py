@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import os
 import sys
+import json
+import threading
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QSettings, QTimer
 
-from .gate import (
-    NativeGateBackend,
-    restore_gate_lease,
-    restore_legacy_gate_leases,
-)
+from .gate import NativeGateBackend
+from .gate_recovery import GateRecoveryManager
 from .instance_lock import (
     AGENT_ALREADY_RUNNING_EXIT_CODE,
     AgentAlreadyRunningError,
@@ -21,32 +20,13 @@ from .server import AgentServer
 
 def _run_locked() -> int:
     gate_backend = NativeGateBackend()
-    try:
-        other_agents = gate_backend.legacy_agent_pids()
-    except Exception as exc:
-        print(
-            "wechat-agent gate recovery failed: "
-            f"cannot verify existing Agent processes: {exc}",
-            file=sys.stderr,
-        )
-        return 4
-    if other_agents:
-        raise AgentAlreadyRunningError(
-            "wechat-agent is already running in this Windows session"
-        )
-    try:
-        recovery = restore_gate_lease(gate_backend)
-        restore_legacy_gate_leases(
-            gate_backend,
-            other_agent_pids=gate_backend.legacy_agent_pids,
-        )
-    except Exception as exc:
-        print(f"wechat-agent gate recovery failed: {exc}", file=sys.stderr)
-        return 4
     if "--recover-gate" in sys.argv:
-        if recovery.get("restored"):
-            print(recovery.get("reason", "restored"))
-        return 0
+        recovery = GateRecoveryManager(gate_backend, allow_restart=False).run(threading.Event(), lambda state: None)
+        print(json.dumps(recovery, ensure_ascii=True))
+        if recovery.get("stage") == "completed":
+            return 0
+        print(f"wechat-agent gate recovery failed: {recovery.get('detail', '')}", file=sys.stderr)
+        return AGENT_ALREADY_RUNNING_EXIT_CODE if recovery.get("reasonCode") == "AGENT_ALREADY_RUNNING" else 4
 
     pipe_name = os.environ.get("WECHAT_AGENT_PIPE", "")
     token = os.environ.get("WECHAT_AGENT_TOKEN", "")
@@ -55,7 +35,11 @@ def _run_locked() -> int:
         return 2
 
     application = QCoreApplication(sys.argv)
-    runtime = AgentRuntime()
+    try:
+        login_timeout = max(30, min(300, int(QSettings("wx4py", "WeChatCourier").value("recovery/loginTimeout", 90))))
+    except (TypeError, ValueError, OverflowError):
+        login_timeout = 90
+    runtime = AgentRuntime(gate_recovery=GateRecoveryManager(gate_backend, login_timeout=login_timeout))
     server = AgentServer(pipe_name, token, runtime)
     runtime.shutdownRequested.connect(server.close)
     runtime.shutdownRequested.connect(application.quit)
@@ -63,6 +47,7 @@ def _run_locked() -> int:
         print(server._server.errorString(), file=sys.stderr)
         runtime.close()
         return 3
+    QTimer.singleShot(0, runtime.begin_gate_recovery)
     try:
         return application.exec()
     finally:

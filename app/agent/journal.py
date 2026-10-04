@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,17 @@ class GateLeaseJournal:
                 return None
             if not isinstance(payload, dict) or not GATE_LEASE_FIELDS <= payload.keys():
                 return None
+            schema = payload.get("schemaVersion", 1)
+            if type(schema) is not int or schema not in (1, 2):
+                return None
+            if schema == 2:
+                if not all(isinstance(payload.get(key), str) and payload[key].strip()
+                           for key in ("logonId", "logonTime", "ownerAgentStartTime")):
+                    return None
+                if type(payload.get("ownerAgentPid")) is not int or payload["ownerAgentPid"] <= 0:
+                    return None
+                if type(payload.get("windowsSessionId")) is not int:
+                    return None
             integer_fields = (
                 "pid",
                 "gateRva",
@@ -202,6 +214,7 @@ class GateLeaseJournal:
         screen_reader_owned: bool,
         session_generation: int,
         windows_session_id: int | None = None,
+        lease_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         record = {
             "pid": int(pid),
@@ -217,9 +230,27 @@ class GateLeaseJournal:
         }
         if windows_session_id is not None:
             record["windowsSessionId"] = int(windows_session_id)
+        if lease_context is not None:
+            record.update({key: lease_context[key] for key in (
+                "windowsSessionId", "logonId", "logonTime", "ownerAgentPid", "ownerAgentStartTime"
+            )})
+            record["schemaVersion"] = 2
         with self._lock:
             _write_atomic(self.path, record)
         return record
+
+    def archive(self, reason: str, *, recovery_id: str = "") -> str:
+        """Keep evidence on the same volume; never discard a corrupt lease."""
+        with self._lock:
+            if not self.path.exists():
+                return ""
+            destination = self.path.parent / "gate-archive" / f"{uuid.uuid4().hex}-{self.path.name}"
+            metadata = {"source": str(self.path), "reason": reason,
+                        "recoveryId": recovery_id, "timestamp": datetime.now(timezone.utc).isoformat()}
+            _write_atomic(destination.with_name(destination.name + ".meta.json"), metadata)
+            os.replace(self.path, destination)
+            self.last_archive = str(destination)
+            return str(destination)
 
     def clear(self) -> bool:
         with self._lock:

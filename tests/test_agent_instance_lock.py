@@ -152,20 +152,19 @@ def test_agent_main_takes_the_lock_before_recovering_a_gate(monkeypatch):
     monkeypatch.setattr(
         agent_main, "NativeGateBackend", RecordingGateBackend
     )
-    monkeypatch.setattr(
-        agent_main,
-        "restore_gate_lease",
-        lambda *_args: events.append("restore") or {"restored": False},
-    )
-    monkeypatch.setattr(
-        agent_main,
-        "restore_legacy_gate_leases",
-        lambda *_args, **_kwargs: events.append("legacy") or [],
-    )
+    class Recovery:
+        def __init__(self, backend, **kwargs):
+            self.backend = backend
+            assert kwargs["allow_restart"] is False
+        def run(self, *_):
+            self.backend.legacy_agent_pids()
+            events.append("restore-all")
+            return {"stage": "completed"}
+    monkeypatch.setattr(agent_main, "GateRecoveryManager", Recovery)
     monkeypatch.setattr(sys, "argv", ["wechat-agent", "--recover-gate"])
 
     assert agent_main.main() == 0
-    assert events == ["lock", "detect", "restore", "legacy", "unlock"]
+    assert events == ["lock", "detect", "restore-all", "unlock"]
 
 
 def test_agent_main_fails_closed_when_existing_agent_detection_is_unavailable(
@@ -191,11 +190,6 @@ def test_agent_main_fails_closed_when_existing_agent_detection_is_unavailable(
 
     monkeypatch.setattr(agent_main, "AgentInstanceLock", RecordingLock)
     monkeypatch.setattr(agent_main, "NativeGateBackend", FailingGateBackend)
-    monkeypatch.setattr(
-        agent_main,
-        "restore_gate_lease",
-        lambda *_args: events.append("restore") or {"restored": False},
-    )
     monkeypatch.setattr(sys, "argv", ["wechat-agent", "--recover-gate"])
 
     assert agent_main.main() == 4

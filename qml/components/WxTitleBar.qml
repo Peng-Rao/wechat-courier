@@ -91,8 +91,10 @@ Rectangle {
                         ? WxTheme.clInfo : WxTheme.clTextHint
                 }
                 Text {
-                    text: root.titleBackend && root.titleBackend.agent.connected
-                        ? "Agent 在线" : "Agent 离线"
+                    text: root.titleBackend && root.titleBackend.agent.reasonCode === "AGENT_ALREADY_RUNNING"
+                        ? "其他实例占用"
+                        : root.titleBackend && root.titleBackend.agent.connected
+                            ? "Agent 在线" : "Agent 离线"
                     color: WxTheme.clTextSecondary
                     font.family: WxTheme.fontFamily
                     font.pixelSize: WxTheme.fontSizeTiny
