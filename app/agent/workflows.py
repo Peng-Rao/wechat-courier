@@ -679,8 +679,11 @@ class WeixinWorkflowEngine:
         emit,
         control,
     ) -> str:
-        self._run_pre_boundary_with_retry(
-            lambda: self._prepare_message_item(driver, item, control),
+        matched_title = self._run_pre_boundary_with_retry(
+            lambda: self._prepare_message_item(
+                driver, item, control,
+                fuzzy_search_enabled=request.options.fuzzy_search_enabled,
+            ),
             driver=driver,
             request=request,
             item=item,
@@ -692,7 +695,11 @@ class WeixinWorkflowEngine:
         for step, detail in (
             ("window_bound", "已绑定微信窗口"),
             ("search_ready", "搜索入口已就绪"),
-            ("target_selected", "已选择唯一目标"),
+            (
+                "target_selected",
+                f"模糊搜索“{item.target}” → “{matched_title}”（首个结果）"
+                if request.options.fuzzy_search_enabled else "已选择唯一目标",
+            ),
             ("target_verified", "目标校验通过"),
             ("composer_ready", "输入框已就绪"),
             (
@@ -703,11 +710,20 @@ class WeixinWorkflowEngine:
             self._success_step(emit, request, item, step, detail, index)
 
         if self._safe_point(control):
-            self._run_pre_boundary_with_retry(
-                lambda: self._prepare_message_item(driver, item, control),
+            matched_title = self._run_pre_boundary_with_retry(
+                lambda: self._prepare_message_item(
+                    driver, item, control,
+                    fuzzy_search_enabled=request.options.fuzzy_search_enabled,
+                ),
                 driver=driver, request=request, item=item, index=index,
                 emit=emit, control=control,
             )
+            if request.options.fuzzy_search_enabled:
+                self._success_step(
+                    emit, request, item, "target_selected",
+                    f"模糊搜索“{item.target}” → “{matched_title}”（恢复后重新核对）",
+                    index,
+                )
         boundary_marked = False
 
         if item.message:
@@ -1178,7 +1194,9 @@ class WeixinWorkflowEngine:
                 },
             ) from cause
 
-    def _prepare_message_item(self, driver, item: TaskItem, control) -> None:
+    def _prepare_message_item(
+        self, driver, item: TaskItem, control, *, fuzzy_search_enabled: bool = False
+    ) -> str:
         self._driver_action("window_bound", "bind_window", driver.bind_window)
         self._safe_point(control)
 
@@ -1200,38 +1218,46 @@ class WeixinWorkflowEngine:
             )
         )
         expected = normalize_identity(item.target)
-        exact = [
-            candidate
-            for candidate in candidates
+        matches = candidates if fuzzy_search_enabled else [
+            candidate for candidate in candidates
             if candidate_matches_identity(candidate, expected)
         ]
-        if not exact:
+        if not matches:
             raise WorkflowError(
                 "target_selected",
-                f"未找到精确目标：{item.target}",
+                f"未找到搜索结果：{item.target}" if fuzzy_search_enabled
+                else f"未找到精确目标：{item.target}",
                 error_code="TARGET_NOT_FOUND",
             )
-        if len(exact) != 1:
+        if not fuzzy_search_enabled and len(matches) != 1:
             raise WorkflowError(
                 "target_selected",
                 f"目标不唯一：{item.target}",
                 error_code="TARGET_NOT_UNIQUE",
             )
+        selected = matches[0]
         self._driver_action(
             "target_selected",
             "select_search_result",
-            lambda: driver.select_search_result(exact[0]),
+            lambda: driver.select_search_result(selected, fuzzy=True)
+            if fuzzy_search_enabled else driver.select_search_result(selected),
         )
 
         title = self._driver_action(
             "target_verified", "current_chat_title", driver.current_chat_title
         )
-        if not candidate_matches_identity(exact[0], normalize_identity(title)):
+        if not candidate_matches_identity(selected, normalize_identity(title)):
             raise WorkflowError(
                 "target_verified",
                 f"聊天标题校验失败：{title or '<空>'}",
                 error_code="TARGET_MISMATCH",
             )
+        self._record_diagnostic(
+            stage="target_verified", action="search_target_matched", outcome="success",
+            account=item.target, contact=title,
+            result="fuzzy_first" if fuzzy_search_enabled else "exact_unique",
+            postcondition=True, session_generation=self._session_generation(),
+        )
 
         composer_ready = self._driver_action(
             "composer_ready", "composer_ready", driver.composer_ready
@@ -1260,6 +1286,7 @@ class WeixinWorkflowEngine:
                     "输入内容回读不一致",
                     error_code="CONTENT_READBACK_MISMATCH",
                 )
+        return title
 
     def _run_friend_item(
         self,

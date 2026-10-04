@@ -128,6 +128,7 @@ class MessageController(QObject):
     fileActionFailed = Signal(str)
     intervalMinChanged = Signal(float)
     intervalMaxChanged = Signal(float)
+    fuzzySearchEnabledChanged = Signal(bool)
     previewChanged = Signal()
 
     def __init__(self, settings: QSettings, parent=None):
@@ -138,6 +139,12 @@ class MessageController(QObject):
         self._files: list[str] = []
         self._interval_min = float(settings.value("message/intervalMin", 2.0))
         self._interval_max = float(settings.value("message/intervalMax", 3.0))
+        self._fuzzy_search_locked = False
+        raw_fuzzy_search = settings.value("message/fuzzySearchEnabled", False)
+        # INI-backed QSettings can reload a saved boolean as its canonical string.
+        self._fuzzy_search_enabled = raw_fuzzy_search is True or (
+            type(raw_fuzzy_search) is str and raw_fuzzy_search == "true"
+        )
 
     def _get_recipients(self):
         return self._recipients
@@ -243,6 +250,27 @@ class MessageController(QObject):
     intervalMax = Property(
         float, _get_interval_max, _set_interval_max, notify=intervalMaxChanged
     )
+
+    def _get_fuzzy_search_enabled(self):
+        return self._fuzzy_search_enabled
+
+    def _set_fuzzy_search_enabled(self, value):
+        if self._fuzzy_search_locked or type(value) is not bool:
+            return
+        if value == self._fuzzy_search_enabled:
+            return
+        self._fuzzy_search_enabled = value
+        self._settings.setValue("message/fuzzySearchEnabled", value)
+        self._settings.sync()
+        self.fuzzySearchEnabledChanged.emit(value)
+
+    fuzzySearchEnabled = Property(
+        bool, _get_fuzzy_search_enabled, _set_fuzzy_search_enabled,
+        notify=fuzzySearchEnabledChanged,
+    )
+
+    def set_fuzzy_search_locked(self, locked: bool) -> None:
+        self._fuzzy_search_locked = locked
 
     @Property(int, notify=recipientsTextChanged)
     def recipientCount(self):
@@ -994,6 +1022,7 @@ class TaskController(QObject):
             self.activeChanged, self.phaseChanged, self.kindChanged, self.progressChanged, self.executionStateChanged,
             message.recipientsTextChanged, message.templateTextChanged, message.filePathsChanged,
             message.intervalMinChanged, message.intervalMaxChanged,
+            message.fuzzySearchEnabledChanged,
             friends.model.countsChanged, friends.defaultGreetingChanged, friends.defaultRelationshipChanged,
             friends.intervalMinChanged, friends.intervalMaxChanged, friends.batchLimitChanged,
             settings.unknownPolicyChanged,
@@ -1014,6 +1043,8 @@ class TaskController(QObject):
             "unknownPolicy": self._settings.unknownPolicy,
             "filePaths": self._message.filePaths if kind == "message_send" else [],
         }
+        if kind == "message_send":
+            options["fuzzySearchEnabled"] = self._message.fuzzySearchEnabled
         if kind == "friend_add":
             options["friendBatchLimit"] = self._friends.batchLimit
         return {
@@ -1065,6 +1096,7 @@ class TaskController(QObject):
             "elapsedSeconds": self.elapsedSeconds,
             "elapsedLabel": self.elapsedLabel,
             "echoedItems": copy.deepcopy((self._original_payload or {}).get("items", [])),
+            "echoedOptions": copy.deepcopy((self._original_payload or {}).get("options", {})),
             "cleanup": copy.deepcopy(self._finished_result.get("cleanup", {})),
             "health": copy.deepcopy(self._finished_result.get("health", {})),
             "buildFingerprint": self._agent.buildFingerprint,
@@ -1335,6 +1367,7 @@ class TaskController(QObject):
     def _set_active(self, active: bool) -> None:
         if active != self._active:
             self._active = active
+            self._message.set_fuzzy_search_locked(active)
             self._friends.set_batch_limit_locked(active)
             self._waiting_remaining = 0.0
             self._sync_elapsed_clock()
@@ -1764,6 +1797,7 @@ class TaskController(QObject):
                 "intervalMax": self._message.intervalMax,
                 "unknownPolicy": self._settings.unknownPolicy,
                 "filePaths": self._message.filePaths,
+                "fuzzySearchEnabled": self._message.fuzzySearchEnabled,
             },
         )
 

@@ -115,7 +115,7 @@ def test_settings_dialog_guards_every_mutating_callback_while_task_is_active():
 
     assert "readonly property bool interactionLocked" in source
     assert "function applyIfUnlocked(callback)" in source
-    assert source.count("root.applyIfUnlocked(function()") == 15
+    assert source.count("root.applyIfUnlocked(function()") == 16
     assert "onInteractionLockedChanged" in source
     assert "运行中也可修改" not in source
 

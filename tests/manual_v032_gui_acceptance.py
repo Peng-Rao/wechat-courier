@@ -61,6 +61,8 @@ def make_case(run_id, index):
                                     "unknownPolicy": "continue", "filePaths": []}}}
     if kind == "friend_add":
         case["request"]["options"]["friendBatchLimit"] = 100
+    else:
+        case["request"]["options"]["fuzzySearchEnabled"] = False
     return case
 
 
@@ -119,6 +121,8 @@ def validate_request(request, *, delivery=False, artifact_dir=None):
     if len(items) != 1 or not request.get("taskId"):
         raise ValueError("Each independent task must contain exactly one item and a taskId")
     options = request.get("options", {})
+    if options.get("fuzzySearchEnabled", False) is not False:
+        raise ValueError("Live acceptance requires exact search for its authorized target")
     if "useForward" in options:
         raise ValueError("Retired useForward option is not permitted")
     if options.get("filePaths"):

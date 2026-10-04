@@ -402,6 +402,16 @@ ApplicationWindow {
             anchors.centerIn: parent
             spacing: WxTheme.spMedium
 
+            Image {
+                objectName: "startupBrandLogo"
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 96
+                height: 96
+                source: "../assets/fuge-logo-256.png"
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+            }
+
             // 微信绿旋转加载环
             BusyIndicator {
                 id: busyInd

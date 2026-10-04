@@ -47,8 +47,11 @@ class TaskOptions:
     file_paths: tuple[str, ...] = ()
     submit_friend_request: bool = False
     friend_batch_limit: int = FRIEND_BATCH_LIMIT_DEFAULT
+    fuzzy_search_enabled: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.fuzzy_search_enabled) is not bool:
+            raise ContractError("fuzzySearchEnabled must be a boolean")
         if (type(self.friend_batch_limit) is not int
                 or not FRIEND_BATCH_LIMIT_MIN <= self.friend_batch_limit <= FRIEND_BATCH_LIMIT_MAX):
             raise ContractError(
@@ -77,6 +80,7 @@ class TaskOptions:
             file_paths=tuple(str(path) for path in data.get("filePaths", ())),
             submit_friend_request=submit_friend_request,
             friend_batch_limit=data.get("friendBatchLimit", FRIEND_BATCH_LIMIT_DEFAULT),
+            fuzzy_search_enabled=data.get("fuzzySearchEnabled", False),
         )
 
 
@@ -123,6 +127,8 @@ class TaskRequest:
     options: TaskOptions = field(default_factory=TaskOptions)
 
     def __post_init__(self) -> None:
+        if self.kind == "friend_add" and self.options.fuzzy_search_enabled:
+            raise ContractError("fuzzySearchEnabled is only supported for message_send")
         if self.kind == "friend_add" and len(self.items) > self.options.friend_batch_limit:
             raise ContractError(f"friend task exceeds friendBatchLimit ({self.options.friend_batch_limit})")
 

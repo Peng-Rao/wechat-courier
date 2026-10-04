@@ -17,6 +17,7 @@ TestCase {
         id: mockMessage
         property real intervalMin: 2
         property real intervalMax: 3
+        property bool fuzzySearchEnabled: false
     }
 
     QtObject {
@@ -58,6 +59,7 @@ TestCase {
     function init() {
         mockTask.active = false
         mockMessage.intervalMin = 2
+        mockMessage.fuzzySearchEnabled = false
         mockFriends.batchLimit = 100
         settingsDialog.sectionIndex = 0
         settingsDialog.open()

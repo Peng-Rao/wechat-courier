@@ -231,6 +231,21 @@ Popup {
                                 Text { text: "秒"; color: WxTheme.clTextSecondary }
                             }
                         }
+                        SettingsRow {
+                            objectName: "settingsMessageFuzzySearchRow"
+                            title: "模糊搜索（取首个结果）"
+                            description: ""
+                            Switch {
+                                objectName: "settingsMessageFuzzySearch"
+                                Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
+                                    ? objectName : "模糊搜索（取首个结果）"
+                                checked: root.appBackend ? root.appBackend.message.fuzzySearchEnabled : false
+                                enabled: !!root.appBackend && !root.interactionLocked
+                                onToggled: root.applyIfUnlocked(function() {
+                                    root.appBackend.message.fuzzySearchEnabled = checked
+                                })
+                            }
+                        }
                         Item { Layout.fillHeight: true }
                     }
                 }

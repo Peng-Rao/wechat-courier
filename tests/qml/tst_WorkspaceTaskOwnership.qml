@@ -31,6 +31,7 @@ TestCase {
         property var filePaths: []
         property real intervalMax: 3
         property real intervalMin: 2
+        property bool fuzzySearchEnabled: false
         property string previewMessage: "hello"
         property string previewTarget: "文件传输助手"
         property int recipientCount: 1

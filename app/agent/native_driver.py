@@ -2656,7 +2656,10 @@ class NativeWeixinDriver:
         self._search_query = target
         return list(self._search_results)
 
-    def _resolve_search_candidate(self, candidate: SearchCandidate):
+    def _resolve_search_candidate(self, candidate: SearchCandidate, *, fuzzy: bool = False):
+        if self._search_edit is not None:
+            if self._actions.read_text(self._search_edit) != self._search_query:
+                return None
         current = self._coerce_search_rows(self._search_rows())
         if current is None:
             return None
@@ -2670,7 +2673,7 @@ class NativeWeixinDriver:
                 for identity in current_candidate.identities
             )
         ]
-        if len(matching_indexes) != 1:
+        if not fuzzy and len(matching_indexes) != 1:
             return None
         exact_indexes = [
             index
@@ -2695,7 +2698,7 @@ class NativeWeixinDriver:
         if len(exact_indexes) != 1:
             return None
         index = exact_indexes[0]
-        if index != matching_indexes[0]:
+        if index != (0 if fuzzy else matching_indexes[0]):
             return None
         return current[index].control
 
@@ -2707,19 +2710,25 @@ class NativeWeixinDriver:
             self._same_candidate(entry.candidate, candidate) for entry in current
         )
 
-    def select_search_result(self, candidate: SearchCandidate) -> None:
+    def select_search_result(self, candidate: SearchCandidate, *, fuzzy: bool = False) -> None:
         if not isinstance(candidate, SearchCandidate):
             raise TypeError("select_search_result requires SearchCandidate")
-        observed = self._resolve_search_candidate(candidate)
+        def resolve():
+            return self._resolve_search_candidate(candidate, fuzzy=True) if fuzzy else self._resolve_search_candidate(candidate)
+
+        observed = resolve()
         if observed is None:
+            if fuzzy:
+                raise TransientUiError("首个搜索结果已变化，需要刷新搜索结果")
             raise RuntimeError("无法解析唯一搜索结果控件")
         # Resolve once more immediately before the reversible navigation click.
-        # This rejects a newly duplicated result and avoids retaining the row
-        # wrapper while the result list is animating.
-        control = self._resolve_search_candidate(candidate)
+        # Keep the selected identity and its mode-specific position unchanged.
+        control = resolve()
         if control is None:
+            if fuzzy:
+                raise TransientUiError("点击前首个搜索结果已变化，需要刷新搜索结果")
             raise RuntimeError("点击前无法重新解析唯一搜索结果控件")
-        self._selected_target = self._search_query or candidate.display_name
+        self._selected_target = candidate.display_name if fuzzy else (self._search_query or candidate.display_name)
         self._selected_identities = candidate.identities
 
         def selected_chat_verified() -> bool:
@@ -2740,7 +2749,7 @@ class NativeWeixinDriver:
         ):
             source_state = "仍存在" if self._search_candidate_present(candidate) else "已消失"
             raise ActionVerificationError(
-                "点击精确搜索结果后，聊天标题或输入框仍未就绪；"
+                "点击搜索结果后，聊天标题或输入框仍未就绪；"
                 f"source={source_state}"
             )
 

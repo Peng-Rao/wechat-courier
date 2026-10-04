@@ -414,13 +414,13 @@ Item {
                                     width: 34
                                     height: 34
                                     radius: WxTheme.radiusMedium
-                                    color: WxTheme.isDark ? "#476477" : "#7b98a9"
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: "福"
-                                        color: "white"
-                                        font.bold: true
-                                        font.family: WxTheme.fontFamily
+                                    color: "transparent"
+                                    Image {
+                                        objectName: "defaultBrandAvatar"
+                                        anchors.fill: parent
+                                        source: "../../assets/fuge-logo-64.png"
+                                        fillMode: Image.PreserveAspectFit
+                                        smooth: true
                                     }
                                 }
                                 ColumnLayout {

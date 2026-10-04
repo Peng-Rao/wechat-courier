@@ -57,6 +57,15 @@ Rectangle {
         anchors.rightMargin: 0
         spacing: 10
 
+        Image {
+            objectName: "titlebarBrandLogo"
+            Layout.preferredWidth: 22
+            Layout.preferredHeight: 22
+            source: "../../assets/fuge-logo-64.png"
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+        }
+
         // Title Text
         Text {
             text: root.window ? root.window.title : "福格微信助手"

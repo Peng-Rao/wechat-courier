@@ -425,7 +425,7 @@ def test_acceptance_metadata_is_stable_notified_and_correlated_to_actual_task(tm
         "active": False, "friendSubmitEnabled": False, "kind": "message_send",
         "items": [{"target": "Alice", "message": "hello"}],
         "options": {"intervalMin": 2.5, "intervalMax": 3.0, "unknownPolicy": "continue",
-                    "filePaths": []},
+                    "filePaths": [], "fuzzySearchEnabled": False},
     }
     backend.friends.model.appendEmptyRecord()
     backend.friends.model.setCell(0, "account", "wxid_demo")

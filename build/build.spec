@@ -48,6 +48,8 @@ for dirpath, dirnames, filenames in os.walk(qml_dir):
 icon_path = os.path.join(ROOT, "assets", "app.ico")
 if os.path.exists(icon_path):
     datas.append((icon_path, "assets"))
+for logo_filename in ("fuge-logo.png", "fuge-logo-256.png", "fuge-logo-64.png"):
+    datas.append((os.path.join(ROOT, "assets", logo_filename), "assets"))
 
 # ═══════════════════════════════════════
 #  pywin32 DLL

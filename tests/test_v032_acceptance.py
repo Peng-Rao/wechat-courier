@@ -37,6 +37,7 @@ def test_plan_is_identical_across_modes_and_has_unique_single_item_tasks(harness
         assert len(request["items"]) == 1
         if request["kind"] == "message_send":
             assert request["items"][0]["target"] == harness.SEND_TARGET
+            assert request["options"]["fuzzySearchEnabled"] is False
             texts.append(request["items"][0]["message"])
         else:
             assert request["items"][0]["account"] == "18896904196"
@@ -71,7 +72,7 @@ def test_source_gui_can_be_validated_without_packaging(harness):
     assert args.gui_source is True and args.gui_exe is None
 
 
-@pytest.mark.parametrize("mutation", ["target", "account", "attachment", "forward", "batch"])
+@pytest.mark.parametrize("mutation", ["target", "account", "attachment", "forward", "batch", "fuzzy"])
 def test_rejects_unpermitted_requests(harness, mutation):
     case = harness.make_plan("safety", 2)[mutation == "account"]
     request = case["request"]
@@ -83,6 +84,8 @@ def test_rejects_unpermitted_requests(harness, mutation):
         request["options"]["filePaths"] = ["private.txt"]
     elif mutation == "forward":
         request["options"]["useForward"] = True
+    elif mutation == "fuzzy":
+        request["options"]["fuzzySearchEnabled"] = True
     else:
         request["items"].append(dict(request["items"][0]))
     with pytest.raises(ValueError):
