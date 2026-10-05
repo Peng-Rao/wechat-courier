@@ -85,6 +85,11 @@ Window {
         click("contactWorkspaceTab")
         click("contactRefreshButton")
         assert contacts.accounts, "no local accounts discovered"
+        assert contacts.sourceDirectory
+        assert find("contactSourceField").property("text") == contacts.sourceDirectory
+        click("contactDetectDirectoryButton")
+        assert contacts.accounts and not contacts.busy
+        assert find("contactSourceField").property("text") == contacts.sourceDirectory
         if not live:
             for width, height in ((1320, 880), (960, 680)):
                 window.setWidth(width); window.setHeight(height)

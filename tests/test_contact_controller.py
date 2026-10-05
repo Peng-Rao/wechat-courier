@@ -1,5 +1,6 @@
 import importlib.util
 import time
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QObject, QSettings, Signal
@@ -188,3 +189,101 @@ def test_export_never_replaces_contact_database_or_sidecars(contacts, tmp_path, 
     assert not ctrl.exportContacts("json", str(target), True)
     assert target.read_bytes() == b"encrypted source"
     assert not ctrl.busy
+
+
+@pytest.fixture
+def discovered_contacts(qapp, tmp_path, monkeypatch):
+    from app.contacts.controller import ContactController
+    from app.contacts import reader as contact_reader
+    from tests.test_contact_reader import contact_db
+
+    documents, profile = tmp_path / "documents", tmp_path / "profile"
+    roots = [documents / "xwechat_files", profile / "xwechat_files"]
+    contact_db(roots[0] / "wxid_first")
+    contact_db(roots[1] / "wxid_second")
+    monkeypatch.setattr(contact_reader, "_documents_directory", lambda: documents)
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    settings = QSettings(str(tmp_path / "discovery.ini"), QSettings.IniFormat)
+    helper = FakeReader()
+    ctrl = ContactController(settings, reader=helper)
+    yield ctrl, helper, settings, roots
+    ctrl.close()
+
+
+def test_auto_discovery_fills_directory_without_reading_contacts(discovered_contacts):
+    ctrl, helper, settings, roots = discovered_contacts
+    seen = []
+    ctrl.accountsChanged.connect(lambda: seen.append(ctrl.sourceDirectory))
+    ctrl.refreshAccounts()
+    assert ctrl.sourceDirectory == str(roots[0])
+    assert seen == [str(roots[0])]
+    assert ctrl.canRead and len(ctrl.accounts) == 2
+    assert not helper.calls
+    # Automatically detected paths must not narrow the next discovery pass.
+    assert settings.value("contacts/sourceDirectory", "") == ""
+    ctrl.refreshAccounts()
+    assert len(ctrl.accounts) == 2
+
+
+def test_auto_directory_follows_account_and_survives_controller_recreation(discovered_contacts):
+    from app.contacts.controller import ContactController
+
+    ctrl, helper, settings, roots = discovered_contacts
+    ctrl.refreshAccounts()
+    ctrl.selectedAccountId = ctrl.accounts[1]["accountId"]
+    assert ctrl.sourceDirectory == str(roots[1])
+    restored = ContactController(settings, reader=FakeReader())
+    try:
+        restored.refreshAccounts()
+        assert len(restored.accounts) == 2
+        assert restored.sourceDirectory == str(roots[0])
+        assert not helper.calls
+    finally:
+        restored.close()
+
+
+def test_manual_directory_is_preserved_until_auto_detect_is_requested(discovered_contacts):
+    ctrl, helper, settings, roots = discovered_contacts
+    ctrl.sourceDirectory = str(roots[1])
+    assert ctrl.sourceDirectory == str(roots[1]) and len(ctrl.accounts) == 1
+    ctrl.refreshAccounts()
+    assert ctrl.sourceDirectory == str(roots[1])
+    assert settings.value("contacts/sourceDirectory") == str(roots[1])
+    ctrl.detectSourceDirectory()
+    assert ctrl.sourceDirectory == str(roots[0]) and len(ctrl.accounts) == 2
+    assert settings.value("contacts/sourceDirectory", "") == ""
+    assert not helper.calls
+
+
+def test_choosing_displayed_auto_directory_explicitly_limits_scan(discovered_contacts):
+    ctrl, _, settings, roots = discovered_contacts
+    ctrl.refreshAccounts()
+    assert len(ctrl.accounts) == 2
+    ctrl.sourceDirectory = ctrl.sourceDirectory
+    assert len(ctrl.accounts) == 1
+    assert settings.value("contacts/sourceDirectory") == str(roots[0])
+
+
+def test_auto_detect_does_not_change_source_during_read(discovered_contacts):
+    ctrl, helper, settings, roots = discovered_contacts
+    ctrl.sourceDirectory = str(roots[1])
+    assert ctrl.readContacts()
+    ctrl.detectSourceDirectory()
+    assert ctrl.sourceDirectory == str(roots[1])
+    assert settings.value("contacts/sourceDirectory") == str(roots[1])
+    assert len(helper.calls) == 1
+
+
+def test_auto_detect_clears_missing_manual_source_and_reports_no_accounts(discovered_contacts, tmp_path):
+    ctrl, helper, settings, roots = discovered_contacts
+    ctrl.sourceDirectory = str(tmp_path / "missing")
+    assert not ctrl.accounts and ctrl.errorMessage
+    ctrl.detectSourceDirectory()
+    assert ctrl.sourceDirectory == str(roots[0]) and not ctrl.errorMessage
+    # Remove only the synthetic fixtures, never a real database.
+    for row in ctrl.accounts:
+        Path(row["contactDb"]).unlink()
+    ctrl.detectSourceDirectory()
+    assert ctrl.sourceDirectory == "" and not ctrl.accounts
+    assert not ctrl.canRead and ctrl.errorMessage
+    assert not helper.calls

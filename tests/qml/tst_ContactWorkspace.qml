@@ -56,6 +56,7 @@ TestCase {
         property var lastExportPaths: []
         property string exportFormat: "xlsx"
         property int refreshCalls: 0
+        property int detectCalls: 0
         property int readCalls: 0
         property int elevationCalls: 0
         property int cancelCalls: 0
@@ -67,6 +68,7 @@ TestCase {
         property var exports: []
         signal overwriteRequested(var listPaths)
         function refreshAccounts() { ++refreshCalls }
+        function detectSourceDirectory() { ++detectCalls; sourceDirectory = "D:/detected/xwechat_files" }
         function readContacts() { ++readCalls }
         function readAsAdministrator() { ++elevationCalls }
         function cancel() { ++cancelCalls }
@@ -153,6 +155,7 @@ TestCase {
         contacts.lastExportPaths = []
         contacts.exportFormat = "xlsx"
         contacts.refreshCalls = 0
+        contacts.detectCalls = 0
         contacts.readCalls = 0
         contacts.elevationCalls = 0
         contacts.cancelCalls = 0
@@ -216,7 +219,8 @@ TestCase {
         contacts.busy = true
         wait(20)
         for (var name of ["contactReadButton", "contactRefreshButton", "contactSourceField",
-                          "contactSourceFolderButton", "contactAccountSelector", "contactExportButton"])
+                          "contactSourceFolderButton", "contactDetectDirectoryButton",
+                          "contactAccountSelector", "contactExportButton"])
             compare(control(name).enabled, false, name)
         verify(control("contactSearchField").enabled)
         verify(control("contactSpecialCheckBox").enabled)
@@ -329,6 +333,17 @@ TestCase {
         dialog.selectedFolder = "file:///D:/blocked"
         dialog.accepted()
         compare(contacts.sourceDirectory, "file:///D:/wechat-courier")
+    }
+
+    function test_auto_detect_updates_directory_without_reading() {
+        click("contactDetectDirectoryButton")
+        compare(contacts.detectCalls, 1)
+        tryCompare(control("contactSourceField"), "text", "D:/detected/xwechat_files")
+        compare(contacts.readCalls, 0)
+        contacts.busy = true
+        tryCompare(control("contactDetectDirectoryButton"), "enabled", false)
+        click("contactDetectDirectoryButton")
+        compare(contacts.detectCalls, 1)
     }
 
     function test_source_commits_only_when_editing_finishes() {
@@ -665,7 +680,8 @@ TestCase {
         host.width = data.width
         host.height = data.height
         wait(100)
-        var names = ["contactSourceField", "contactSourceFolderButton", "contactAccountSelector",
+        var names = ["contactSourceField", "contactSourceFolderButton", "contactDetectDirectoryButton",
+                     "contactAccountSelector",
                      "contactRefreshButton", "contactReadButton", "contactElevationButton",
                      "contactSearchField", "contactSpecialCheckBox", "contactCountLabel", "contactTable",
                      "contactStatusLabel", "contactElapsedLabel", "contactCancelButton",

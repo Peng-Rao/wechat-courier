@@ -71,6 +71,7 @@ class ContactController(QObject):
         self._model.countsChanged.connect(self.stateChanged)
         self._accounts, self._selected = [], ""
         self._directory = str(settings.value("contacts/sourceDirectory", ""))
+        self._discovery_directory = self._directory
         self._busy, self._phase, self._error = False, "idle", ""
         self._status = "等待读取联系人"
         self._requires_elevation = False
@@ -102,6 +103,7 @@ class ContactController(QObject):
         self._pending_export = None
         self._model.clear()
         self._requires_elevation = False
+        self._update_detected_directory()
         self.accountsChanged.emit()
         self.stateChanged.emit()
 
@@ -113,10 +115,11 @@ class ContactController(QObject):
         if self._busy: return
         url = QUrl(value)
         value = url.toLocalFile() if url.isLocalFile() else value.strip()
-        if value != self._directory:
+        if value != self._directory or value != self._discovery_directory:
             self._pending_export = None
             self._requires_elevation = False
             self._directory = value
+            self._discovery_directory = value
             self._settings.setValue("contacts/sourceDirectory", value)
             self._settings.sync()
             self._model.clear()
@@ -201,11 +204,30 @@ class ContactController(QObject):
     def environmentChanged(self):
         self.stateChanged.emit()
 
+    def _update_detected_directory(self):
+        if self._discovery_directory:
+            return
+        selected = next((a for a in self._accounts if a["accountId"] == self._selected), None)
+        directory = Path(selected["directory"]) if selected else None
+        if directory is not None and directory.parent.name.casefold() == "xwechat_files":
+            directory = directory.parent
+        self._directory = str(directory) if directory is not None else ""
+
+    @Slot()
+    def detectSourceDirectory(self):
+        if self._busy:
+            return
+        if self._discovery_directory:
+            self.sourceDirectory = ""
+        else:
+            self.refreshAccounts()
+
     @Slot()
     def refreshAccounts(self):
         if self._busy: return
         try:
-            accounts = self._discover(self._directory)
+            # The displayed auto-detected path must not narrow future scans.
+            accounts = self._discover(self._discovery_directory)
             previous = next((a for a in self._accounts if a["accountId"] == self._selected), None)
             selected = next((a for a in accounts if a["accountId"] == self._selected), None)
             if previous != selected:
@@ -221,6 +243,7 @@ class ContactController(QObject):
             self._accounts, self._selected = [], ""
             self._model.clear()
             self._error = "无法访问数据目录。"
+        self._update_detected_directory()
         self.accountsChanged.emit()
         self.stateChanged.emit()
 

@@ -266,6 +266,15 @@ Item {
                         onAccepted: root.commitSourceDirectory()
                     }
                     CommandButton {
+                        objectName: "contactDetectDirectoryButton"
+                        text: "自动检测"
+                        tooltip: "自动检测微信数据目录"
+                        enabled: !!root.contactsBackend && !root.busy
+                        onClicked: {
+                            if (root.contactsBackend && !root.busy) root.contactsBackend.detectSourceDirectory()
+                        }
+                    }
+                    CommandButton {
                         objectName: "contactSourceFolderButton"
                         iconName: "folder_open"
                         tooltip: "选择数据目录"
