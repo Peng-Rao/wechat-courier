@@ -21,6 +21,14 @@ def test_sqlcipher_is_pinned_and_third_party_notices_included():
     assert '"licenses"' in (ROOT / "build/build.spec").read_text(encoding="utf-8")
 
 
+def test_wcdb_adapter_attribution_and_license_are_collected():
+    content = (ROOT / "licenses/wechatauto-replica-LICENSE.txt").read_text(encoding="utf-8")
+    assert "Apache License" in content and "Version 2.0" in content
+    attribution = (ROOT / "licenses/README.txt").read_text(encoding="utf-8")
+    assert "4ec0273a4d1b2f0eac6cb5fe99c5695a56514d17" in attribution
+    assert "app/contacts/wcdb.py" in attribution
+
+
 def test_installer_closes_contact_reader_before_replacing_binaries():
     script = (ROOT / "installer/setup.nsi").read_text(encoding="utf-8-sig")
     startup = script.split("Function .onInit", 1)[1].split("FunctionEnd", 1)[0]

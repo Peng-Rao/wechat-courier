@@ -1,5 +1,6 @@
 import json
 import time
+import pytest
 
 from PySide6.QtCore import QSettings
 
@@ -31,6 +32,48 @@ def test_real_reader_process_auth_stream_and_shutdown(qapp, tmp_path):
     assert not list(tmp_path.glob("bootstrap-*"))
     assert not any("key" in key.lower() for _, event in events for key in event)
     client.close()
+
+
+@pytest.mark.parametrize("kind,code", [("valid", None), ("wrong-key", "KEY_VALIDATION_FAILED"),
+                                       ("missing", "KEY_NOT_FOUND"), ("limit", "KEY_SCAN_LIMIT")])
+def test_real_helper_wcdb_sqlcipher_and_safe_failure_diagnostics(qapp, tmp_path, kind, code):
+    import sys
+    from app.contacts.client import ContactReaderClient
+    from tests.test_contact_reader import encrypted_fixture, account
+
+    db, key, salt, fixture = encrypted_fixture(tmp_path, wal=True)
+    setup = {"valid": "WCDBProbe()", "wrong-key": "WCDBProbe(key=b'w'*32)",
+             "missing": "WCDBProbe(salt=b'z'*16)",
+             "limit": "WCDBProbe(count=129,salt=b'z'*16)"}[kind]
+    script = ("from tests.test_contact_wcdb import WCDBProbe; "
+              "from app.contacts import reader; from app.contacts.main import main; "
+              f"reader._probe_factory=lambda:{setup}; main()")
+    client = ContactReaderClient(command=[sys.executable, "-c", script], bootstrap_root=tmp_path / "launch")
+    events = []
+    client.eventReceived.connect(lambda name, value: events.append((name, value)))
+    try:
+        client.start(account(db), "wcdb-job")
+        wait_until(qapp, lambda: any(name == "contacts.finished" for name, _ in events))
+        result = events[-1][1]
+        assert result["success"] is (code is None)
+        if code:
+            assert result["code"] == code
+            assert not any(name == "contacts.rows" for name, _ in events)
+        else:
+            assert result["count"] == 1
+            assert result["diagnostics"]["validatedCount"] == 1
+            assert result["diagnostics"]["strategy"] == "wcdb"
+            stages = {event["stage"] for name, event in events if name == "contacts.progress"}
+            assert {"process", "snapshot", "keys", "validating", "contacts"} <= stages
+        assert result["diagnostics"]["memoryReads"] > 0
+        diagnostic_events = [{k:v for k,v in value.items() if k != "rows"} for _, value in events]
+        serialized = json.dumps(diagnostic_events)
+        assert key.hex() not in serialized and salt.hex() not in serialized
+        assert str(db) not in serialized and "wxid_fake" not in serialized
+        assert not client.processRunning
+    finally:
+        client.close()
+        fixture.close()
 
 
 def test_real_reader_cancel_is_bounded_and_does_not_touch_agent(qapp, tmp_path):

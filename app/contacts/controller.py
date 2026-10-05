@@ -8,11 +8,15 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Property, QSettings, QThread, QTimer, QUrl, Signal, Slot, Qt
 
 from .models import ContactTableModel
+from .diagnostics import safe_diagnostics
 
 
 ERRORS = {
     "ACCESS_DENIED": "读取权限不足，可单独授权联系人读取进程。",
-    "LOGIN_REQUIRED": "没有找到该账号的可验证密钥，请登录对应微信账号。",
+    "LOGIN_REQUIRED": "未检测到可读取的微信进程，请启动并登录微信。",
+    "KEY_NOT_FOUND": "已检测到微信，但未找到所选联系人库的候选密钥。请检查账号和数据目录。",
+    "KEY_VALIDATION_FAILED": "候选密钥未通过联系人库校验，请检查所选账号和数据目录。",
+    "KEY_SCAN_LIMIT": "密钥扫描达到安全上限，已停止读取。",
     "UNSUPPORTED_VERSION": "联系人导出仅支持微信 4.1.13.65。",
     "PROCESS_CHANGED": "微信进程已变化，请重新读取。",
     "SNAPSHOT_UNSTABLE": "联系人库正在变化，未取得稳定副本，请稍后重试。",
@@ -26,6 +30,8 @@ ERRORS = {
 }
 STAGES = {"starting": "正在连接读取进程", "scanning": "正在验证账号密钥",
           "snapshot": "正在获取联系人库副本", "reading": "正在读取联系人",
+          "process": "正在验证微信进程", "keys": "正在查找联系人库密钥",
+          "validating": "正在校验联系人库", "contacts": "正在读取联系人",
           "authorizing": "等待管理员授权", "exporting": "正在导出文件"}
 
 
@@ -75,6 +81,7 @@ class ContactController(QObject):
         self._busy, self._phase, self._error = False, "idle", ""
         self._status = "等待读取联系人"
         self._requires_elevation = False
+        self._diagnostics = {}
         self._keyword, self._include_special = "", False
         self._job_id, self._staging = "", []
         self._worker = None
@@ -146,6 +153,9 @@ class ContactController(QObject):
 
     @Property(bool, notify=stateChanged)
     def requiresElevation(self): return self._requires_elevation
+
+    @Property("QVariantMap", notify=stateChanged)
+    def diagnostics(self): return dict(self._diagnostics)
 
     @Property(str, notify=elapsedChanged)
     def elapsedText(self):
@@ -259,6 +269,7 @@ class ContactController(QObject):
         self._pending_export = None
         account = next(a for a in self._accounts if a["accountId"] == self._selected)
         self._error, self._staging, self._job_id = "", [], uuid.uuid4().hex
+        self._diagnostics = {}
         self._phase = "authorizing" if elevated else "starting"
         self._status = STAGES[self._phase]
         self._requires_elevation = False
@@ -275,6 +286,8 @@ class ContactController(QObject):
     def _on_event(self, method, value):
         if not self._busy or not isinstance(value, dict) or value.get("jobId") != self._job_id:
             return
+        if "diagnostics" in value:
+            self._diagnostics = safe_diagnostics(value["diagnostics"])
         if method == "contacts.progress":
             stage = value.get("stage", "reading")
             self._phase = stage if stage in STAGES else "reading"
@@ -315,6 +328,7 @@ class ContactController(QObject):
         if self._busy: return
         self._pending_export = None
         self._requires_elevation = False
+        self._diagnostics = {}
         self._model.clear()
         self._last_paths = []
         self._phase, self._status, self._error = "idle", "等待读取联系人", ""

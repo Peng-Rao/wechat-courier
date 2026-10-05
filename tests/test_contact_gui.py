@@ -42,6 +42,11 @@ def exercise_gui(output, live=False):
         contacts._discover = lambda _: [{"accountId": "fixture", "label": "Fixture account",
             "directory": str(output), "contactDb": str(output / "contact.db")}]
     engine = QQmlApplicationEngine()
+    read_stages = set()
+    def observe_read(method, value):
+        if method == "contacts.progress":
+            read_stages.add(value.get("stage"))
+    contacts._reader.eventReceived.connect(observe_read)
     warnings = []
     engine.warnings.connect(lambda values: warnings.extend(value.toString() for value in values))
     engine.rootContext().setContextProperty("backend", backend)
@@ -101,6 +106,93 @@ Window {
         wait_done()
         assert contacts.phase == "ready", contacts.errorMessage
         QTest.qWait(180)
+        if live:
+            import hashlib
+            import threading
+            import uuid
+            import win32gui
+            import win32process
+            from app.contacts.native import Win32Probe, matching_processes
+
+            def verify_wechat_responsive():
+                processes = matching_processes(Win32Probe(), cancel=threading.Event(),
+                                               deadline=time.monotonic() + 5)
+                pids = {process.pid for process in processes}
+                handles = []
+                def collect(hwnd, _):
+                    if (win32process.GetWindowThreadProcessId(hwnd)[1] in pids and
+                            win32gui.GetClassName(hwnd) == "Qt51514QWindowIcon" and
+                            not win32gui.GetWindow(hwnd, 4)):
+                        handles.append(hwnd)
+                win32gui.EnumWindows(collect, None)
+                assert handles, "verified WeChat main window not found"
+                for hwnd in handles:
+                    assert win32gui.IsWindowEnabled(hwnd), "WeChat main window disabled"
+                    win32gui.SendMessageTimeout(hwnd, 0, 0, 0, 2, 250)
+
+            counts, diagnostics = [contacts.totalCount], [contacts.diagnostics]
+            assert counts[0] > 0, "no contact records returned"
+            verify_wechat_responsive()
+            for _ in range(2):
+                click("contactReadButton")
+                assert contacts.busy and backend.operationBusy
+                assert not backend.task.startFriends() and not backend.task.startMessage()
+                wait_done()
+                assert contacts.phase == "ready", contacts.errorMessage
+                assert not contacts._reader.processRunning
+                counts.append(contacts.totalCount)
+                diagnostics.append(contacts.diagnostics)
+                verify_wechat_responsive()
+            assert len(set(counts)) == 1, "independent contact reads returned different counts"
+            ordinary_count = contacts.visibleCount
+            click("contactSpecialCheckBox")
+            assert contacts.visibleCount >= ordinary_count
+            click("contactSpecialCheckBox")
+            assert contacts.visibleCount == ordinary_count
+            query = "fuge-contact-no-match-" + uuid.uuid4().hex
+            search = find("contactSearchField")
+            search.forceActiveFocus()
+            for char in query:
+                QTest.keyClick(window, Qt.Key(ord(char.upper())), Qt.NoModifier)
+            QTest.qWait(100)
+            assert contacts.visibleCount == 0 and not find("contactExportButton").isEnabled()
+            QTest.keyClick(window, Qt.Key_A, Qt.ControlModifier)
+            QTest.keyClick(window, Qt.Key_Backspace)
+            QTest.qWait(100)
+            assert contacts.visibleCount == ordinary_count
+            click("contactReadButton")
+            click("contactCancelButton")
+            wait_done(10)
+            assert contacts.phase == "cancelled" and contacts.canRead
+            assert contacts.totalCount == counts[0], "cancel replaced the previous valid table"
+            verify_wechat_responsive()
+            click("contactReadButton")
+            wait_done()
+            assert contacts.phase == "ready", contacts.errorMessage
+            assert contacts.totalCount == counts[0]
+            verify_wechat_responsive()
+            click("contactClearButton")
+            assert contacts.totalCount == contacts.visibleCount == 0 and contacts.diagnostics == {}
+            assert not backend.operationBusy
+            assert {"process", "snapshot", "keys", "validating", "contacts", "complete"} <= read_stages
+            assert not any("Required property" in value or "TypeError" in value
+                or "Unable to assign" in value for value in warnings), "QML warnings detected"
+            root = Path(__file__).resolve().parents[1]
+            digest = hashlib.sha256()
+            for module in ("app/contacts/native.py", "app/contacts/wcdb.py", "app/contacts/reader.py",
+                           "app/contacts/diagnostics.py", "app/contacts/main.py", "app/contacts/controller.py",
+                           "app/contacts/client.py", "qml/components/ContactWorkspace.qml"):
+                digest.update(module.encode())
+                digest.update((root / module).read_bytes())
+            report = {"entrypoint": "QML controls -> BackendController -> Named Pipe -> independent reader",
+                      "live": True, "independentReadCounts": counts, "cancelled": True, "reread": True,
+                      "filtered": True, "cleared": True, "wechatResponsive": True,
+                      "realContactExports": False, "contactsLogged": False, "automationAgentStarted": False,
+                      "sourceFingerprint": "sha256:" + digest.hexdigest(), "diagnostics": diagnostics,
+                      "warnings": len(warnings)}
+            (output / "live-acceptance.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            print(json.dumps(report))
+            return
         if not live:
             assert contacts.visibleCount == 80 and contacts.totalCount == 90
             table = find("contactTable")
@@ -177,9 +269,6 @@ Window {
         print(json.dumps({"live": live, "records": len(snapshot), "formats": formats,
                           "cancelled": True, "reread": True, "warnings": len(warnings)}))
     finally:
-        if live:
-            for fmt in ("csv", "json", "xlsx"):
-                (output / ("contacts." + fmt)).unlink(missing_ok=True)
         backend.shutdown()
         window.close()
         engine.deleteLater()
@@ -196,6 +285,23 @@ def test_contact_workspace_real_controller_and_process(tmp_path):
         import pytest
         pytest.fail(str(error.stderr))
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_read_only_live_acceptance_never_deletes_existing_exports(tmp_path):
+    originals = {tmp_path / ("contacts." + fmt): ("existing-" + fmt).encode()
+                 for fmt in ("csv", "json", "xlsx")}
+    for path, content in originals.items():
+        path.write_bytes(content)
+    code = ("from pathlib import Path; import sys; from app.contacts import reader; "
+            "reader.discover_accounts=lambda _: []; "
+            "from tests.test_contact_gui import exercise_gui; "
+            "exercise_gui(Path(sys.argv[1]), live=True)")
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software"},
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+    assert result.returncode != 0 and "no local accounts discovered" in result.stderr
+    assert all(path.is_file() and path.read_bytes() == content for path, content in originals.items())
 
 
 if __name__ == "__main__":

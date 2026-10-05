@@ -158,6 +158,36 @@ def test_changing_data_directory_requires_fresh_access_denial_before_elevation(c
     assert not ctrl.requiresElevation and not ctrl.readAsAdministrator()
 
 
+@pytest.mark.parametrize("code", ["KEY_NOT_FOUND", "KEY_VALIDATION_FAILED", "KEY_SCAN_LIMIT"])
+def test_key_failures_never_request_login_or_elevation(contacts, code):
+    ctrl, reader, _, _ = contacts
+    assert ctrl.readContacts()
+    finish(ctrl, reader, success=False, code=code)
+    assert not ctrl.requiresElevation and not ctrl.readAsAdministrator()
+    assert "登录" not in ctrl.errorMessage
+    assert {"KEY_NOT_FOUND": "未找到", "KEY_VALIDATION_FAILED": "校验", "KEY_SCAN_LIMIT": "上限"}[code] in ctrl.errorMessage
+    assert ctrl.canRead
+
+
+@pytest.mark.parametrize("stage", ["process", "snapshot", "keys", "validating", "contacts"])
+def test_contact_read_progress_uses_distinct_stages_and_safe_diagnostics(contacts, stage):
+    ctrl, reader, _, _ = contacts
+    assert ctrl.readContacts()
+    job = reader.calls[-1][1]
+    reader.eventReceived.emit("contacts.progress", {"jobId": job, "stage": stage,
+        "diagnostics": {"stage": stage, "strategy": "wcdb", "memoryReads": 5,
+            "key": "PRIVATE", "path": "PRIVATE", "records": ["PRIVATE"]}})
+    assert ctrl.phase == stage
+    assert ctrl.diagnostics["memoryReads"] == 5
+    assert "PRIVATE" not in repr(ctrl.diagnostics)
+    reader.eventReceived.emit("contacts.progress", {"jobId": "stale", "stage": "keys"})
+    assert ctrl.phase == stage
+    finish(ctrl, reader, success=False, code="KEY_NOT_FOUND")
+    assert ctrl.diagnostics["memoryReads"] == 5
+    ctrl.clear()
+    assert ctrl.diagnostics == {}
+
+
 @pytest.mark.parametrize("reset", ["clear", "source", "account", "read"])
 def test_pending_overwrite_does_not_survive_data_reset(contacts, tmp_path, reset):
     ctrl, reader, _, _ = contacts

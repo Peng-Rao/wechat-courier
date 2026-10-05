@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from .diagnostics import ReadDiagnostics
 from typing import Callable
 
 from .data import normalize_contact
@@ -290,7 +291,8 @@ def _open_snapshot(db, key, salt, *, cancel, deadline):
         # Never immutable=1: that can omit WAL transactions. The copy's own SHM
         # can be rebuilt, but the encrypted DB is always opened mode=ro.
         db = validate_snapshot(db)
-        connection = _engine().connect(db.as_uri() + "?mode=ro", uri=True, timeout=0)
+        engine = _engine()
+        connection = engine.connect(db.as_uri() + "?mode=ro", uri=True, timeout=0, cached_statements=0)
         connection.set_progress_handler(lambda: int(cancel.is_set() or time.monotonic() >= deadline), 1000)
         connection.execute("PRAGMA cipher_log_level = NONE")
         connection.execute('PRAGMA key = "x\'' + key.hex() + salt.hex() + '\'"')
@@ -302,35 +304,61 @@ def _open_snapshot(db, key, salt, *, cancel, deadline):
         version = connection.execute("PRAGMA cipher_version").fetchone()
         hmac = connection.execute("PRAGMA cipher_use_hmac").fetchone()
         if not version or tuple(int(part) for part in version[0].split(".")[:2]) < (4, 5) or not hmac or str(hmac[0]) != "1":
-            raise _InvalidKey()
-        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            raise ContactError("DATABASE_INVALID")
+        try:
+            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        except engine.DatabaseError as error:
+            check_budget(cancel, deadline)
+            # Only failed initial decryption rejects a key, not I/O or setup.
+            if getattr(error, "sqlite_errorcode", 0) & 0xFF == engine.SQLITE_NOTADB:
+                raise _InvalidKey() from None
+            raise ContactError("DATABASE_INVALID") from None
         check_budget(cancel, deadline)
-        integrity = connection.execute("PRAGMA cipher_integrity_check").fetchone()
-        if integrity is not None and integrity != ("ok",):
-            raise _InvalidKey()
-        if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-            raise _InvalidKey()
+        try:
+            integrity = connection.execute("PRAGMA cipher_integrity_check").fetchone()
+            if integrity is not None and integrity != ("ok",):
+                raise ContactError("DATABASE_INVALID")
+            if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise ContactError("DATABASE_INVALID")
+        except (ContactError, PermissionError):
+            raise
+        except Exception:
+            check_budget(cancel, deadline)
+            raise ContactError("DATABASE_INVALID") from None
         check_budget(cancel, deadline)
         return connection
-    except ContactError:
+    except (ContactError, _InvalidKey):
         if connection is not None:
             connection.close()
         raise
+    except PermissionError:
+        if connection is not None:
+            connection.close()
+        check_budget(cancel, deadline)
+        raise ContactError("ACCESS_DENIED") from None
     except Exception:
         if connection is not None:
             connection.close()
         check_budget(cancel, deadline)
-        raise _InvalidKey() from None
+        raise ContactError("DATABASE_INVALID") from None
 
 
 def read_contacts(account: dict, *, cancel: threading.Event, deadline: float,
-                  progress: Callable[[str, int, int], None]) -> list[dict]:
+                  progress: Callable[[str, int, int], None], diagnostics=None) -> list[dict]:
     """Read contacts under a monotonic budget; emit no partial results or keys."""
     check_budget(cancel, deadline)
+    diagnostics = diagnostics if diagnostics is not None else ReadDiagnostics()
+    notify = progress
+
+    def progress(stage, done=0, total=0):
+        diagnostics.stage = stage
+        notify(stage, done, total)
+
     try:
         source = _validate_account(account)
         probe = _probe_factory()
         processes = matching_processes(probe, cancel=cancel, deadline=deadline)
+        diagnostics.processCount = len(processes)
         progress("process", 0, len(processes))
         check_budget(cancel, deadline)
         result = None
@@ -344,16 +372,21 @@ def read_contacts(account: dict, *, cancel: threading.Event, deadline: float,
             for index, process in enumerate(processes):
                 check_budget(cancel, deadline)
                 verify_process(probe, process)
+                diagnostics.processesChecked += 1
                 progress("keys", index, len(processes))
-                keys = candidate_keys(probe, process, salt, cancel=cancel, deadline=deadline)
+                keys = candidate_keys(probe, process, salt, cancel=cancel, deadline=deadline,
+                                      diagnostics=diagnostics)
                 try:
                     for key in keys:
                         found_candidate = True
                         verify_process(probe, process)
+                        progress("validating", index, len(processes))
                         try:
                             connection = _open_snapshot(db, key, salt, cancel=cancel, deadline=deadline)
                         except _InvalidKey:
+                            progress("keys", index, len(processes))
                             continue
+                        diagnostics.validatedCount += 1
                         try:
                             rows = _read_rows(connection, cancel=cancel, deadline=deadline, progress=progress)
                             verify_process(probe, process)
@@ -368,7 +401,7 @@ def read_contacts(account: dict, *, cancel: threading.Event, deadline: float,
                 if result is not None:
                     break
             if result is None:
-                raise ContactError("DATABASE_INVALID" if found_candidate else "LOGIN_REQUIRED")
+                raise ContactError("KEY_VALIDATION_FAILED" if found_candidate else "KEY_NOT_FOUND")
         check_budget(cancel, deadline)
         verify_process(probe, successful_process)
         progress("complete", len(result), len(result))

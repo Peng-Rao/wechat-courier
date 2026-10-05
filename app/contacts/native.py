@@ -9,11 +9,15 @@ import ntpath
 import os
 import re
 import stat
+import struct
 import threading
 import time
+from contextlib import closing
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import wcdb
 
 
 SUPPORTED_VERSION = "4.1.13.65"
@@ -23,11 +27,14 @@ PROCESS_MEMORY_READ = 0x0400 | 0x0010
 MAX_CHUNK = 1024 * 1024
 _MESSAGES = {
     "ACCESS_DENIED": "Access to the local contact data was denied.",
-    "LOGIN_REQUIRED": "Sign in to WeChat in the current Windows session first.",
+    "LOGIN_REQUIRED": "No readable WeChat process was detected in the current Windows session.",
     "UNSUPPORTED_VERSION": "Only WeChat 4.1.13.65 is supported.",
     "PROCESS_CHANGED": "The verified WeChat process changed. Retry the read.",
     "SNAPSHOT_UNSTABLE": "The contact database changed during all snapshot attempts.",
     "DATABASE_INVALID": "The encrypted contact database could not be validated.",
+    "KEY_NOT_FOUND": "No supported contact key candidate was found in the verified processes.",
+    "KEY_VALIDATION_FAILED": "No candidate could validate the selected contact database.",
+    "KEY_SCAN_LIMIT": "The contact key scan exceeded its safe candidate limit.",
     "SCHEMA_UNSUPPORTED": "The contact database schema is not supported.",
     "CANCELLED": "The contact read was cancelled.",
     "TIMEOUT": "The contact read timed out.",
@@ -154,12 +161,96 @@ _WIDE_KEY = re.compile(
     rf"[xX]\x00'\x00((?:[0-9a-fA-F]\x00){{96,{_MAX_KEY_HEX}}})'\x00".encode("ascii"))
 
 
-def candidate_keys(probe, identity: ProcessIdentity, salt: bytes, *, cancel, deadline,
-                   chunk_size: int = 64 * 1024):
-    """Yield bounded raw keys only from explicit SQLCipher key+salt literals.
+def _wipe(buffer):
+    if isinstance(buffer, bytearray):
+        buffer[:] = b"\0" * len(buffer)
 
-    The yielded mutable key is wiped when iteration resumes or is closed. The
-    consumer must validate it synchronously and close the iterator on success.
+
+def _read_memory(probe, handle, address, size, diagnostics):
+    if diagnostics is not None:
+        diagnostics.memoryReads += 1
+    result = probe.read_memory(handle, address, size)
+    if diagnostics is not None:
+        diagnostics.memoryBytes += len(result) if result is not None else 0
+    return result
+
+
+def _memory_windows(probe, handle, identity, *, cancel, deadline, chunk_size,
+                    overlap, ranges=None, diagnostics=None):
+    tail = bytearray()
+    try:
+        for address, size in probe.memory_regions(handle):
+            check_budget(cancel, deadline)
+            verify_process(probe, identity, handle, full=False)
+            if ranges is not None:
+                ranges.append((address, address + size))
+            _wipe(tail)
+            tail.clear()
+            offset = 0
+            while offset < size:
+                check_budget(cancel, deadline)
+                count = min(chunk_size, size - offset)
+                data = None
+                window = bytearray()
+                try:
+                    data = _read_memory(probe, handle, address + offset, count, diagnostics)
+                    check_budget(cancel, deadline)
+                    if not data:
+                        _wipe(tail)
+                        tail.clear()
+                        offset += count
+                        continue
+                    if len(data) > count:
+                        raise ContactError("PROCESS_CHANGED")
+                    read_length = len(data)
+                    base = address + offset - len(tail)
+                    window = tail + data
+                    _wipe(data)
+                    yield base, window
+                    _wipe(tail)
+                    tail[:] = window[-overlap:]
+                    offset += read_length
+                finally:
+                    _wipe(data)
+                    _wipe(window)
+            verify_process(probe, identity, handle, full=False)
+    finally:
+        _wipe(tail)
+
+
+def _read_structure(probe, handle, address, size, ranges, *, cancel, deadline, chunk_size, diagnostics=None):
+    if (not 0x10000 <= address < address + size <= 0x800000000000 or
+            not any(start <= address and address + size <= end for start, end in ranges)):
+        return bytearray()
+    result = bytearray()
+    try:
+        while len(result) < size:
+            check_budget(cancel, deadline)
+            data = None
+            try:
+                count = min(chunk_size, size - len(result))
+                data = _read_memory(probe, handle, address + len(result), count, diagnostics)
+                check_budget(cancel, deadline)
+                if not data:
+                    _wipe(result)
+                    return bytearray()
+                if len(data) > count:
+                    raise ContactError("PROCESS_CHANGED")
+                result.extend(data)
+            finally:
+                _wipe(data)
+        return result
+    except BaseException:
+        _wipe(result)
+        raise
+
+
+def candidate_keys(probe, identity: ProcessIdentity, salt: bytes, *, cancel, deadline,
+                   chunk_size: int = MAX_CHUNK, diagnostics=None):
+    """Yield validated-layout candidates; only SQLCipher can accept a key.
+
+    Yielded mutable keys are wiped on resume/close. Both passes share one
+    deadline and handle; no memory dumps, caches, or plaintext DB files.
     """
     check_budget(cancel, deadline)
     if len(salt) != 16 or not 1 <= chunk_size <= MAX_CHUNK:
@@ -171,75 +262,97 @@ def candidate_keys(probe, identity: ProcessIdentity, salt: bytes, *, cancel, dea
         raise ContactError("ACCESS_DENIED") from None
     except OSError:
         raise ContactError("PROCESS_CHANGED") from None
-    seen = set()
-    tail = bytearray()
-    try:
-        verify_process(probe, identity, handle)
-        for address, size in probe.memory_regions(handle):
+    seen, anchors, structures, ranges = set(), set(), set(), []
+    settings = dict(cancel=cancel, deadline=deadline, chunk_size=chunk_size, diagnostics=diagnostics)
+
+    def unique(key, strategy):
+        try:
+            check_budget(cancel, deadline)
+            fingerprint = hashlib.sha256(key).digest()
+            if fingerprint in seen:
+                return
+            if len(seen) >= 128:
+                raise ContactError("KEY_SCAN_LIMIT")
+            seen.add(fingerprint)
+            if diagnostics is not None:
+                diagnostics.candidateCount += 1
+                previous = diagnostics.strategy
+                diagnostics.strategy = strategy if not previous or previous == strategy else "mixed"
+            verify_process(probe, identity, handle, full=False)
+            yield key
             check_budget(cancel, deadline)
             verify_process(probe, identity, handle, full=False)
-            tail[:] = b"\0" * len(tail)
-            tail.clear()
-            offset = 0
-            while offset < size:
-                check_budget(cancel, deadline)
-                count = min(chunk_size, size - offset)
-                data = probe.read_memory(handle, address + offset, count)
-                check_budget(cancel, deadline)
-                if not data:
-                    # Do not join candidate fragments across unreadable gaps.
-                    tail[:] = b"\0" * len(tail)
-                    tail.clear()
-                    offset += count
-                    continue
-                if len(data) > count:
-                    raise ContactError("PROCESS_CHANGED")
-                read_length = len(data)
-                window = tail + data
-                if isinstance(data, bytearray):
-                    data[:] = b"\0" * len(data)
-                del data
-                try:
-                    for pattern, encoding in ((_ASCII_KEY, "ascii"), (_WIDE_KEY, "utf-16-le")):
-                        for match in pattern.finditer(window):
-                            check_budget(cancel, deadline)
-                            literal = match.group(1).decode(encoding)
-                            if len(literal) % 2:
+        finally:
+            _wipe(key)
+
+    try:
+        verify_process(probe, identity, handle)
+        with closing(_memory_windows(probe, handle, identity, overlap=_KEY_OVERLAP,
+                                     ranges=ranges, **settings)) as windows:
+            for base, window in windows:
+                position = window.find(wcdb.CONFIG_NAME)
+                while position >= 0:
+                    address = base + position
+                    if address not in anchors:
+                        anchors.add(address)
+                        if diagnostics is not None:
+                            diagnostics.anchorCount += 1
+                    if len(anchors) > wcdb.MAX_ANCHORS:
+                        raise ContactError("KEY_SCAN_LIMIT")
+                    position = window.find(wcdb.CONFIG_NAME, position + 1)
+                for pattern, encoding in ((_ASCII_KEY, "ascii"), (_WIDE_KEY, "utf-16-le")):
+                    for match in pattern.finditer(window):
+                        check_budget(cancel, deadline)
+                        literal = match.group(1).decode(encoding)
+                        if len(literal) % 2:
+                            continue
+                        material = bytearray.fromhex(literal)
+                        try:
+                            if material.find(salt, 32) < 0:
                                 continue
-                            material = bytearray.fromhex(literal)
-                            try:
-                                if material.find(salt, 32) < 0:
-                                    continue
-                                key = material[:32]
-                            finally:
-                                material[:] = b"\0" * len(material)
-                            fingerprint = hashlib.sha256(key).digest()
-                            try:
-                                if fingerprint in seen:
-                                    continue
-                                if len(seen) >= 128:
-                                    raise ContactError("DATABASE_INVALID")
-                                seen.add(fingerprint)
-                                verify_process(probe, identity, handle, full=False)
-                                yield key
-                                check_budget(cancel, deadline)
-                                verify_process(probe, identity, handle, full=False)
-                            finally:
-                                key[:] = b"\0" * len(key)
-                    # Keep every possible prefix of the longest UTF-16 literal.
-                    tail[:] = window[-_KEY_OVERLAP:]
-                finally:
-                    window[:] = b"\0" * len(window)
-                # Partial reads are contiguous; never skip their unread suffix.
-                offset += read_length
-            verify_process(probe, identity, handle, full=False)
+                            yield from unique(material[:32], "literal")
+                        finally:
+                            _wipe(material)
+        if anchors:
+            references = re.compile(b"|".join(re.escape(struct.pack("<QQ", address, len(wcdb.CONFIG_NAME)))
+                                             for address in sorted(anchors)))
+            with closing(_memory_windows(probe, handle, identity, overlap=15, **settings)) as windows:
+                for base, window in windows:
+                    for match in references.finditer(window):
+                        address = base + match.start()
+                        if address in structures:
+                            continue
+                        structures.add(address)
+                        if diagnostics is not None:
+                            diagnostics.structureCount += 1
+                        if len(structures) > wcdb.MAX_STRUCTURES:
+                            raise ContactError("KEY_SCAN_LIMIT")
+                        node = obj = blob = None
+                        try:
+                            node = _read_structure(probe, handle, address - 0x10, 0x50, ranges, **settings)
+                            config = wcdb.config_pointer(node, anchors)
+                            if config is None:
+                                continue
+                            obj = _read_structure(probe, handle, config + 0x88, 0x28, ranges, **settings)
+                            location = wcdb.buffer_location(obj)
+                            if location is None:
+                                continue
+                            blob = _read_structure(probe, handle, *location, ranges, **settings)
+                            if len(blob) != location[1]:
+                                continue
+                            with closing(wcdb.decoded_keys(blob, salt)) as keys:
+                                for key in keys:
+                                    yield from unique(key, "wcdb")
+                        finally:
+                            _wipe(node)
+                            _wipe(obj)
+                            _wipe(blob)
         verify_process(probe, identity, handle)
     except PermissionError:
         raise ContactError("ACCESS_DENIED") from None
     except OSError:
         raise ContactError("PROCESS_CHANGED") from None
     finally:
-        tail[:] = b"\0" * len(tail)
         probe.close_memory(handle)
 
 

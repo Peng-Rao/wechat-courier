@@ -12,6 +12,8 @@ from PySide6.QtNetwork import QLocalSocket
 
 from app.agent.rpc import JsonLineDecoder, encode_frame, notification
 from .security import validate_bootstrap, verify_pipe_server
+from .diagnostics import ReadDiagnostics, safe_diagnostics
+from .native import ContactError
 
 
 class _ReadWorker(QThread):
@@ -23,15 +25,19 @@ class _ReadWorker(QThread):
         self.reader, self.account, self.cancel = reader, account, cancel
 
     def run(self):
+        diagnostics = ReadDiagnostics()
         def progress(stage, done=0, total=0):
-            self.progress.emit({"stage": stage, "done": done, "total": total})
+            diagnostics.stage = stage
+            self.progress.emit({"stage": stage, "done": done, "total": total,
+                                "diagnostics": diagnostics.snapshot()})
         try:
             records = self.reader(self.account, cancel=self.cancel,
-                deadline=time.monotonic() + 60, progress=progress)
+                deadline=time.monotonic() + 60, progress=progress, diagnostics=diagnostics)
             result = {"success": True, "records": records}
         except Exception as exc:
-            result = {"success": False, "code": getattr(exc, "code", "READER_FAILED")}
+            result = {"success": False, "code": exc.code if isinstance(exc, ContactError) else "READER_FAILED"}
         if self.cancel.is_set(): result = {"success": False, "code": "CANCELLED"}
+        result["diagnostics"] = diagnostics.snapshot()
         self.completed.emit(result)
 
 
@@ -45,6 +51,7 @@ class ContactReaderService(QObject):
         self.worker = None
         self.authenticated, self.used = False, False
         self.records, self.offset = [], 0
+        self.diagnostics = {}
         self.socket.connected.connect(self._connected)
         self.socket.readyRead.connect(self._read)
         self.socket.disconnected.connect(self._disconnected)
@@ -132,6 +139,7 @@ class ContactReaderService(QObject):
 
     def _completed(self, result):
         self.worker.wait(1000)
+        self.diagnostics = safe_diagnostics(result.get("diagnostics"))
         if not result.get("success"):
             self._notify("contacts.finished", result)
             QTimer.singleShot(100, QCoreApplication.instance().quit)
@@ -147,7 +155,8 @@ class ContactReaderService(QObject):
             return
         if self.socket.bytesToWrite() > 256 * 1024: return
         if self.offset >= len(self.records):
-            self._notify("contacts.finished", {"success": True, "count": len(self.records)})
+            self._notify("contacts.finished", {"success": True, "count": len(self.records),
+                                              "diagnostics": self.diagnostics})
             self.records = []
             self.stream.stop()
             QTimer.singleShot(100, QCoreApplication.instance().quit)

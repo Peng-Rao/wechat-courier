@@ -327,17 +327,70 @@ def test_synthetic_encrypted_database_and_wal_read_only(reader, tmp_path, monkey
         conn.close()
 
 
-def test_synthetic_wrong_key_has_safe_database_invalid(reader, tmp_path, monkeypatch):
+def test_synthetic_wrong_key_has_safe_validation_error(reader, tmp_path, monkeypatch):
     db, key, salt, conn = encrypted_fixture(tmp_path)
     try:
         inject_probe(reader, monkeypatch, b"w" * 32, salt)
         with pytest.raises(reader.ContactError) as error:
             reader.read_contacts(account(db), **settings())
-        assert error.value.code == "DATABASE_INVALID"
+        assert error.value.code == "KEY_VALIDATION_FAILED"
         assert key.hex() not in str(error.value)
         assert str(db) not in str(error.value)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("phase", ["connect", "schema"])
+@pytest.mark.parametrize("kind,code", [("permission", "ACCESS_DENIED"),
+                                      ("cantopen", "DATABASE_INVALID"),
+                                      ("ioerr", "DATABASE_INVALID"),
+                                      ("operational", "DATABASE_INVALID")])
+def test_snapshot_operational_failure_is_not_rejected_key(reader, tmp_path, monkeypatch, phase, kind, code):
+    db, key, salt, fixture = encrypted_fixture(tmp_path)
+    engine = sqlcipher_engine()
+    opened, closed = [], []
+    try:
+        probe = inject_probe(reader, monkeypatch, key, salt)
+        probe.memory += ("x'" + (b"w" * 32).hex() + salt.hex() + "'").encode()
+        if kind == "permission":
+            failure = PermissionError("PRIVATE database location")
+        else:
+            failure = engine.OperationalError("PRIVATE database location")
+            failure.sqlite_errorcode = {"cantopen": engine.SQLITE_CANTOPEN,
+                                        "ioerr": engine.SQLITE_IOERR | (1 << 8),
+                                        "operational": engine.SQLITE_ERROR}[kind]
+
+        class Connection:
+            def __init__(self, connection): self.connection = connection
+            def __getattr__(self, name): return getattr(self.connection, name)
+            def execute(self, sql):
+                if sql == "SELECT count(*) FROM sqlite_master":
+                    raise failure
+                return self.connection.execute(sql)
+            def close(self):
+                closed.append(True)
+                self.connection.close()
+
+        class Engine:
+            def __getattr__(self, name): return getattr(engine, name)
+            def connect(self, *args, **kwargs):
+                opened.append(True)
+                if phase == "connect":
+                    raise failure
+                return Connection(engine.connect(*args, **kwargs))
+
+        monkeypatch.setattr(reader, "_engine", Engine)
+        with pytest.raises(reader.ContactError) as error:
+            reader.read_contacts(account(db), **settings())
+        assert error.value.code == code
+        assert len(opened) == 1, "Operational failures must not continue scanning keys"
+        assert len(closed) == (phase == "schema")
+        assert sum(event == ("open", 71) for event in probe.events) == 1
+        assert sum(event == ("close", 71) for event in probe.events) == 1
+        assert "PRIVATE" not in str(error.value)
+        assert key.hex() not in str(error.value) and salt.hex() not in str(error.value)
+    finally:
+        fixture.close()
 
 
 @pytest.mark.parametrize("valid_key", [True, False])
@@ -355,7 +408,7 @@ def test_extended_memory_literal_is_normalized_and_validated_by_sqlcipher(reader
         else:
             with pytest.raises(reader.ContactError) as error:
                 reader.read_contacts(account(db), **settings())
-            assert error.value.code == "DATABASE_INVALID"
+            assert error.value.code == "KEY_VALIDATION_FAILED"
         assert (db.read_bytes(), db.with_name(db.name + "-wal").read_bytes()) == before
     finally:
         conn.close()
@@ -697,6 +750,51 @@ def test_snapshot_automatically_cleans_dead_own_jobs(snapshot, tmp_path, monkeyp
     with snapshot.capture_snapshot(source, parent=tmp_path, **settings()) as db:
         assert db.is_file()
         assert not abandoned.exists()
+
+
+def test_missing_candidate_in_readable_process_is_not_login_required(reader, tmp_path, monkeypatch):
+    db, key, salt, fixture = encrypted_fixture(tmp_path)
+    try:
+        probe = inject_probe(reader, monkeypatch, key, salt)
+        probe.memory = b"verified process without recognized key material"
+        with pytest.raises(reader.ContactError) as error:
+            reader.read_contacts(account(db), **settings())
+        assert error.value.code == "KEY_NOT_FOUND"
+        assert sum(event == ("open", 71) for event in probe.events) == 1
+        assert sum(event == ("close", 71) for event in probe.events) == 1
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize("wal,raw", [(False, False), (True, False), (True, True)])
+def test_wcdb_keys_are_accepted_only_by_sqlcipher_on_encrypted_snapshot(reader, tmp_path, monkeypatch, wal, raw):
+    from tests.test_contact_wcdb import WCDBProbe
+
+    db, key, salt, fixture = encrypted_fixture(tmp_path, wal=wal)
+    try:
+        probe = WCDBProbe(key=key, salt=salt, raw=raw)
+        monkeypatch.setattr(reader, "_probe_factory", lambda: probe)
+        source_files = [db] + ([db.with_name(db.name + "-wal")] if wal else [])
+        before = {path: path.read_bytes() for path in source_files}
+        diagnostics = reader.ReadDiagnostics()
+        stages = []
+        kwargs = settings()
+        kwargs["progress"] = lambda stage, *_: stages.append(stage)
+        rows = reader.read_contacts(account(db), diagnostics=diagnostics, **kwargs)
+        assert [row["username"] for row in rows] == ["wxid_fake"]
+        assert before == {path: path.read_bytes() for path in source_files}
+        summary = diagnostics.snapshot()
+        assert summary["strategy"] == "wcdb"
+        assert summary["candidateCount"] == summary["validatedCount"] == 1
+        assert summary["anchorCount"] == summary["structureCount"] == 1
+        assert summary["memoryReads"] > 0 and summary["memoryBytes"] > 0
+        assert summary["stage"] == "complete" and summary["elapsedMs"] >= 0
+        assert {"process", "snapshot", "keys", "validating", "contacts", "complete"} <= set(stages)
+        serialized = json.dumps(summary)
+        assert key.hex() not in serialized and salt.hex() not in serialized
+        assert str(db) not in serialized and "wxid_fake" not in serialized
+    finally:
+        fixture.close()
 
 
 def test_public_read_rechecks_deadline_after_snapshot_cleanup(reader, snapshot, tmp_path, monkeypatch):
