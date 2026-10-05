@@ -34,21 +34,15 @@ Popup {
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeNormal
             }
-            ToolButton {
+            WxButton {
                 objectName: "closeAttachmentImageButton"
                 Layout.preferredWidth: 32
                 Layout.preferredHeight: 32
                 Accessible.name: "关闭图片预览"
-                ToolTip.visible: hovered
-                ToolTip.text: "关闭"
+                quiet: true
+                iconName: "close"
+                tooltipText: "关闭"
                 onClicked: root.close()
-                contentItem: Text {
-                    text: "\u00d7"
-                    color: WxTheme.clTextPrimary
-                    font.pixelSize: 24
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
             }
         }
         Image {

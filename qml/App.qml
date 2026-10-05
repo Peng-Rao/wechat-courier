@@ -12,6 +12,7 @@ Rectangle {
     readonly property bool interactionLocked: !!(
         appBackend && appBackend.task && appBackend.task.active
     )
+    readonly property bool sidebarCollapsed: !!(appBackend && appBackend.settings.sidebarCollapsed)
     color: "transparent"
 
     // Read-only UIA evidence is exposed only for explicitly opted-in acceptance runs.
@@ -36,7 +37,6 @@ Rectangle {
     }
 
     function openSettings(section) {
-        if (root.interactionLocked) return
         settingsDialog.sectionIndex = section === undefined ? 0 : section
         settingsDialog.open()
     }
@@ -54,78 +54,109 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 48
-            color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
-                spacing: 6
-
-                Repeater {
-                    model: ["消息群发", "自动发送好友申请", "微信联系人导出"]
-                    Button {
-                        required property int index
-                        required property string modelData
-                        objectName: index === 0 ? "messageWorkspaceTab" : index === 1 ? "friendWorkspaceTab" : "contactWorkspaceTab"
-                        Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
-                            ? objectName : modelData
-                        Layout.preferredWidth: index === 0 ? 100 : index === 1 ? 160 : 144
-                        Layout.fillHeight: true
-                        onClicked: root.workspaceIndex = index
-                        contentItem: Text {
-                            text: modelData
-                            color: root.workspaceIndex === index
-                                ? WxTheme.clTextPrimary
-                                : (parent.enabled ? WxTheme.clTextSecondary : WxTheme.clTextHint)
-                            font.family: WxTheme.fontFamily
-                            font.pixelSize: WxTheme.fontSizeSmall + (root.workspaceIndex === index ? 1 : 0)
-                            font.bold: root.workspaceIndex === index
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                        background: Item {
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.bottom: parent.bottom
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
-                                height: 3
-                                color: WxTheme.clPrimary
-                                visible: root.workspaceIndex === index
-                            }
-                        }
-                    }
-                }
-                Item { Layout.fillWidth: true }
-            }
-        }
-
         GateRecoveryBanner {
             Layout.fillWidth: true
             appBackend: root.appBackend
         }
 
-        StackLayout {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.workspaceIndex
-
-            MessageWorkspace { appBackend: root.appBackend }
-            FriendWorkspace { appBackend: root.appBackend }
-            ContactWorkspace { appBackend: root.appBackend }
+            spacing: 0
+            Rectangle {
+                objectName: "workspaceSidebar"
+                Layout.preferredWidth: root.sidebarCollapsed ? 64 : 216
+                Layout.fillHeight: true
+                color: WxTheme.clTitleBarBg
+                Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: WxTheme.clBorder }
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: root.sidebarCollapsed ? 10 : 12
+                    spacing: 6
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.bottomMargin: 12
+                        Text { visible: !root.sidebarCollapsed; text: "工作区"; font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clTextSecondary; Layout.fillWidth: true; leftPadding: 12 }
+                        WxButton {
+                            objectName: "sidebarCollapseButton"
+                            Accessible.name: root.sidebarCollapsed ? "展开侧栏" : "折叠侧栏"
+                            quiet: true; iconName: "panel_left"
+                            tooltipText: Accessible.name
+                            onClicked: { if (root.appBackend) root.appBackend.settings.sidebarCollapsed = !root.sidebarCollapsed }
+                        }
+                    }
+                    Repeater {
+                        model: ["消息群发", "自动发送好友申请", "微信联系人导出"]
+                        WxButton {
+                            id: navButton
+                            required property int index
+                            required property string modelData
+                            objectName: index === 0 ? "messageWorkspaceTab" : index === 1 ? "friendWorkspaceTab" : "contactWorkspaceTab"
+                            Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled ? objectName : modelData
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 42
+                            quiet: true
+                            tooltipText: root.sidebarCollapsed ? modelData : ""
+                            onClicked: root.workspaceIndex = index
+                            contentItem: RowLayout {
+                                spacing: 10
+                                WxIcon { iconSource: "../icons/" + (navButton.index === 0 ? "send" : navButton.index === 1 ? "user_plus" : "users") + ".svg"; iconSize: 18; iconColor: root.workspaceIndex === navButton.index ? WxTheme.clAccentText : WxTheme.clTextSecondary; hoverScale: false; Layout.alignment: Qt.AlignCenter }
+                                Text { visible: !root.sidebarCollapsed; text: navButton.modelData; color: root.workspaceIndex === navButton.index ? WxTheme.clAccentText : WxTheme.clTextSecondary; font.family: WxTheme.fontFamily; font.pixelSize: 14; font.bold: root.workspaceIndex === navButton.index; Layout.fillWidth: true; elide: Text.ElideRight }
+                            }
+                            background: Rectangle {
+                                radius: 6
+                                color: root.workspaceIndex === navButton.index ? WxTheme.clBgSelected : navButton.hovered ? WxTheme.clBgHover : "transparent"
+                                border.width: navButton.activeFocus ? 1 : 0; border.color: WxTheme.clBorderFocus
+                                Rectangle { visible: root.workspaceIndex === navButton.index; width: 3; height: 16; radius: 1; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; color: WxTheme.clPrimary }
+                            }
+                        }
+                    }
+                    Item { Layout.fillHeight: true }
+                    WxButton {
+                        Layout.fillWidth: true; quiet: true
+                        iconName: WxTheme.isDark ? "sun" : "moon"
+                        text: root.sidebarCollapsed ? "" : WxTheme.isDark ? "浅色主题" : "深色主题"
+                        tooltipText: root.sidebarCollapsed ? (WxTheme.isDark ? "浅色主题" : "深色主题") : ""
+                        onClicked: { if (root.appBackend) { root.appBackend.settings.isDark = !WxTheme.isDark; WxTheme.isDark = root.appBackend.settings.isDark } }
+                    }
+                    WxButton {
+                        objectName: "sidebarSettingsButton"
+                        Accessible.name: "参数设置"
+                        Layout.fillWidth: true; quiet: true; iconName: "settings"
+                        text: root.sidebarCollapsed ? "" : "参数设置"
+                        tooltipText: root.sidebarCollapsed ? "参数设置" : ""
+                        onClicked: root.openSettings(root.interactionLocked ? 3 : root.workspaceIndex === 1 ? 1 : 0)
+                    }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: WxTheme.clBorder; Layout.topMargin: 10 }
+                    RowLayout {
+                        Layout.topMargin: 8
+                        Layout.alignment: Qt.AlignHCenter
+                        Image { source: "../assets/fuge-logo-64.png"; sourceSize.width: 20; sourceSize.height: 20; Layout.preferredWidth: 18; Layout.preferredHeight: 18; fillMode: Image.PreserveAspectFit }
+                        Text { visible: !root.sidebarCollapsed; text: "福格微信助手"; font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clTextHint }
+                    }
+                }
+            }
+            Rectangle {
+                objectName: "workspaceContentSurface"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumWidth: 0
+                color: WxTheme.clBgWindow
+                StackLayout {
+                    anchors.fill: parent
+                    currentIndex: root.workspaceIndex
+                    MessageWorkspace { appBackend: root.appBackend }
+                    FriendWorkspace { appBackend: root.appBackend }
+                    ContactWorkspace { appBackend: root.appBackend }
+                }
+            }
         }
     }
 
     SettingsDialog {
         id: settingsDialog
+        objectName: "settingsDialog"
         appBackend: root.appBackend
-        enabled: !root.interactionLocked
     }
 
     Connections {

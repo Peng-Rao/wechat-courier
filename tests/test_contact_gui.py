@@ -91,6 +91,8 @@ Window {
         click("contactRefreshButton")
         assert contacts.accounts, "no local accounts discovered"
         assert contacts.sourceDirectory
+        assert find("contactSourceField") is None
+        click("contactSourceToggleButton")
         assert find("contactSourceField").property("text") == contacts.sourceDirectory
         click("contactDetectDirectoryButton")
         assert contacts.accounts and not contacts.busy

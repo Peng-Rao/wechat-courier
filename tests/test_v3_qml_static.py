@@ -53,7 +53,7 @@ def test_friend_workspace_exposes_right_click_add_and_delete_actions():
     assert "删除此行" in source
 
 
-def test_active_task_locks_navigation_settings_and_configuration_controls():
+def test_active_task_keeps_navigation_and_appearance_but_locks_business_controls():
     app = (ROOT / "qml" / "App.qml").read_text(encoding="utf-8")
     main = (ROOT / "qml" / "main.qml").read_text(encoding="utf-8")
     titlebar = qml("WxTitleBar.qml")
@@ -61,9 +61,9 @@ def test_active_task_locks_navigation_settings_and_configuration_controls():
     messages = qml("MessageWorkspace.qml")
 
     assert "readonly property bool interactionLocked" in app
-    assert "if (root.interactionLocked) return" in app
-    assert "enabled: !root.interactionLocked" in app
-    assert "settingsEnabled:" in main
+    assert "root.openSettings(root.interactionLocked ? 3" in app
+    assert "settingsEnabled: true" in main
+    assert "function applyAppearance(callback)" in qml("SettingsDialog.qml")
     assert "property bool settingsEnabled: true" in titlebar
     assert "enabled: root.settingsEnabled" in titlebar
     assert "readonly property bool interactionLocked" in friends
@@ -115,7 +115,8 @@ def test_settings_dialog_guards_every_mutating_callback_while_task_is_active():
 
     assert "readonly property bool interactionLocked" in source
     assert "function applyIfUnlocked(callback)" in source
-    assert source.count("root.applyIfUnlocked(function()") == 16
+    assert source.count("root.applyIfUnlocked(function()") == 12
+    assert source.count("root.applyAppearance(function()") == 4
     assert "onInteractionLockedChanged" in source
     assert "运行中也可修改" not in source
 
@@ -136,7 +137,8 @@ def test_default_greeting_field_has_room_for_the_full_text():
     greeting_start = source.index('title: "默认打招呼语"')
     greeting_end = source.index('title: "默认后缀"')
     greeting_row = source[greeting_start:greeting_end]
-    assert "width: 360" in greeting_row
+    assert "stacked: true" in greeting_row
+    assert "width: Math.max(100, parent.width)" in greeting_row
 
 
 def test_main_window_fits_available_geometry_before_first_show():
@@ -156,8 +158,10 @@ def test_main_window_fits_available_geometry_before_first_show():
 
 def test_titlebar_displays_agent_and_weixin_health():
     source = qml("WxTitleBar.qml")
-    assert "Agent 在线" in source
-    assert "版本受支持" in source
+    assert '"healthSummaryButton"' in source
+    assert '"healthDetailsPopup"' in source
+    assert '"在线"' in source
+    assert "versionSupported" in source
     assert "自动化已就绪" in source
     assert "windowResponsive" in source
     assert "sessionReady" in source

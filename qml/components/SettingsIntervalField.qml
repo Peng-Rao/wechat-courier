@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 
-TextField {
+WxTextField {
     id: root
     property real savedValue: 15
     property bool interactionLocked: false

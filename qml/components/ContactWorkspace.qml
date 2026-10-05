@@ -20,6 +20,7 @@ Item {
     property bool sortAscending: true
     property string pendingExportFormat: "xlsx"
     property var overwritePaths: []
+    property bool sourceExpanded: false
 
     function accountIndex() {
         if (!contactsBackend) return -1
@@ -138,104 +139,7 @@ Item {
         }
     }
 
-    component PlainToolTip: ToolTip {
-        id: tooltip
-        contentItem: Text {
-            text: tooltip.text
-            textFormat: Text.PlainText
-            font: tooltip.font
-            color: tooltip.palette.toolTipText
-            wrapMode: Text.Wrap
-        }
-    }
-
-    component CommandButton: Button {
-        id: command
-        property string iconName: ""
-        property string tooltip: ""
-        property bool primary: false
-        implicitHeight: 32
-        implicitWidth: Math.max(32, commandContent.implicitWidth + 20)
-        leftPadding: 10
-        rightPadding: 10
-        font.family: WxTheme.fontFamily
-        font.pixelSize: WxTheme.fontSizeSmall
-        Accessible.name: text || tooltip
-        PlainToolTip {
-            visible: command.hovered && command.tooltip.length > 0
-            text: command.tooltip
-        }
-        contentItem: RowLayout {
-            id: commandContent
-            spacing: 6
-            WxIcon {
-                visible: command.iconName.length > 0
-                Layout.preferredWidth: 16
-                Layout.preferredHeight: 16
-                iconSize: 16
-                iconSource: command.iconName ? "../icons/" + command.iconName + ".svg" : ""
-                iconColor: command.primary ? "white" : WxTheme.clTextSecondary
-                hoverScale: false
-            }
-            Text {
-                visible: command.text.length > 0
-                text: command.text
-                textFormat: Text.PlainText
-                font: command.font
-                color: !command.enabled ? WxTheme.clTextHint
-                    : command.primary ? "white" : WxTheme.clTextPrimary
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                Layout.fillWidth: true
-            }
-        }
-        background: Rectangle {
-            radius: WxTheme.radiusSmall
-            color: command.primary
-                ? (!command.enabled ? WxTheme.clPrimaryDisabled
-                    : command.down ? WxTheme.clPrimaryPress
-                    : command.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary)
-                : command.hovered && command.enabled ? WxTheme.clBgHover : WxTheme.clToolbarFill
-            border.color: command.primary ? "transparent" : WxTheme.clSurfaceBorder
-        }
-    }
-
-    component WorkspaceField: TextField {
-        id: field
-        implicitHeight: 32
-        font.family: WxTheme.fontFamily
-        font.pixelSize: WxTheme.fontSizeSmall
-        color: WxTheme.clTextPrimary
-        placeholderTextColor: WxTheme.clTextHint
-        selectByMouse: true
-        background: Rectangle {
-            radius: WxTheme.radiusSmall
-            color: WxTheme.clFieldFill
-            border.color: field.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
-        }
-    }
-
-    component WorkspaceCombo: ComboBox {
-        id: combo
-        implicitHeight: 32
-        font.family: WxTheme.fontFamily
-        font.pixelSize: WxTheme.fontSizeSmall
-        contentItem: Text {
-            leftPadding: 10
-            rightPadding: 12
-            text: combo.displayText
-            textFormat: Text.PlainText
-            font: combo.font
-            color: combo.enabled ? WxTheme.clTextPrimary : WxTheme.clTextHint
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        background: Rectangle {
-            radius: WxTheme.radiusSmall
-            color: WxTheme.clFieldFill
-            border.color: combo.activeFocus ? WxTheme.clBorderFocus : WxTheme.clSurfaceBorder
-        }
-    }
+    component PlainToolTip: WxToolTip {}
 
     ColumnLayout {
         anchors.fill: parent
@@ -243,95 +147,133 @@ Item {
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 92
+            Layout.preferredHeight: 48
             color: WxTheme.clToolbarFill
             border.color: WxTheme.clSurfaceBorder
-            ColumnLayout {
+            RowLayout {
                 anchors.fill: parent
-                anchors.margins: 12
-                spacing: 4
-                RowLayout {
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 8
+                Text {
+                    text: "联系人"
+                    textFormat: Text.PlainText
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeTitle
+                    font.bold: true
+                    color: WxTheme.clTextPrimary
+                }
+                WxComboBox {
+                    id: accountSelector
+                    objectName: "contactAccountSelector"
+                    Accessible.name: "微信账号"
                     Layout.fillWidth: true
-                    spacing: 8
-                    WorkspaceField {
-                        id: sourceField
-                        objectName: "contactSourceField"
-                        Accessible.name: "微信数据目录"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        placeholderText: "微信数据目录"
-                        text: root.contactsBackend ? root.contactsBackend.sourceDirectory : ""
-                        enabled: !!root.contactsBackend && !root.busy
-                        onEditingFinished: root.commitSourceDirectory()
-                        onAccepted: root.commitSourceDirectory()
-                    }
-                    CommandButton {
-                        objectName: "contactDetectDirectoryButton"
-                        text: "自动检测"
-                        tooltip: "自动检测微信数据目录"
-                        enabled: !!root.contactsBackend && !root.busy
-                        onClicked: {
-                            if (root.contactsBackend && !root.busy) root.contactsBackend.detectSourceDirectory()
-                        }
-                    }
-                    CommandButton {
-                        objectName: "contactSourceFolderButton"
-                        iconName: "folder_open"
-                        tooltip: "选择数据目录"
-                        Layout.preferredWidth: 32
-                        enabled: !!root.contactsBackend && !root.busy
-                        onClicked: {
-                            if (root.contactsBackend && !root.busy) sourceFolderDialog.open()
-                        }
+                    Layout.minimumWidth: 0
+                    implicitWidth: 180
+                    model: root.accounts
+                    textRole: "label"
+                    valueRole: "accountId"
+                    currentIndex: root.accountIndex()
+                    enabled: !!root.contactsBackend && !root.busy
+                    onActivated: function(index) {
+                        if (root.contactsBackend && !root.busy && index >= 0 && index < root.accounts.length)
+                            root.contactsBackend.selectedAccountId = root.accounts[index].accountId
                     }
                 }
-                RowLayout {
+                WxButton {
+                    objectName: "contactRefreshButton"
+                    Accessible.name: "刷新账号"
+                    text: "刷新"
+                    tooltipText: "刷新账号"
+                    quiet: true
+                    enabled: !!root.contactsBackend && !root.busy
+                    onClicked: {
+                        if (root.contactsBackend && !root.busy) root.contactsBackend.refreshAccounts()
+                    }
+                }
+                WxButton {
+                    objectName: "contactSourceToggleButton"
+                    iconName: "folder_open"
+                    tooltipText: "微信数据目录"
+                    Accessible.name: "微信数据目录"
+                    checkable: true
+                    checked: root.sourceExpanded
+                    quiet: true
+                    Layout.preferredWidth: 36
+                    onClicked: {
+                        sourceField.focus = false
+                        root.sourceExpanded = !root.sourceExpanded
+                    }
+                }
+                WxButton {
+                    objectName: "contactReadButton"
+                    Accessible.name: text
+                    text: "读取联系人"
+                    iconName: "file"
+                    primary: true
+                    enabled: root.canRead
+                    onClicked: {
+                        if (root.canRead) root.contactsBackend.readContacts()
+                    }
+                }
+                WxButton {
+                    objectName: "contactElevationButton"
+                    text: "管理员读取"
+                    tooltipText: "以管理员权限读取"
+                    Accessible.name: "以管理员权限读取"
+                    visible: !!(root.contactsBackend && root.contactsBackend.requiresElevation)
+                    enabled: root.canRead && visible
+                    onClicked: {
+                        if (root.canRead && root.contactsBackend.requiresElevation)
+                            root.contactsBackend.readAsAdministrator()
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            objectName: "contactSourcePanel"
+            visible: root.sourceExpanded
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? 48 : 0
+            color: WxTheme.clBgSecondary
+            border.color: WxTheme.clSurfaceBorder
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 8
+                WxTextField {
+                    id: sourceField
+                    objectName: "contactSourceField"
+                    Accessible.name: "微信数据目录"
                     Layout.fillWidth: true
-                    spacing: 8
-                    WorkspaceCombo {
-                        id: accountSelector
-                        objectName: "contactAccountSelector"
-                        Accessible.name: "微信账号"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        implicitWidth: 180
-                        model: root.accounts
-                        textRole: "label"
-                        valueRole: "accountId"
-                        currentIndex: root.accountIndex()
-                        enabled: !!root.contactsBackend && !root.busy
-                        onActivated: function(index) {
-                            if (root.contactsBackend && !root.busy && index >= 0 && index < root.accounts.length)
-                                root.contactsBackend.selectedAccountId = root.accounts[index].accountId
-                        }
+                    Layout.minimumWidth: 0
+                    placeholderText: "微信数据目录"
+                    text: root.contactsBackend ? root.contactsBackend.sourceDirectory : ""
+                    enabled: !!root.contactsBackend && !root.busy
+                    onEditingFinished: root.commitSourceDirectory()
+                    onAccepted: root.commitSourceDirectory()
+                }
+                WxButton {
+                    objectName: "contactDetectDirectoryButton"
+                    Accessible.name: text
+                    text: "自动检测"
+                    tooltipText: "自动检测微信数据目录"
+                    enabled: !!root.contactsBackend && !root.busy
+                    onClicked: {
+                        if (root.contactsBackend && !root.busy) root.contactsBackend.detectSourceDirectory()
                     }
-                    CommandButton {
-                        objectName: "contactRefreshButton"
-                        text: "刷新账号"
-                        enabled: !!root.contactsBackend && !root.busy
-                        onClicked: {
-                            if (root.contactsBackend && !root.busy) root.contactsBackend.refreshAccounts()
-                        }
-                    }
-                    CommandButton {
-                        objectName: "contactReadButton"
-                        text: "读取联系人"
-                        iconName: "file"
-                        primary: true
-                        enabled: root.canRead
-                        onClicked: {
-                            if (root.canRead) root.contactsBackend.readContacts()
-                        }
-                    }
-                    CommandButton {
-                        objectName: "contactElevationButton"
-                        text: "以管理员权限读取"
-                        visible: !!(root.contactsBackend && root.contactsBackend.requiresElevation)
-                        enabled: root.canRead && visible
-                        onClicked: {
-                            if (root.canRead && root.contactsBackend.requiresElevation)
-                                root.contactsBackend.readAsAdministrator()
-                        }
+                }
+                WxButton {
+                    objectName: "contactSourceFolderButton"
+                    Accessible.name: tooltipText
+                    iconName: "folder_open"
+                    tooltipText: "选择数据目录"
+                    Layout.preferredWidth: 36
+                    enabled: !!root.contactsBackend && !root.busy
+                    onClicked: {
+                        if (root.contactsBackend && !root.busy) sourceFolderDialog.open()
                     }
                 }
             }
@@ -347,24 +289,22 @@ Item {
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 spacing: 12
-                WorkspaceField {
+                WxTextField {
                     objectName: "contactSearchField"
                     Accessible.name: "搜索联系人"
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    placeholderText: "搜索联系人"
+                    placeholderText: "搜索昵称、备注、微信号"
                     text: root.contactsBackend ? root.contactsBackend.keyword : ""
                     enabled: !!root.contactsBackend
                     onTextEdited: {
                         if (root.contactsBackend) root.contactsBackend.keyword = text
                     }
                 }
-                CheckBox {
+                WxCheckBox {
                     objectName: "contactSpecialCheckBox"
                     text: "包含特殊账号"
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeSmall
-                    palette.windowText: WxTheme.clTextPrimary
+                    Accessible.name: text
                     checked: !!(root.contactsBackend && root.contactsBackend.includeSpecial)
                     enabled: !!root.contactsBackend
                     onToggled: {
@@ -384,18 +324,20 @@ Item {
             }
         }
 
-        Item {
+        Rectangle {
+            objectName: "contactTableSurface"
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 0
             clip: true
+            color: WxTheme.clBgPrimary
             HorizontalHeaderView {
                 id: contactHeader
                 objectName: "contactHeader"
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
-                height: 34
+                height: 40
                 clip: true
                 syncView: contactTable
                 textRole: "display"
@@ -405,7 +347,9 @@ Item {
                     required property var model
                     objectName: "contactHeader-" + column
                     implicitWidth: root.columnWidths[column]
-                    implicitHeight: 34
+                    implicitHeight: 40
+                    Accessible.name: headerCell.model && headerCell.model.display !== undefined
+                        ? String(headerCell.model.display) : ""
                     enabled: !!root.contactsBackend && !!root.tableModel
                     onClicked: root.sortContacts(column)
                     contentItem: RowLayout {
@@ -432,7 +376,7 @@ Item {
                         }
                     }
                     background: Rectangle {
-                        color: headerCell.hovered ? WxTheme.clBgHover : WxTheme.clToolbarFill
+                        color: headerCell.hovered ? WxTheme.clBgHover : WxTheme.clBgSecondary
                         border.color: WxTheme.clSurfaceBorder
                     }
                 }
@@ -450,12 +394,12 @@ Item {
                 columnSpacing: 0
                 rowSpacing: 0
                 columnWidthProvider: function(column) { return root.columnWidths[column] }
-                rowHeightProvider: function(row) { return 34 }
-                ScrollBar.vertical: ScrollBar {
+                rowHeightProvider: function(row) { return 40 }
+                ScrollBar.vertical: WxScrollBar {
                     objectName: "contactVerticalScrollBar"
                     policy: ScrollBar.AsNeeded
                 }
-                ScrollBar.horizontal: ScrollBar {
+                ScrollBar.horizontal: WxScrollBar {
                     objectName: "contactHorizontalScrollBar"
                     policy: ScrollBar.AsNeeded
                 }
@@ -468,9 +412,11 @@ Item {
                         ? String(model.cellText) : model && model.display !== undefined ? String(model.display) : ""
                     objectName: "contactCell-" + row + "-" + column
                     implicitWidth: root.columnWidths[column]
-                    implicitHeight: 34
+                    implicitHeight: 40
                     color: cellMouse.containsMouse ? WxTheme.clBgSelected
-                        : row % 2 ? WxTheme.clRowAlternate : WxTheme.clPanelFill
+                        : row % 2 ? WxTheme.clRowAlternate : WxTheme.clBgPrimary
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: cellValue
                     border.color: WxTheme.clSurfaceBorder
                     Text {
                         objectName: "contactCellText-" + cell.row + "-" + cell.column
@@ -481,9 +427,10 @@ Item {
                         textFormat: Text.PlainText
                         color: WxTheme.clTextPrimary
                         font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeSmall
+                        font.pixelSize: WxTheme.fontSizeNormal
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight
+                        maximumLineCount: 1
                     }
                     PlainToolTip {
                         objectName: "contactCellToolTip-" + cell.row + "-" + cell.column
@@ -505,13 +452,15 @@ Item {
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 92
+            Layout.preferredHeight: 88
             color: WxTheme.clToolbarFill
             border.color: WxTheme.clSurfaceBorder
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 12
-                spacing: 4
+                anchors.margins: 8
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 0
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
@@ -524,6 +473,8 @@ Item {
                     Text {
                         id: statusLabel
                         objectName: "contactStatusLabel"
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
                         Layout.fillWidth: true
                         Layout.minimumWidth: 0
                         text: root.contactsBackend
@@ -534,6 +485,7 @@ Item {
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeSmall
                         elide: Text.ElideRight
+                        maximumLineCount: 1
                         PlainToolTip {
                             visible: statusHover.containsMouse && statusLabel.text.length > 0
                             text: statusLabel.text
@@ -547,14 +499,17 @@ Item {
                     }
                     Text {
                         objectName: "contactElapsedLabel"
+                        Accessible.role: Accessible.StaticText
+                        Accessible.name: text
                         text: root.contactsBackend ? root.contactsBackend.elapsedText : ""
                         textFormat: Text.PlainText
                         color: WxTheme.clTextHint
                         font.family: WxTheme.fontFamily
                         font.pixelSize: WxTheme.fontSizeSmall
                     }
-                    CommandButton {
+                    WxButton {
                         objectName: "contactCancelButton"
+                        Accessible.name: text
                         text: "取消"
                         iconName: "stop"
                         enabled: root.busy
@@ -566,21 +521,25 @@ Item {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CommandButton {
+                    WxButton {
                         objectName: "contactClearButton"
+                        Accessible.name: tooltipText
                         iconName: "clear_all"
-                        tooltip: "清空联系人"
-                        Layout.preferredWidth: 32
+                        tooltipText: "清空联系人"
+                        quiet: true
+                        Layout.preferredWidth: 36
                         enabled: !!(root.contactsBackend && !root.busy && root.contactsBackend.totalCount > 0)
                         onClicked: {
                             if (enabled && root.contactsBackend && !root.busy) root.contactsBackend.clear()
                         }
                     }
-                    CommandButton {
+                    WxButton {
                         objectName: "contactOpenExportFolderButton"
+                        Accessible.name: tooltipText
                         iconName: "folder_open"
-                        tooltip: "打开导出目录"
-                        Layout.preferredWidth: 32
+                        tooltipText: "打开导出目录"
+                        quiet: true
+                        Layout.preferredWidth: 36
                         enabled: !!(root.contactsBackend && root.contactsBackend.lastExportPaths
                             && root.contactsBackend.lastExportPaths.length > 0)
                         onClicked: {
@@ -588,15 +547,16 @@ Item {
                         }
                     }
                     Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                    WorkspaceCombo {
+                    WxComboBox {
                         id: formatSelector
                         objectName: "contactFormatSelector"
                         Accessible.name: "导出格式"
                         Layout.preferredWidth: 130
                         model: ["Excel", "CSV", "JSON", "全部格式"]
                     }
-                    CommandButton {
+                    WxButton {
                         objectName: "contactExportButton"
+                        Accessible.name: text
                         text: "导出"
                         iconName: "export"
                         primary: true

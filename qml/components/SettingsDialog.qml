@@ -13,38 +13,62 @@ Popup {
     )
 
     function applyIfUnlocked(callback) {
-        if (root.interactionLocked || !root.appBackend) return false
+        if (!root.appBackend || root.interactionLocked) return false
         callback()
         return true
+    }
+
+    function applyAppearance(callback) {
+        if (!root.appBackend) return false
+        callback()
+        return true
+    }
+
+    function resetSpinDraft(control, readValue) {
+        control.value = Qt.binding(readValue)
+        control.contentItem.text = Qt.binding(function() { return control.displayText })
+    }
+
+    function discardBusinessDrafts() {
+        friendIntervalMin.reset()
+        friendIntervalMax.reset()
+        messageIntervalMin.text = Qt.binding(function() { return root.appBackend ? root.appBackend.message.intervalMin : "2" })
+        messageIntervalMax.text = Qt.binding(function() { return root.appBackend ? root.appBackend.message.intervalMax : "3" })
+        friendGreeting.text = Qt.binding(function() { return root.appBackend ? root.appBackend.friends.defaultGreeting : "" })
+        friendRelationship.cancelEdit()
+        resetSpinDraft(friendBatch, function() { return root.appBackend ? root.appBackend.friends.batchLimit : 100 })
+        resetSpinDraft(agentRestartLimit, function() { return root.appBackend ? root.appBackend.settings.agentRestartLimit : 2 })
+        resetSpinDraft(loginTimeout, function() { return root.appBackend ? root.appBackend.settings.loginTimeout : 90 })
     }
 
     parent: Overlay.overlay
     modal: true
     focus: true
-    enabled: !root.interactionLocked
     closePolicy: Popup.CloseOnEscape
-    width: Math.min(820, parent ? parent.width - 48 : 820)
+    width: Math.min(860, parent ? parent.width - 48 : 860)
     height: Math.min(620, parent ? parent.height - 48 : 620)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 1
 
     onInteractionLockedChanged: {
-        if (root.interactionLocked && root.opened) root.close()
+        if (root.interactionLocked) {
+            root.discardBusinessDrafts()
+            if (root.opened) root.close()
+        }
     }
     onAboutToHide: {
         friendIntervalMin.commit()
         friendIntervalMax.commit()
     }
     onAboutToShow: {
-        friendIntervalMin.reset()
-        friendIntervalMax.reset()
+        root.discardBusinessDrafts()
         intervalValidation = ""
     }
 
     Overlay.modal: Rectangle { color: WxTheme.isDark ? "#99070a0d" : "#660e1820" }
     background: Rectangle {
-        color: WxTheme.isDark ? "#20282e" : "#f9fbfc"
+        color: WxTheme.clBgWindow
         border.color: WxTheme.clSurfaceBorder
         radius: WxTheme.radiusLarge
     }
@@ -85,7 +109,7 @@ Popup {
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeTiny
             }
-            Button {
+            WxButton {
                 id: closeButton
                 objectName: "settingsCloseButton"
                 Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
@@ -95,14 +119,10 @@ Popup {
                 anchors.verticalCenter: parent.verticalCenter
                 implicitWidth: 34
                 implicitHeight: 32
+                quiet: true
+                iconName: "close"
+                tooltipText: "关闭设置"
                 onClicked: root.close()
-                contentItem: Text {
-                    text: "×"
-                    color: WxTheme.clTextPrimary
-                    font.pixelSize: 18
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
                 background: Rectangle {
                     color: parent.hovered ? WxTheme.clBgHover : "transparent"
                     radius: WxTheme.radiusSmall
@@ -128,7 +148,7 @@ Popup {
                     spacing: 4
                     Repeater {
                         model: ["消息群发", "自动发送好友申请", "自动化与恢复", "外观"]
-                        Button {
+                        WxButton {
                             required property int index
                             required property string modelData
                             objectName: "settingsSection" + index
@@ -168,7 +188,7 @@ Popup {
                         Layout.bottomMargin: 8
                         color: WxTheme.clSurfaceBorder
                     }
-                    Button {
+                    WxButton {
                         text: "恢复默认设置"
                         enabled: false
                         contentItem: Text {
@@ -191,9 +211,11 @@ Popup {
                 clip: true
 
                 ScrollView {
+                    enabled: !root.interactionLocked
                     clip: true
                     contentWidth: availableWidth
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ScrollBar.vertical: WxScrollBar {}
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -205,7 +227,8 @@ Popup {
                             title: "发送间隔"
                             description: "每位好友之间随机等待，降低连续操作风险"
                             RowLayout {
-                                TextField {
+                                WxTextField {
+                                    id: messageIntervalMin
                                     objectName: "settingsMessageIntervalMin"
                                     Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                                         ? objectName : "最小发送间隔"
@@ -217,7 +240,8 @@ Popup {
                                     })
                                 }
                                 Text { text: "至"; color: WxTheme.clTextHint }
-                                TextField {
+                                WxTextField {
+                                    id: messageIntervalMax
                                     objectName: "settingsMessageIntervalMax"
                                     Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                                         ? objectName : "最大发送间隔"
@@ -235,7 +259,7 @@ Popup {
                             objectName: "settingsMessageFuzzySearchRow"
                             title: "模糊搜索（取首个结果）"
                             description: ""
-                            Switch {
+                            WxToggle {
                                 objectName: "settingsMessageFuzzySearch"
                                 Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled
                                     ? objectName : "模糊搜索（取首个结果）"
@@ -251,9 +275,11 @@ Popup {
                 }
 
                 ScrollView {
+                    enabled: !root.interactionLocked
                     clip: true
                     contentWidth: availableWidth
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ScrollBar.vertical: WxScrollBar {}
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -264,7 +290,8 @@ Popup {
                         SettingsRow {
                             title: "每批添加人数"
                             description: "控制单次任务最多选择的人数"
-                            SpinBox {
+                            WxSpinInput {
+                                id: friendBatch
                                 objectName: "settingsFriendBatchLimit"
                                 Accessible.name: "每批添加人数"
                                 implicitWidth: 140
@@ -280,9 +307,12 @@ Popup {
                         }
                         SettingsRow {
                             title: "默认打招呼语"
+                            stacked: true
                             description: "两处都为空时保留微信申请窗口原文"
-                            TextField {
-                                width: 360
+                            WxTextField {
+                                id: friendGreeting
+                                objectName: "settingsFriendGreeting"
+                                width: Math.max(100, parent.width)
                                 text: root.appBackend ? root.appBackend.friends.defaultGreeting : ""
                                 onEditingFinished: root.applyIfUnlocked(function() {
                                     root.appBackend.friends.defaultGreeting = text
@@ -293,6 +323,7 @@ Popup {
                             title: "默认后缀"
                             description: "仅影响“使用全局”的行；无＝备注只保留姓名"
                             FriendRelationshipSelector {
+                                id: friendRelationship
                                 width: 220
                                 allowGlobal: false
                                 choice: root.appBackend ? (root.appBackend.friends.defaultRelationship || "无") : "妈妈"
@@ -341,9 +372,11 @@ Popup {
                 }
 
                 ScrollView {
+                    enabled: !root.interactionLocked
                     clip: true
                     contentWidth: availableWidth
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ScrollBar.vertical: WxScrollBar {}
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -354,7 +387,7 @@ Popup {
                         SettingsRow {
                             title: "结果无法确认"
                             description: "发送或提交已触发，但没有可靠后置条件"
-                            ComboBox {
+                            WxComboBox {
                                 width: 180
                                 model: ["标记未知并继续", "标记未知并停止"]
                                 currentIndex: root.appBackend && root.appBackend.settings.unknownPolicy === "stop" ? 1 : 0
@@ -366,7 +399,9 @@ Popup {
                         SettingsRow {
                             title: "Agent 自动重启"
                             description: "UIA 卡死或进程异常时的最大重启次数"
-                            SpinBox {
+                            WxSpinInput {
+                                id: agentRestartLimit
+                                objectName: "settingsAgentRestartLimit"
                                 from: 0
                                 to: 2
                                 value: root.appBackend ? root.appBackend.settings.agentRestartLimit : 2
@@ -378,7 +413,7 @@ Popup {
                         SettingsRow {
                             title: "微信恢复方式"
                             description: "UIA 仍不可用时如何处理微信客户端"
-                            ComboBox {
+                            WxComboBox {
                                 width: 180
                                 model: ["弹窗确认", "仅手动处理", "静默重启"]
                                 currentIndex: {
@@ -395,7 +430,9 @@ Popup {
                         SettingsRow {
                             title: "登录等待"
                             description: "微信重启后等待用户登录的最长时间"
-                            SpinBox {
+                            WxSpinInput {
+                                id: loginTimeout
+                                objectName: "settingsLoginTimeout"
                                 from: 30
                                 to: 300
                                 stepSize: 10
@@ -411,9 +448,11 @@ Popup {
                 }
 
                 ScrollView {
+                    enabled: true
                     clip: true
                     contentWidth: availableWidth
                     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ScrollBar.vertical: WxScrollBar {}
                     ColumnLayout {
                         width: parent.width
                         spacing: 0
@@ -425,9 +464,10 @@ Popup {
                             title: "颜色模式"
                             description: "影响窗口、控件和预览区域"
                             RowLayout {
-                                Button {
+                                WxButton {
                                     text: "浅色"
-                                    onClicked: root.applyIfUnlocked(function() {
+                                    objectName: "settingsLightModeButton"
+                                    onClicked: root.applyAppearance(function() {
                                         WxTheme.isDark = false
                                         root.appBackend.settings.isDark = false
                                     })
@@ -437,9 +477,10 @@ Popup {
                                         radius: WxTheme.radiusSmall
                                     }
                                 }
-                                Button {
+                                WxButton {
                                     text: "深色"
-                                    onClicked: root.applyIfUnlocked(function() {
+                                    objectName: "settingsDarkModeButton"
+                                    onClicked: root.applyAppearance(function() {
                                         WxTheme.isDark = true
                                         root.appBackend.settings.isDark = true
                                     })
@@ -454,9 +495,9 @@ Popup {
                         SettingsRow {
                             title: "毛玻璃背景"
                             description: "关闭后回退为普通实色界面"
-                            Switch {
+                            WxToggle {
                                 checked: WxTheme.glassEnabled
-                                onToggled: root.applyIfUnlocked(function() {
+                                onToggled: root.applyAppearance(function() {
                                     WxTheme.glassEnabled = checked
                                     root.appBackend.settings.glassEnabled = checked
                                 })
@@ -466,7 +507,7 @@ Popup {
                             title: "毛玻璃透明度"
                             description: "拖动滑块或悬停滚轮调整，每格 5%"
                             RowLayout {
-                                Slider {
+                                WxSlider {
                                     Layout.preferredWidth: 210
                                     from: 45
                                     to: 90
@@ -474,7 +515,7 @@ Popup {
                                     wheelEnabled: true
                                     value: WxTheme.glassOpacity
                                     enabled: WxTheme.glassEnabled
-                                    onMoved: root.applyIfUnlocked(function() {
+                                    onMoved: root.applyAppearance(function() {
                                         WxTheme.glassOpacity = Math.round(value)
                                         root.appBackend.settings.glassOpacity = Math.round(value)
                                     })
@@ -487,25 +528,6 @@ Popup {
                                     font.pixelSize: WxTheme.fontSizeSmall
                                     font.bold: true
                                 }
-                            }
-                        }
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 48
-                            Layout.leftMargin: 28
-                            Layout.rightMargin: 28
-                            Layout.topMargin: 18
-                            color: WxTheme.clSuccessSoft
-                            border.color: WxTheme.clPrimary
-                            radius: WxTheme.radiusSmall
-                            Text {
-                                anchors.fill: parent
-                                anchors.margins: 12
-                                text: "业务输入框拥有独立可读性下限，不会跟随窗口透明度变得难以辨认。"
-                                color: WxTheme.clTextPrimary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTiny
-                                verticalAlignment: Text.AlignVCenter
                             }
                         }
                         Item { Layout.fillHeight: true }
@@ -528,16 +550,17 @@ Popup {
                 height: 1
                 color: WxTheme.clSurfaceBorder
             }
-            Button {
+            WxButton {
                 anchors.right: parent.right
                 anchors.rightMargin: 16
                 anchors.verticalCenter: parent.verticalCenter
                 text: "完成"
+                primary: true
                 objectName: "settingsDoneButton"
                 onClicked: root.close()
                 contentItem: Text {
                     text: parent.text
-                    color: "white"
+                    color: WxTheme.clPrimaryInk
                     font.family: WxTheme.fontFamily
                     font.pixelSize: WxTheme.fontSizeSmall
                     font.bold: true
@@ -582,9 +605,10 @@ Popup {
         id: rowRoot
         property string title: ""
         property string description: ""
+        property bool stacked: false
         default property alias control: controlHost.data
         Layout.fillWidth: true
-        Layout.preferredHeight: 66
+        Layout.preferredHeight: stacked ? 112 : 80
         Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
@@ -597,9 +621,11 @@ Popup {
         Column {
             anchors.left: parent.left
             anchors.leftMargin: 28
-            anchors.right: controlHost.left
+            anchors.right: rowRoot.stacked ? parent.right : controlHost.left
             anchors.rightMargin: 16
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.verticalCenter: rowRoot.stacked ? undefined : parent.verticalCenter
+            anchors.top: rowRoot.stacked ? parent.top : undefined
+            anchors.topMargin: 14
             spacing: 3
             Text {
                 width: parent.width
@@ -623,8 +649,10 @@ Popup {
             id: controlHost
             anchors.right: parent.right
             anchors.rightMargin: 28
-            anchors.verticalCenter: parent.verticalCenter
-            width: childrenRect.width
+            anchors.verticalCenter: rowRoot.stacked ? undefined : parent.verticalCenter
+            anchors.bottom: rowRoot.stacked ? parent.bottom : undefined
+            anchors.bottomMargin: 12
+            width: rowRoot.stacked ? rowRoot.width - 56 : Math.min(childrenRect.width, rowRoot.width - 260)
             height: Math.max(34, childrenRect.height)
         }
     }

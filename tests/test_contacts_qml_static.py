@@ -80,7 +80,10 @@ def test_contacts_reuses_theme_and_existing_icons_without_large_radii():
     assert 'import "../theme"' in qml
     assert "WxIcon {" in qml
     assert "WxTheme.clToolbarFill" in qml
-    assert "WxTheme.clFieldFill" in qml
+    assert "WxTextField {" in qml
+    assert "WxComboBox {" in qml
+    shared_field = (ROOT / "qml" / "components" / "WxTextField.qml").read_text(encoding="utf-8")
+    assert "WxTheme.clFieldFill" in shared_field
     assert "Layout.minimumWidth: 0" in qml
     assert not re.search(r"WxTheme\.\w+\s*=(?!=)", qml)
     for value in re.findall(r"\bradius:\s*([^\n]+)", qml):

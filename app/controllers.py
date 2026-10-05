@@ -533,6 +533,7 @@ class FriendController(QObject):
 
 
 class SettingsController(QObject):
+    sidebarCollapsedChanged = Signal(bool)
     unknownPolicyChanged = Signal(str)
     agentRestartLimitChanged = Signal(int)
     wechatRecoveryModeChanged = Signal(str)
@@ -543,6 +544,10 @@ class SettingsController(QObject):
         super().__init__(parent)
         self._owner = owner
         self._settings = settings
+        stored_sidebar = settings.value("ui/sidebarCollapsed", False)
+        self._sidebar_collapsed = (
+            stored_sidebar is True or stored_sidebar == "true"
+        )
         self._unknown_policy = str(
             settings.value("task/unknownPolicy", "continue")
         )
@@ -552,6 +557,20 @@ class SettingsController(QObject):
         owner.isDarkChanged.connect(lambda _value: self.appearanceChanged.emit())
         owner.glassEnabledChanged.connect(lambda _value: self.appearanceChanged.emit())
         owner.glassOpacityChanged.connect(lambda _value: self.appearanceChanged.emit())
+
+    def _set_sidebar_collapsed(self, value):
+        value = bool(value)
+        if value == self._sidebar_collapsed:
+            return
+        self._sidebar_collapsed = value
+        self._settings.setValue("ui/sidebarCollapsed", value)
+        self._settings.sync()
+        self.sidebarCollapsedChanged.emit(value)
+
+    sidebarCollapsed = Property(
+        bool, lambda self: self._sidebar_collapsed, _set_sidebar_collapsed,
+        notify=sidebarCollapsedChanged,
+    )
 
     def _get_unknown_policy(self):
         return self._unknown_policy

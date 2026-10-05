@@ -45,7 +45,7 @@ Item {
         height: Math.max(36, contentLayout.height + WxTheme.spSmall * 2)
         width: Math.min(contentLayout.width + WxTheme.spLarge * 2, root.width - 40)
         
-        radius: height / 2
+        radius: WxTheme.radiusLarge
         color: WxTheme.clToastBg
         
         // Subtle outline for premium depth
@@ -65,7 +65,7 @@ Item {
                     return "●"
                 }
                 color: {
-                    if (root.type === "success") return WxTheme.clPrimary
+                    if (root.type === "success") return WxTheme.clSuccessText
                     if (root.type === "error") return WxTheme.clDangerNew
                     return "#a0a0a0"
                 }

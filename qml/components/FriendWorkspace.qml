@@ -25,7 +25,12 @@ Item {
     property int contextRow: -1
     property int currentRow: -1
     property int previewRevision: 0
-    readonly property real tableScale: Math.min(1, width / 1160)
+    readonly property int tableRowHeight: 40
+    readonly property var columnWidths: [44, 60, 112, 186, 126, 240, 180, 110]
+    readonly property int tableContentWidth: columnWidths.reduce(function(sum, value) { return sum + value }, 0)
+    property var activeCellEditor: null
+    property var activeTextMenu: null
+    property int currentFieldIndex: 0
     readonly property var currentPreview: {
         var revision = previewRevision
         return friendBackend && currentRow >= 0 ? friendBackend.model.preview(currentRow) : ({})
@@ -42,6 +47,7 @@ Item {
             ++root.previewRevision
         }
         function onModelReset() {
+            root.cancelCellEdit()
             root.currentRow = root.friendBackend.model.count > 0 ? 0 : -1
             ++root.previewRevision
             rangeStart.text = "1"
@@ -97,6 +103,7 @@ Item {
 
     function requestFriendStart() {
         if (root.interactionLocked || !root.friendSubmitAvailable) return
+        root.commitCellEdit()
         if (root.taskBackend && root.taskBackend.acceptanceEnabled) {
             root.startTask()
             return
@@ -112,12 +119,17 @@ Item {
     }
 
     onInteractionLockedChanged: {
-        if (root.interactionLocked)
+        if (root.interactionLocked) {
+            root.cancelCellEdit()
+            if (root.activeTextMenu) root.activeTextMenu.close()
+            friendContextMenu.close()
             friendSubmitConfirmDialog.close()
+        }
     }
 
     function appendManualRecord() {
         if (root.interactionLocked || !root.friendBackend) return -1
+        root.commitCellEdit()
         var row = root.friendBackend.model.appendEmptyRecord()
         if (row >= 0) {
             root.currentRow = row
@@ -134,6 +146,7 @@ Item {
     function removeContextRecord() {
         if (root.interactionLocked || !root.friendBackend || root.contextRow < 0)
             return false
+        root.cancelCellEdit()
         var removed = root.friendBackend.model.removeRecord(root.contextRow)
         root.contextRow = -1
         return removed
@@ -144,6 +157,7 @@ Item {
                 || root.friendBackend.model.count === 0)
             return false
         friendContextMenu.close()
+        root.cancelCellEdit()
         root.contextRow = -1
         return root.friendBackend.model.clearRecords()
     }
@@ -153,6 +167,131 @@ Item {
         root.contextRow = row >= 0 && row < root.friendBackend.model.count ? row : -1
         if (root.contextRow >= 0) root.currentRow = root.contextRow
         friendContextMenu.popup()
+    }
+
+    function cancelCellEdit() {
+        if (root.activeCellEditor) root.activeCellEditor.cancelEdit()
+    }
+
+    function commitCellEdit() {
+        if (root.activeCellEditor) root.activeCellEditor.commitEdit()
+    }
+
+    function activateEditor(editor, fieldIndex) {
+        if (root.interactionLocked) return false
+        if (root.activeCellEditor && root.activeCellEditor !== editor)
+            root.activeCellEditor.commitEdit()
+        root.activeCellEditor = editor
+        root.currentRow = editor.modelRow
+        root.currentFieldIndex = fieldIndex
+        return true
+    }
+
+    function moveToEditableCell(row, fieldIndex, direction) {
+        if (root.interactionLocked || !root.friendBackend) return
+        var position = row * 4 + fieldIndex + direction
+        if (position < 0 || position >= root.friendBackend.model.count * 4) return
+        var nextRow = Math.floor(position / 4)
+        var nextField = position % 4
+        root.currentRow = nextRow
+        root.currentFieldIndex = nextField
+        friendTable.positionViewAtRow(nextRow, TableView.Contain)
+        Qt.callLater(function() {
+            friendTable.forceLayout()
+            var cell = friendTable.itemAtCell(Qt.point(0, nextRow))
+            if (cell) {
+                var editor = cell.editors[nextField]
+                var point = editor.mapToItem(friendTable.contentItem, 0, 0)
+                if (point.x < friendTable.contentX) friendTable.contentX = point.x
+                else if (point.x + editor.width > friendTable.contentX + friendTable.width)
+                    friendTable.contentX = point.x + editor.width - friendTable.width
+                editor.beginEdit()
+            }
+        })
+    }
+
+    function openCellTextMenu(editor) {
+        if (root.interactionLocked) return
+        friendContextMenu.close()
+        root.activeTextMenu = editor.ContextMenu.menu
+        root.activeTextMenu.popup()
+    }
+
+    component FriendCellEditor: WxTextField {
+        id: cellEditor
+        property int modelRow: -1
+        property int fieldIndex: -1
+        property string fieldName: ""
+        property string committedText: ""
+        property bool editing: false
+        readOnly: !editing
+        enabled: !root.interactionLocked
+        selectByMouse: editing
+        implicitHeight: 36
+        font.family: WxTheme.fontFamily
+        font.pixelSize: WxTheme.fontSizeNormal
+        color: WxTheme.clTextPrimary
+        padding: 8
+        onCommittedTextChanged: { if (!editing) text = committedText }
+        Component.onCompleted: text = committedText
+        Component.onDestruction: { if (root.activeCellEditor === cellEditor) root.activeCellEditor = null }
+
+        function resumeFocus() { forceActiveFocus() }
+        function beginEdit() {
+            if (!root.activateEditor(cellEditor, fieldIndex)) return
+            text = committedText
+            editing = true
+            forceActiveFocus()
+            selectAll()
+        }
+        function commitEdit() {
+            if (!editing) return
+            var value = text
+            editing = false
+            if (root.activeCellEditor === cellEditor) root.activeCellEditor = null
+            if (!root.interactionLocked && root.friendBackend && value !== committedText)
+                root.friendBackend.model.setCell(modelRow, fieldName, value)
+            text = committedText
+        }
+        function cancelEdit() {
+            editing = false
+            text = committedText
+            if (root.activeCellEditor === cellEditor) root.activeCellEditor = null
+        }
+        onActiveFocusChanged: {
+            if (activeFocus) {
+                root.currentRow = modelRow
+                root.currentFieldIndex = fieldIndex
+            } else if (editing && !cellEditor.ContextMenu.menu.visible) commitEdit()
+        }
+        Keys.priority: Keys.BeforeItem
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (editing) commitEdit()
+                else beginEdit()
+                event.accepted = true
+            } else if (event.key === Qt.Key_Escape && editing) {
+                cancelEdit()
+                event.accepted = true
+            } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                commitEdit()
+                root.moveToEditableCell(modelRow, fieldIndex,
+                    event.key === Qt.Key_Backtab || (event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+                event.accepted = true
+            }
+        }
+        background: Rectangle {
+            color: cellEditor.editing ? WxTheme.clBgPrimary : "transparent"
+            border.color: cellEditor.activeFocus ? WxTheme.clBorderFocus : "transparent"
+            radius: WxTheme.radiusSmall
+        }
+        MouseArea {
+            anchors.fill: parent
+            visible: !cellEditor.editing
+            acceptedButtons: Qt.LeftButton
+            onClicked: cellEditor.forceActiveFocus()
+            onDoubleClicked: cellEditor.beginEdit()
+        }
     }
 
     StackLayout {
@@ -166,9 +305,8 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 70
-                    color: WxTheme.clPanelFill
-                    border.color: WxTheme.clSurfaceBorder
+                    Layout.preferredHeight: 64
+                    color: WxTheme.clBgPrimary
 
                     RowLayout {
                         anchors.fill: parent
@@ -179,7 +317,7 @@ Item {
                             Layout.fillWidth: true
                             spacing: 2
                             Text {
-                                text: "待添加账号"
+                                text: "自动发送好友申请"
                                 color: WxTheme.clTextPrimary
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTitle
@@ -187,8 +325,7 @@ Item {
                             }
                             Text {
                                 Layout.fillWidth: true
-                                text: "导入需包含姓名、账号；可右键新增/删除，单元格可编辑；每次最多 "
-                                    + (root.friendBackend ? root.friendBackend.batchLimit : 100) + " 条"
+                                text: "待添加账号"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
@@ -196,49 +333,23 @@ Item {
                             }
                         }
                         Item { Layout.fillWidth: true }
-                        Button {
+                        WxButton {
                             text: "下载模板"
+                            iconName: "export"
                             enabled: !root.interactionLocked
                             onClicked: {
                                 if (!root.interactionLocked) templateDialog.open()
                             }
-                            contentItem: Text {
-                                text: parent.text
-                                color: WxTheme.clTextPrimary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.hovered ? WxTheme.clBgHover : WxTheme.clToolbarFill
-                                border.color: WxTheme.clSurfaceBorder
-                                radius: WxTheme.radiusSmall
-                            }
                         }
-                        Button {
+                        WxButton {
                             objectName: "importFriendsButton"
                             Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                                 ? "importFriendsButton" : text
-                            text: "＋ 导入 Excel / CSV"
+                            text: "导入 Excel / CSV"
+                            iconName: "excel"
                             enabled: !root.interactionLocked
                             onClicked: {
                                 if (!root.interactionLocked) importDialog.open()
-                            }
-                            contentItem: Text {
-                                text: parent.text
-                                color: "white"
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                font.bold: true
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.enabled
-                                    ? (parent.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary)
-                                    : WxTheme.clPrimaryDisabled
-                                radius: WxTheme.radiusSmall
                             }
                         }
                     }
@@ -247,7 +358,7 @@ Item {
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 44
-                    color: WxTheme.clToolbarFill
+                    color: WxTheme.clBgPrimary
                     border.color: WxTheme.clSurfaceBorder
                     RowLayout {
                         anchors.fill: parent
@@ -269,8 +380,7 @@ Item {
                             visible: root.friendBackend && (root.friendBackend.model.importError || root.friendBackend.model.importWarning)
                             text: root.friendBackend ? (root.friendBackend.model.importError || root.friendBackend.model.importWarning) : ""
                             elide: Text.ElideRight
-                            ToolTip.visible: warningHover.containsMouse
-                            ToolTip.text: text
+                            WxToolTip { visible: warningHover.containsMouse; text: warningHover.parent.text }
                             MouseArea { id: warningHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                             color: root.friendBackend && root.friendBackend.model.importError ? WxTheme.clDangerNew : WxTheme.clWarningText
                             font.family: WxTheme.fontFamily
@@ -287,9 +397,13 @@ Item {
                             font.pixelSize: WxTheme.fontSizeSmall
                             font.bold: true
                         }
-                        Button {
+                        WxButton {
                             objectName: "clearFriendTableButton"
+                            Accessible.name: "清空表格"
                             text: "清空表格"
+                            iconName: "trash"
+                            tooltipText: "清空表格"
+                            quiet: true
                             enabled: root.friendBackend && root.friendBackend.model.count > 0
                                 && !root.interactionLocked
                             onClicked: {
@@ -301,16 +415,18 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 50
-                    color: WxTheme.clToolbarFill
+                    Layout.preferredHeight: width < 720 ? 92 : 48
+                    color: WxTheme.clBgPrimary
                     border.color: WxTheme.clSurfaceBorder
-                    RowLayout {
+                    GridLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 16
                         anchors.rightMargin: 16
-                        spacing: 8
+                        columns: parent.width < 720 ? 4 : 9
+                        columnSpacing: 8
+                        rowSpacing: 6
                         Text { text: "起始序号"; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeSmall }
-                        TextField {
+                        WxTextField {
                             id: rangeStart
                             objectName: "friendRangeStart"
                             Accessible.name: objectName
@@ -321,7 +437,7 @@ Item {
                             selectByMouse: true
                         }
                         Text { text: "结束序号"; color: WxTheme.clTextSecondary; font.pixelSize: WxTheme.fontSizeSmall }
-                        TextField {
+                        WxTextField {
                             id: rangeEnd
                             objectName: "friendRangeEnd"
                             Accessible.name: objectName
@@ -331,18 +447,20 @@ Item {
                             validator: IntValidator { bottom: 1; top: 1000000 }
                             selectByMouse: true
                         }
-                        Button {
+                        WxButton {
                             objectName: "selectFriendRangeButton"
                             Accessible.name: objectName
                             text: "选择区间"
+                            iconName: "check"
                             enabled: !!root.friendBackend && !root.interactionLocked
                             onClicked: root.friendBackend.model.selectRange(
                                 rangeStart.acceptableInput ? Number(rangeStart.text) : 0,
                                 rangeEnd.acceptableInput ? Number(rangeEnd.text) : 0)
                         }
-                        Button {
+                        WxButton {
                             objectName: "clearFriendSelectionButton"
                             text: "清除选择"
+                            quiet: true
                             enabled: !!root.friendBackend && !root.interactionLocked
                             onClicked: root.friendBackend.model.clearSelection()
                         }
@@ -352,8 +470,7 @@ Item {
                             elide: Text.ElideRight
                             color: WxTheme.clDangerNew
                             font.pixelSize: WxTheme.fontSizeSmall
-                            ToolTip.visible: rangeErrorHover.containsMouse && text.length > 0
-                            ToolTip.text: text
+                            WxToolTip { visible: rangeErrorHover.containsMouse && text.length > 0; text: rangeErrorHover.parent.text }
                             MouseArea { id: rangeErrorHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                         }
                     }
@@ -361,37 +478,48 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 38
-                    color: WxTheme.clToolbarFill
-                    border.color: WxTheme.clSurfaceBorder
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
+                    Layout.preferredHeight: 36
+                    color: WxTheme.clBgSecondary
+                    clip: true
+                    Row {
+                        objectName: "friendTableHeaderContent"
+                        x: -friendTable.contentX
+                        height: parent.height
                         spacing: 0
-                        Text { text: "选择"; Layout.preferredWidth: 44; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "序号"; Layout.preferredWidth: 40; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "姓名"; Layout.preferredWidth: 120 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "账号"; Layout.preferredWidth: 170 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "后缀（可自定义）"; Layout.preferredWidth: 130 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "打招呼语"; Layout.fillWidth: true; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "自动备注"; Layout.preferredWidth: 140 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                        Text { text: "状态"; Layout.preferredWidth: 140 * root.tableScale; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
+                        Repeater {
+                            model: ["选择", "序号", "姓名", "账号", "后缀", "打招呼语", "自动备注", "状态"]
+                            Text {
+                                required property int index
+                                required property string modelData
+                                width: root.columnWidths[index]
+                                height: 36
+                                leftPadding: 8
+                                verticalAlignment: Text.AlignVCenter
+                                text: modelData
+                                color: WxTheme.clTextSecondary
+                                font.family: WxTheme.fontFamily
+                                font.pixelSize: WxTheme.fontSizeSmall
+                            }
+                        }
                     }
                 }
 
                 Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    Rectangle { anchors.fill: parent; color: WxTheme.clBgPrimary }
                     TableView {
                         id: friendTable
                         objectName: "friendImportTable"
                         anchors.fill: parent
                         clip: true
                         model: root.friendBackend ? root.friendBackend.model : null
-                        columnWidthProvider: function(column) { return width }
-                        rowHeightProvider: function(row) { return 46 }
+                        columnWidthProvider: function(column) { return root.tableContentWidth }
+                        rowHeightProvider: function(row) { return root.tableRowHeight }
+                        ScrollBar.horizontal: WxScrollBar { objectName: "friendTableHorizontalScrollBar" }
+                        ScrollBar.vertical: WxScrollBar { objectName: "friendTableVerticalScrollBar" }
                         delegate: Rectangle {
+                            id: friendRow
                             required property int row
                             required property string itemId
                             required property string account
@@ -406,11 +534,21 @@ Item {
                             readonly property bool riskStoppedRow: !!(root.taskBackend
                                 && root.taskBackend.riskStopItemId === itemId
                                 && root.taskBackend.riskStopModelRow >= 0)
-                            implicitWidth: friendTable.width
-                            implicitHeight: 46
+                            readonly property var editors: [nameEditor, accountEditor, relationshipEditor, greetingEditor]
+                            implicitWidth: root.tableContentWidth
+                            implicitHeight: root.tableRowHeight
                             color: riskStoppedRow || !valid ? WxTheme.clDangerSoft
-                                : selected ? (row % 2 ? WxTheme.clRowAlternate : "transparent")
-                                : "transparent"
+                                : selected ? WxTheme.clBgSelected
+                                : root.currentRow === row ? WxTheme.clBgHover
+                                : row % 2 ? WxTheme.clRowAlternate : WxTheme.clBgPrimary
+                            TableView.onPooled: {
+                                for (var index = 0; index < editors.length; ++index) editors[index].cancelEdit()
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton
+                                onClicked: root.currentRow = friendRow.row
+                            }
                             Rectangle {
                                 width: 3
                                 height: parent.height
@@ -424,13 +562,14 @@ Item {
                                 height: 1
                                 color: WxTheme.clSurfaceBorder
                             }
-                            RowLayout {
+                            Row {
                                 anchors.fill: parent
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
                                 spacing: 0
-                                CheckBox {
-                                    Layout.preferredWidth: 44
+                                WxCheckBox {
+                                    objectName: "friendRowCheckBox"
+                                    Accessible.name: "选择第 " + (row + 1) + " 行"
+                                    width: root.columnWidths[0]
+                                    height: root.tableRowHeight
                                     checked: selected
                                     enabled: valid && !root.interactionLocked
                                     onToggled: {
@@ -440,57 +579,55 @@ Item {
                                 }
                                 Text {
                                     text: String(row + 1).padStart(2, "0")
-                                    Layout.preferredWidth: 40
+                                    width: root.columnWidths[1]
+                                    height: root.tableRowHeight
+                                    leftPadding: 8
+                                    verticalAlignment: Text.AlignVCenter
                                     color: riskStoppedRow ? WxTheme.clDangerNew : WxTheme.clTextSecondary
                                     font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    font.pixelSize: WxTheme.fontSizeNormal
                                 }
-                                TextField {
+                                FriendCellEditor {
+                                    id: nameEditor
                                     objectName: "friendNameField"
-                                    Layout.preferredWidth: 120 * root.tableScale
-                                    text: friendName
-                                    enabled: !root.interactionLocked
-                                    color: WxTheme.clTextPrimary
-                                    onActiveFocusChanged: { if (activeFocus) root.currentRow = row }
-                                    onTextEdited: {
-                                        if (!root.interactionLocked && root.friendBackend)
-                                            root.friendBackend.model.setCell(row, "name", text)
-                                    }
-                                    background: Rectangle {
-                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                        radius: WxTheme.radiusSmall
-                                    }
+                                    Accessible.name: "好友姓名"
+                                    width: root.columnWidths[2]
+                                    height: 36
+                                    y: 2
+                                    modelRow: friendRow.row
+                                    fieldIndex: 0
+                                    fieldName: "name"
+                                    committedText: friendName
                                 }
-                                TextField {
+                                FriendCellEditor {
+                                    id: accountEditor
                                     objectName: "friendAccountField"
                                     Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                                         ? "friendAccountField" : "好友账号"
-                                    Layout.preferredWidth: 170 * root.tableScale
-                                    readonly property int modelRow: parent.parent.row
-                                    text: account
-                                    onActiveFocusChanged: { if (activeFocus) root.currentRow = row }
-                                    enabled: !root.interactionLocked
-                                    color: WxTheme.clTextPrimary
-                                    font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeSmall
-                                    onEditingFinished: {
-                                        if (!root.interactionLocked && root.friendBackend)
-                                            root.friendBackend.model.setCell(modelRow, "account", text)
-                                    }
-                                    background: Rectangle {
-                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                        radius: WxTheme.radiusSmall
-                                    }
+                                    width: root.columnWidths[3]
+                                    height: 36
+                                    y: 2
+                                    modelRow: friendRow.row
+                                    fieldIndex: 1
+                                    fieldName: "account"
+                                    committedText: account
                                 }
                                 FriendRelationshipSelector {
+                                    id: relationshipEditor
                                     objectName: "friendRelationshipSelector"
-                                    Layout.preferredWidth: 130 * root.tableScale
+                                    Accessible.name: "好友后缀"
+                                    width: root.columnWidths[4]
+                                    height: 36
+                                    y: 2
+                                    modelRow: friendRow.row
+                                    cellMode: true
                                     choice: relationshipChoice
                                     options: root.friendBackend ? root.friendBackend.relationshipOptions : []
                                     enabled: !root.interactionLocked
                                     onActiveFocusChanged: { if (activeFocus) root.currentRow = row }
+                                    onEditStarted: root.activateEditor(relationshipEditor, 2)
+                                    onEditEnded: { if (root.activeCellEditor === relationshipEditor) root.activeCellEditor = null }
+                                    onNavigate: function(direction) { root.moveToEditableCell(row, 2, direction) }
                                     onChosen: function(value) {
                                         if (!root.interactionLocked && root.friendBackend) {
                                             root.currentRow = row
@@ -498,31 +635,25 @@ Item {
                                         }
                                     }
                                 }
-                                TextField {
+                                FriendCellEditor {
+                                    id: greetingEditor
                                     objectName: "friendGreetingField"
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 100
-                                    text: greeting
+                                    Accessible.name: "好友打招呼语"
+                                    width: root.columnWidths[5]
+                                    height: 36
+                                    y: 2
+                                    modelRow: friendRow.row
+                                    fieldIndex: 3
+                                    fieldName: "greeting"
+                                    committedText: greeting
                                     placeholderText: "使用全局默认值"
-                                    enabled: !root.interactionLocked
-                                    color: WxTheme.clTextPrimary
-                                    placeholderTextColor: WxTheme.clTextHint
-                                    font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeSmall
-                                    onActiveFocusChanged: { if (activeFocus) root.currentRow = row }
-                                    onTextEdited: {
-                                        if (!root.interactionLocked && root.friendBackend)
-                                            root.friendBackend.model.setCell(row, "greeting", text)
-                                    }
-                                    background: Rectangle {
-                                        color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
-                                        border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
-                                        radius: WxTheme.radiusSmall
-                                    }
                                 }
-                                TextField {
+                                WxTextField {
                                     objectName: "friendRemarkField"
-                                    Layout.preferredWidth: 140 * root.tableScale
+                                    Accessible.name: "自动备注"
+                                    width: root.columnWidths[6]
+                                    height: 36
+                                    y: 2
                                     text: remark
                                     readOnly: true
                                     selectByMouse: true
@@ -531,7 +662,7 @@ Item {
                                     color: WxTheme.clTextPrimary
                                     placeholderTextColor: WxTheme.clTextHint
                                     font.family: WxTheme.fontFamily
-                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    font.pixelSize: WxTheme.fontSizeNormal
                                     background: Rectangle {
                                         color: parent.activeFocus ? WxTheme.clFieldFill : "transparent"
                                         border.color: parent.activeFocus ? WxTheme.clBorderFocus : "transparent"
@@ -539,11 +670,11 @@ Item {
                                     }
                                 }
                                 Item {
-                                    Layout.preferredWidth: 140 * root.tableScale
-                                    Layout.fillHeight: true
+                                    width: root.columnWidths[7]
+                                    height: root.tableRowHeight
                                     Rectangle {
                                         anchors.centerIn: parent
-                                        width: Math.min(130, statusText.implicitWidth + 18)
+                                        width: Math.min(parent.width - 12, statusText.implicitWidth + 18)
                                         height: 24
                                         radius: WxTheme.radiusSmall
                                         color: !valid ? WxTheme.clDangerSoft
@@ -575,8 +706,7 @@ Item {
                                             font.pixelSize: WxTheme.fontSizeTiny
                                             font.bold: true
                                         }
-                                        ToolTip.visible: statusHover.containsMouse
-                                        ToolTip.text: error || statusText.text
+                                        WxToolTip { visible: statusHover.containsMouse; text: error || statusText.text }
                                         MouseArea {
                                             id: statusHover
                                             anchors.fill: parent
@@ -597,6 +727,15 @@ Item {
                         enabled: !root.interactionLocked
                         z: 10
                         onClicked: function(mouse) {
+                            if (root.activeCellEditor) {
+                                var editor = root.activeCellEditor
+                                var editorPosition = editor.mapFromItem(tableContextOverlay, mouse.x, mouse.y)
+                                if (editorPosition.x >= 0 && editorPosition.x < editor.width
+                                        && editorPosition.y >= 0 && editorPosition.y < editor.height) {
+                                    root.openCellTextMenu(editor.fieldIndex === undefined ? editor.contentItem : editor)
+                                    return
+                                }
+                            }
                             var contentPosition = friendTable.contentItem.mapFromItem(
                                 tableContextOverlay, mouse.x, mouse.y)
                             var cell = friendTable.cellAtPosition(
@@ -608,20 +747,22 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 132
-                    color: WxTheme.clPanelFill
+                    Layout.preferredHeight: width < 720 ? 168 : 120
+                    color: WxTheme.clBgPrimary
                     border.color: WxTheme.clSurfaceBorder
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 10
                         spacing: 4
-                        RowLayout {
+                        GridLayout {
                             Layout.fillWidth: true
-                            Text { text: "全局打招呼模板"; color: WxTheme.clTextPrimary }
-                            TextField {
+                            columns: root.width < 720 ? 2 : 4
+                            Text { text: "全局打招呼模板"; color: WxTheme.clTextSecondary; font.family: WxTheme.fontFamily; font.pixelSize: WxTheme.fontSizeSmall }
+                            WxTextField {
                                 id: globalGreetingField
                                 objectName: "globalFriendGreetingField"
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                                 placeholderText: "例如：{称呼}，您好，我是老师。"
                                 text: root.friendBackend ? root.friendBackend.defaultGreeting : ""
                                 enabled: !root.interactionLocked
@@ -630,9 +771,8 @@ Item {
                                         root.friendBackend.defaultGreeting = text
                                 }
                                 color: WxTheme.clTextPrimary
-                                background: WxGlassSurface { fillColor: WxTheme.clFieldFill; focused: parent.activeFocus }
                             }
-                            Text { text: "全局后缀"; color: WxTheme.clTextPrimary }
+                            Text { text: "全局后缀"; color: WxTheme.clTextSecondary; font.family: WxTheme.fontFamily; font.pixelSize: WxTheme.fontSizeSmall }
                             FriendRelationshipSelector {
                                 objectName: "globalRelationshipSelector"
                                 Layout.preferredWidth: 150
@@ -647,21 +787,16 @@ Item {
                             }
                         }
                         RowLayout {
-                            Text { text: "插入占位符："; color: WxTheme.clTextHint; font.pixelSize: WxTheme.fontSizeTiny }
-                            Button { text: "{姓名}"; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
-                            Button { text: "{后缀}"; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
-                            Button { objectName: "insertAddressPlaceholder"; text: "{称呼}"; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
-                            Text {
-                                text: "行内优先；两处均为空保留微信原文。后缀选“无”时仅保留姓名。"
-                                color: WxTheme.clTextHint
-                                font.pixelSize: WxTheme.fontSizeTiny
-                            }
+                            Text { text: "占位符"; color: WxTheme.clTextHint; font.family: WxTheme.fontFamily; font.pixelSize: WxTheme.fontSizeSmall }
+                            WxButton { text: "{姓名}"; quiet: true; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
+                            WxButton { text: "{后缀}"; quiet: true; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
+                            WxButton { objectName: "insertAddressPlaceholder"; text: "{称呼}"; quiet: true; enabled: !root.interactionLocked; onClicked: root.insertPlaceholder(text) }
                         }
                         Text {
                             objectName: "friendContentPreview"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            text: root.currentRow < 0 ? "点击任意行，预览最终打招呼语与备注"
+                            text: root.currentRow < 0 ? "未定位记录"
                                 : "第 " + (root.currentRow + 1) + " 行预览：" + (root.currentPreview.error
                                     || ("打招呼语：" + (root.currentPreview.greeting == null ? "保留微信原文" : root.currentPreview.greeting || "")
                                         + "    ｜    备注：" + (root.currentPreview.remark || "")))
@@ -669,8 +804,8 @@ Item {
                             elide: Text.ElideRight
                             color: root.currentPreview.error ? WxTheme.clDangerNew : WxTheme.clTextSecondary
                             font.pixelSize: WxTheme.fontSizeSmall
-                            ToolTip.visible: previewHover.containsMouse
-                            ToolTip.text: text
+                            font.family: WxTheme.fontFamily
+                            WxToolTip { visible: previewHover.containsMouse; text: previewHover.parent.text }
                             MouseArea { id: previewHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                         }
                     }
@@ -678,15 +813,18 @@ Item {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 70
-                    color: WxTheme.clToolbarFill
+                    Layout.preferredHeight: width < 900 ? 100 : 68
+                    color: WxTheme.clBgPrimary
                     border.color: WxTheme.clSurfaceBorder
-                    RowLayout {
+                    GridLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 16
                         anchors.rightMargin: 16
-                        spacing: 14
+                        columns: root.width < 900 ? 2 : 4
+                        columnSpacing: 14
+                        rowSpacing: 4
                         ColumnLayout {
+                            Layout.fillWidth: true
                             spacing: 2
                             Text {
                                 text: "执行前请核对预览"
@@ -702,7 +840,6 @@ Item {
                                 font.pixelSize: WxTheme.fontSizeTiny
                             }
                         }
-                        Item { Layout.fillWidth: true }
                         ColumnLayout {
                             spacing: 1
                             Text {
@@ -723,6 +860,7 @@ Item {
                             }
                         }
                         ColumnLayout {
+                            Layout.fillWidth: root.width < 900
                             spacing: 1
                             Text {
                                 text: root.taskBackend && root.taskBackend.acceptanceEnabled
@@ -748,8 +886,9 @@ Item {
                                 Layout.alignment: Qt.AlignRight
                             }
                         }
-                        Button {
+                        WxButton {
                             objectName: "startFriendsButton"
+                            Layout.alignment: Qt.AlignRight
                             Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
                                 ? "startFriendsButton" : text
                             text: (root.taskBackend && root.taskBackend.acceptanceEnabled
@@ -761,22 +900,8 @@ Item {
                                 && root.friendSubmitAvailable
                                 && root.friendBackend && root.friendBackend.model.selectedCount > 0
                             onClicked: root.requestFriendStart()
-                            implicitHeight: 38
-                            contentItem: Text {
-                                text: parent.text
-                                color: "white"
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                font.bold: true
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            background: Rectangle {
-                                color: parent.enabled
-                                    ? (parent.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary)
-                                    : WxTheme.clPrimaryDisabled
-                                radius: WxTheme.radiusMedium
-                            }
+                            primary: true
+                            iconName: "user_plus"
                         }
                     }
                 }
@@ -837,6 +962,16 @@ Item {
             height: visible ? implicitHeight : 0
             enabled: !root.interactionLocked
             onTriggered: root.removeContextRecord()
+        }
+    }
+
+    Connections {
+        target: root.activeTextMenu
+        function onClosed() {
+            Qt.callLater(function() {
+                if (!root.interactionLocked && root.activeCellEditor)
+                    root.activeCellEditor.resumeFocus()
+            })
         }
     }
 

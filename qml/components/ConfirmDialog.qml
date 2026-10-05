@@ -65,6 +65,7 @@ Rectangle {
 
             Text {
                 text: root.message
+                textFormat: Text.PlainText
                 font.family: WxTheme.fontFamily
                 font.pixelSize: WxTheme.fontSizeNormal
                 color: WxTheme.clTextPrimary
@@ -77,7 +78,7 @@ Rectangle {
                 Layout.alignment: Qt.AlignHCenter
                 spacing: WxTheme.spMedium
 
-                Button {
+                WxButton {
                     objectName: root.cancelButtonObjectName
                     text: root.cancelText
                     onClicked: {
@@ -85,56 +86,19 @@ Rectangle {
                         root.close()
                     }
 
-                    contentItem: Text {
-                        text: parent.text
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeNormal
-                        color: WxTheme.clTextPrimary
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-
-                    background: Rectangle {
-                        implicitWidth: 80
-                        implicitHeight: 32
-                        radius: height / 2
-                        color: parent.hovered ? WxTheme.clBgHover : WxTheme.clBgSecondary
-                        border.width: 1
-                        border.color: WxTheme.clBorder
-                    }
                 }
 
-                Button {
+                WxButton {
                     objectName: root.confirmButtonObjectName
                     text: root.confirmText
                     enabled: root.confirmEnabled
+                    primary: !root.isDanger
+                    danger: root.isDanger
                     onClicked: {
                         root.confirmed()
                         root.close()
                     }
 
-                    contentItem: Text {
-                        text: parent.text
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeNormal
-                        color: "#ffffff"
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-
-                    background: Rectangle {
-                        implicitWidth: 80
-                        implicitHeight: 32
-                        radius: height / 2
-                        color: {
-                            if (parent.pressed) {
-                                return root.isDanger ? WxTheme.clDangerNewHover : WxTheme.clPrimaryPress
-                            }
-                            return parent.hovered
-                                ? (root.isDanger ? WxTheme.clDangerNewHover : WxTheme.clPrimaryHover)
-                                : (root.isDanger ? WxTheme.clDangerNew : WxTheme.clPrimary)
-                        }
-                    }
                 }
             }
         }

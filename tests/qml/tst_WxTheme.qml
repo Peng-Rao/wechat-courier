@@ -12,15 +12,15 @@ TestCase {
     }
 
     function test_primary_color() {
-        compare(WxTheme.clPrimary, "#07c160")
+        compare(WxTheme.clPrimary, "#f87c40")
     }
 
     function test_primary_hover_color() {
-        compare(WxTheme.clPrimaryHover, "#06ad56")
+        compare(WxTheme.clPrimaryHover, "#fa8b54")
     }
 
     function test_bubble_bg_color() {
-        compare(WxTheme.clBubbleBg, "#95ec69")
+        compare(WxTheme.clBubbleBg, "#ffffff")
     }
 
     function test_bg_primary_color() {
@@ -28,15 +28,15 @@ TestCase {
     }
 
     function test_bg_secondary_color() {
-        compare(WxTheme.clBgSecondary, "#f7f7f7")
+        compare(WxTheme.clBgSecondary, "#f5f5f7")
     }
 
     function test_text_primary_color() {
-        compare(WxTheme.clTextPrimary, "#191919")
+        compare(WxTheme.clTextPrimary, "#25262a")
     }
 
     function test_text_hint_color() {
-        compare(WxTheme.clTextHint, "#999999")
+        compare(WxTheme.clTextHint, "#8c8d96")
     }
 
     function test_danger_color() {
@@ -44,15 +44,15 @@ TestCase {
     }
 
     function test_font_family() {
-        compare(WxTheme.fontFamily, "Microsoft YaHei")
+        compare(WxTheme.fontFamily, "Microsoft YaHei UI")
     }
 
     function test_font_size_normal() {
-        compare(WxTheme.fontSizeNormal, 13)
+        compare(WxTheme.fontSizeNormal, 14)
     }
 
     function test_font_size_tiny() {
-        compare(WxTheme.fontSizeTiny, 11)
+        compare(WxTheme.fontSizeTiny, 12)
     }
 
     function test_radius_small() {
@@ -73,11 +73,11 @@ TestCase {
 
     // Phase 2 新增常量测试
     function test_danger_new_color() {
-        compare(WxTheme.clDangerNew, "#fa5151")
+        compare(WxTheme.clDangerNew, "#cc434b")
     }
 
     function test_bg_input_color() {
-        compare(WxTheme.clBgInput, "#f5f5f5")
+        compare(WxTheme.clBgInput, "#ffffff")
     }
 
     function test_toast_bg_color() {
@@ -98,11 +98,11 @@ TestCase {
 
     // Phase 1 (V4) 新增常量测试
     function test_chat_bg_color() {
-        compare(WxTheme.clChatBg, "#ebebeb")
+        compare(WxTheme.clChatBg, "#f5f5f7")
     }
 
     function test_tab_active_color() {
-        compare(WxTheme.clTabActive, "#07c160")
+        compare(WxTheme.clTabActive, "#f87c40")
     }
 
     function test_progress_track_color() {
@@ -114,7 +114,7 @@ TestCase {
     }
 
     function test_control_height() {
-        compare(WxTheme.controlHeight, 28)
+        compare(WxTheme.controlHeight, 36)
     }
 
     function test_tab_height() {
@@ -138,7 +138,7 @@ TestCase {
     }
 
     function test_sp_xlarge() {
-        compare(WxTheme.spXLarge, 20)
+        compare(WxTheme.spXLarge, 24)
     }
 
     function test_glass_defaults() {
@@ -185,6 +185,6 @@ TestCase {
         compare(WxTheme.clPanelFill, WxTheme.clBgPrimary)
         compare(WxTheme.clFieldFill, WxTheme.clBgInput)
         compare(WxTheme.clToolbarFill, WxTheme.clBgPrimary)
-        compare(WxTheme.clDropZoneFill, WxTheme.clBgInput)
+        compare(WxTheme.clDropZoneFill, WxTheme.clBgSecondary)
     }
 }

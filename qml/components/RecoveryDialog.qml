@@ -79,39 +79,15 @@ Dialog {
             anchors.rightMargin: 16
             spacing: 10
             Item { Layout.fillWidth: true }
-            Button {
+            WxButton {
                 text: "停止任务"
+                danger: true
                 onClicked: if (root.taskBackend) root.taskBackend.stopRecovery()
-                contentItem: Text {
-                    text: parent.text
-                    color: WxTheme.clTextPrimary
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeSmall
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: parent.hovered ? WxTheme.clBgHover : "transparent"
-                    border.color: WxTheme.clSurfaceBorder
-                    radius: WxTheme.radiusSmall
-                }
             }
-            Button {
+            WxButton {
                 text: "重启微信并继续"
+                primary: true
                 onClicked: if (root.taskBackend) root.taskBackend.approveWechatRestart()
-                contentItem: Text {
-                    text: parent.text
-                    color: "white"
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeSmall
-                    font.bold: true
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                background: Rectangle {
-                    color: parent.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary
-                    radius: WxTheme.radiusSmall
-                }
             }
         }
     }

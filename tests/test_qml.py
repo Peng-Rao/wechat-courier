@@ -16,8 +16,7 @@ QML_RUNNER = os.path.join(os.path.dirname(__file__), "run_qml_tests.py")
 def test_qml_suite():
     """运行 tests/qml/ 下的所有 QML TestCase。
 
-    需要系统中安装 Qt 6.x 并提供 qmltestrunner 可执行文件。
-    如果找不到 qmltestrunner，测试会被跳过。
+    使用应用自带的 PySide6 QtQuickTest，避免系统 Qt 版本不一致。
     """
     result = subprocess.run(
         [sys.executable, QML_RUNNER],
@@ -33,6 +32,4 @@ def test_qml_suite():
         print(result.stderr, file=sys.stderr)
 
     if result.returncode != 0:
-        if "找不到 qmltestrunner" in (result.stdout + result.stderr):
-            pytest.skip("qmltestrunner 未找到，跳过 QML 测试")
         pytest.fail(f"QML 测试失败 (exit code {result.returncode})")

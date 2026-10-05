@@ -12,8 +12,9 @@ MenuItem {
     property string shortcutText: ""
 
     font.family: WxTheme.fontFamily
-    font.pixelSize: WxTheme.fontSizeSmall
-    implicitHeight: 32
+    font.pixelSize: WxTheme.fontSizeNormal
+    implicitHeight: 34
+    opacity: enabled ? 1 : 0.4
 
     contentItem: RowLayout {
         spacing: WxTheme.spSmall
@@ -31,7 +32,7 @@ MenuItem {
                 anchors.centerIn: parent
                 iconSource: root.iconSource
                 iconSize: 14
-                iconColor: root.hovered ? root.hoverIconColor : root.iconColor
+                iconColor: root.highlighted ? root.hoverIconColor : root.iconColor
                 visible: root.iconSource !== ""
                 hoverScale: false
             }
@@ -40,7 +41,7 @@ MenuItem {
         Text {
             text: root.text
             font: root.font
-            color: root.hovered ? WxTheme.clPrimary : WxTheme.clTextPrimary
+            color: root.highlighted ? WxTheme.clAccentText : WxTheme.clTextPrimary
             Layout.fillWidth: true
             verticalAlignment: Text.AlignVCenter
 
@@ -61,7 +62,7 @@ MenuItem {
     }
 
     background: Rectangle {
-        color: root.hovered ? WxTheme.clBgSelected : "transparent"
+        color: root.highlighted ? WxTheme.clBgSelected : root.hovered ? WxTheme.clBgHover : "transparent"
         radius: WxTheme.radiusSmall
 
         Behavior on color {

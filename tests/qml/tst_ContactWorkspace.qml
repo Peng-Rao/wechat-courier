@@ -106,6 +106,11 @@ TestCase {
     }
 
     function click(name) {
+        if (["contactSourceField", "contactSourceFolderButton", "contactDetectDirectoryButton"].indexOf(name) >= 0
+                && !control("contactSourcePanel").visible) {
+            click("contactSourceToggleButton")
+            tryCompare(control("contactSourcePanel"), "visible", true)
+        }
         host.Window.window.requestActivate()
         wait(20)
         var item = control(name)
@@ -194,6 +199,73 @@ TestCase {
         compare(control("contactExportButton").enabled, false)
         compare(control("contactAccountSelector").count, 0)
         compare(control("contactCancelButton").enabled, false)
+    }
+
+    function test_source_drawer_defaults_closed_and_preserves_directory_and_filters() {
+        loadRows(60)
+        var source = control("contactSourcePanel")
+        var toggle = control("contactSourceToggleButton")
+        compare(source.visible, false)
+        compare(toggle.checked, false)
+        var tableHeight = control("contactTable").height
+        click("contactSourceToggleButton")
+        tryCompare(source, "visible", true)
+        compare(toggle.checked, true)
+        tryVerify(function() { return control("contactTable").height < tableHeight })
+        click("contactSourceField")
+        keyClick(Qt.Key_A, Qt.ControlModifier)
+        typeText("D:/retained")
+        click("contactSourceToggleButton")
+        tryCompare(source, "visible", false)
+        tryCompare(contacts, "sourceDirectory", "D:/retained")
+        compare(contacts.readCalls, 0)
+        compare(contacts.detectCalls, 0)
+        compare(control("contactSearchField").enabled, true)
+        click("contactSourceToggleButton")
+        compare(control("contactSourceField").text, "D:/retained")
+    }
+
+    function test_table_rows_and_header_share_40px_and_opaque_background() {
+        loadRows(60)
+        compare(control("contactHeader").height, 40)
+        compare(control("contactCell-0-0").height, 40)
+        compare(control("contactTable").contentHeight, 2400)
+        compare(control("contactTableSurface").color.a, 1)
+        compare(control("contactCell-0-0").color.a, 1)
+        compare(control("contactCell-1-0").color.a, 1)
+        compare(control("contactReadButton").height, 36)
+        compare(control("contactAccountSelector").height, 36)
+        compare(control("contactSearchField").height, 36)
+    }
+
+    function test_shared_commands_preserve_accessible_names() {
+        for (var entry of [
+            ["contactRefreshButton", "刷新账号"],
+            ["contactReadButton", "读取联系人"],
+            ["contactDetectDirectoryButton", "自动检测"],
+            ["contactSourceFolderButton", "选择数据目录"],
+            ["contactClearButton", "清空联系人"],
+            ["contactOpenExportFolderButton", "打开导出目录"],
+            ["contactExportButton", "导出"],
+            ["contactCancelButton", "取消"]
+        ]) compare(control(entry[0]).Accessible.name, entry[1], entry[0])
+    }
+
+    function test_multiline_cell_does_not_paint_into_adjacent_rows() {
+        loadRows(2)
+        var row = contactsModel.getRow(0)
+        row.nickname = "First line\nSecond line\nThird line"
+        contactsModel.setRow(0, row)
+        var label = control("contactCellText-0-2")
+        tryCompare(label, "text", row.nickname)
+        tryCompare(label, "lineCount", 1)
+        var cell = control("contactCell-0-2")
+        compare(cell.height, 40)
+        var tooltip = null
+        for (var item of cell.data)
+            if (item.objectName === "contactCellToolTip-0-2") tooltip = item
+        verify(tooltip !== null)
+        compare(tooltip.text, "复制单元格: " + row.nickname)
     }
 
     function test_smoke_backend_without_contacts_is_safe() {
@@ -405,7 +477,8 @@ TestCase {
         wait(40)
         compare(combo.width, 130)
         compare(combo.contentItem.text, data.label)
-        compare(combo.contentItem.truncated, false, data.label + " must remain readable")
+        verify(combo.contentItem.contentWidth <= combo.contentItem.width,
+               data.label + " must remain readable")
     }
 
     function test_elevation_is_explicit_and_only_offered_when_required() {
@@ -494,7 +567,7 @@ TestCase {
         var table = control("contactTable")
         verify(table.contentHeight > table.height)
         verify(table.contentWidth > table.width)
-        table.contentY = 20 * 34
+        table.contentY = 20 * 40
         table.contentX = table.contentWidth - table.width
         wait(60)
         var cell = control("contactCell-20-5")
@@ -520,7 +593,7 @@ TestCase {
             compare(table.model, contactsModel)
             tryCompare(table, "rows", 80, 1000)
             compare(table.columns, 6)
-            compare(table.contentHeight, 2720)
+            compare(table.contentHeight, 3200)
             verify(control("contactVerticalScrollBar").size < 1)
             verify(control("contactHorizontalScrollBar").size < 1)
             verify(control("contactSearchField").enabled)
@@ -663,6 +736,8 @@ TestCase {
 
     function test_compact_layout_data() {
         return [
+            {tag: "1320-with-sidebar", width: 1104, height: 800, minimumTableHeight: 450},
+            {tag: "960-with-sidebar", width: 744, height: 600, minimumTableHeight: 250},
             {tag: "960x680", width: 960, height: 680, minimumTableHeight: 150},
             {tag: "125-percent-dpi", width: 768, height: 544, minimumTableHeight: 150},
             {tag: "150-percent-dpi", width: 640, height: 453, minimumTableHeight: 150},
@@ -679,6 +754,7 @@ TestCase {
         contacts.accounts = [{accountId: "first", label: new Array(100).join("long account "), directory: "D:/first"}]
         host.width = data.width
         host.height = data.height
+        click("contactSourceToggleButton")
         wait(100)
         var names = ["contactSourceField", "contactSourceFolderButton", "contactDetectDirectoryButton",
                      "contactAccountSelector",

@@ -15,8 +15,7 @@ Button {
     padding: 0
     hoverEnabled: true
     Accessible.name: (imageAvailable ? "预览图片 " : "打开附件 ") + (attachment.name || "")
-    ToolTip.visible: hovered
-    ToolTip.text: attachment.name || ""
+    WxToolTip { visible: root.hovered; text: root.attachment.name || "" }
     onClicked: {
         if (imageAvailable) imageRequested(attachment.url, attachment.name || "")
         else fileRequested(fileIndex)

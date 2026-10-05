@@ -144,7 +144,8 @@ def _exercise_context_menu() -> None:
     account_field = _find_item(table.property("contentItem"), "friendAccountField")
     assert account_field is not None
     assert account_field.property("modelRow") == 0, account_field.property("modelRow")
-    _click(view, account_field, QPoint(20, int(account_field.height() / 2)), Qt.LeftButton)
+    QTest.mouseDClick(view, Qt.LeftButton, Qt.NoModifier,
+                     _view_point(account_field, view, QPoint(20, int(account_field.height() / 2))))
     assert account_field.property("activeFocus") is True
     QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
     _type(view, "wxidedited")
@@ -161,7 +162,8 @@ def _exercise_context_menu() -> None:
     global_greeting = root.findChild(QQuickItem, "globalFriendGreetingField")
     assert all(item is not None for item in (name_field, relationship, remark, preview, global_relationship))
     assert remark.property("readOnly") is True
-    _click(view, name_field, QPoint(20, 15), Qt.LeftButton)
+    QTest.mouseDClick(view, Qt.LeftButton, Qt.NoModifier,
+                     _view_point(name_field, view, QPoint(20, 15)))
     QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
     _type(view, "Student")
     QTest.keyClick(view, Qt.Key_Return)
@@ -170,6 +172,8 @@ def _exercise_context_menu() -> None:
     assert "student妈妈" in preview.property("text")
 
     # Exercise the real popup: first item is global, second is explicit none.
+    QTest.mouseDClick(view, Qt.LeftButton, Qt.NoModifier,
+                     _view_point(relationship, view, QPoint(20, 15)))
     _click(view, relationship, QPoint(int(relationship.width()) - 12, 15), Qt.LeftButton)
     QTest.keyClick(view, Qt.Key_Home)
     QTest.keyClick(view, Qt.Key_Down)
@@ -184,7 +188,8 @@ def _exercise_context_menu() -> None:
     assert remark.property("text") == "student"
 
     # Custom entry uses the ComboBox's editable input, not a fake model setter.
-    _click(view, relationship, QPoint(25, 15), Qt.LeftButton)
+    QTest.mouseDClick(view, Qt.LeftButton, Qt.NoModifier,
+                     _view_point(relationship, view, QPoint(25, 15)))
     QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
     _type(view, "Guardian")
     QTest.keyClick(view, Qt.Key_Return)
@@ -258,7 +263,7 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     target_row = 10
     target_account = model.record_at(target_row).account
-    table.setProperty("contentY", target_row * 46)
+    table.setProperty("contentY", target_row * 40)
     QTest.qWait(100)
     _click(view, table, QPoint(30, 23), Qt.RightButton)
     assert root.property("contextRow") == target_row
@@ -270,8 +275,8 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     last_row = model.count - 1
     content_y = float(table.property("contentY"))
-    assert content_y <= last_row * 46
-    assert content_y + table.height() >= (last_row + 1) * 46, (content_y, table.height(), last_row)
+    assert content_y <= last_row * 40
+    assert content_y + table.height() >= (last_row + 1) * 40, (content_y, table.height(), last_row)
 
     # Replacing a long, scrolled table with a short import must show its first row.
     from app.friend_import import load_friend_records

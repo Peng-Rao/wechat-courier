@@ -53,6 +53,9 @@ TestCase {
         property string kind: ""
         property string error: ""
         property bool acceptanceEnabled: false
+        property int riskStopModelRow: -1
+        property string riskStopItemId: ""
+        property string riskStopKind: "friend_frequency"
         property int startCalls: 0
         function startFriends() {
             ++startCalls
@@ -108,6 +111,8 @@ TestCase {
         taskBackend.kind = ""
         taskBackend.startCalls = 0
         taskBackend.acceptanceEnabled = false
+        taskBackend.riskStopModelRow = -1
+        taskBackend.riskStopItemId = ""
         agentBackend.friendSubmitEnabled = true
         workspace.monitorDismissed = false
         if (submitDialog() !== null)
@@ -119,6 +124,13 @@ TestCase {
                              error: "", status: "pending", selected: false })
         friendModel.selectedCount = 1
         wait(100)
+        table().forceLayout()
+        table().positionViewAtRow(0, TableView.AlignTop)
+        table().contentX = 0
+        tryVerify(function() {
+            var firstCell = table().itemAtCell(Qt.point(0, 0))
+            return firstCell !== null && Math.abs(firstCell.y - table().contentY) < 1
+        })
         workspaceWindow.requestActivate()
         tryCompare(workspaceWindow, "active", true)
     }
@@ -190,6 +202,41 @@ TestCase {
 
         workspace.confirmFriendSubmission()
         compare(taskBackend.startCalls, 0)
+    }
+
+    function test_acceptance_mode_starts_precheck_without_submission_confirmation() {
+        taskBackend.acceptanceEnabled = true
+        agentBackend.friendSubmitEnabled = false
+        verify(startButton().enabled)
+        mouseClick(startButton(), 20, Math.floor(startButton().height / 2), Qt.LeftButton)
+        compare(taskBackend.startCalls, 1)
+        compare(submitDialog().visible, false)
+    }
+
+    function test_missing_submit_capability_blocks_actual_submission() {
+        agentBackend.friendSubmitEnabled = false
+        verify(!startButton().enabled)
+        workspace.requestFriendStart()
+        workspace.confirmFriendSubmission()
+        compare(taskBackend.startCalls, 0)
+        compare(submitDialog().visible, false)
+    }
+
+    function test_return_to_editor_locates_and_highlights_original_risk_record() {
+        for (var row = friendModel.count; row < 30; ++row) {
+            friendModel.append({ itemId: "risk-" + row, friendName: "示例学生", relationshipChoice: "使用全局",
+                                 account: "offline_" + row, greeting: "", remark: "", valid: true,
+                                 error: "", status: "stopped", selected: false })
+        }
+        taskBackend.riskStopModelRow = 12
+        taskBackend.riskStopItemId = "risk-12"
+        workspace.dismissMonitor()
+        wait(100)
+        compare(workspace.currentRow, 12)
+        verify(table().contentY > 0)
+        var cell = table().itemAtCell(Qt.point(0, 12))
+        verify(cell !== null)
+        compare(cell.riskStoppedRow, true)
     }
 
     function test_row_right_click_adds_a_row() {
@@ -283,8 +330,11 @@ TestCase {
         wait(100)
         var targetRow = 10
         var targetAccount = friendModel.get(targetRow).account
-        table().contentY = targetRow * 46
-        wait(100)
+        table().positionViewAtRow(targetRow, TableView.AlignTop)
+        tryVerify(function() {
+            var targetCell = table().itemAtCell(Qt.point(0, targetRow))
+            return targetCell !== null && Math.abs(targetCell.y - table().contentY) < 1
+        })
         mouseClick(contextOverlay(), 30, 23, Qt.RightButton)
         tryCompare(menu(), "visible", true)
         compare(workspace.contextRow, targetRow)
@@ -298,7 +348,7 @@ TestCase {
         compare(workspace.appendManualRecord(), 29)
         wait(100)
         var lastRow = friendModel.count - 1
-        verify(table().contentY <= lastRow * 46)
-        verify(table().contentY + table().height >= (lastRow + 1) * 46)
+        verify(table().contentY <= lastRow * 40)
+        verify(table().contentY + table().height >= (lastRow + 1) * 40)
     }
 }

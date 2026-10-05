@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Window
+import QtQuick.Controls.Basic
 import "../theme"
 
 Rectangle {
@@ -11,6 +12,22 @@ Rectangle {
     property var openSettings: null
     property bool settingsEnabled: true
     property bool layoutMenuOpen: false
+
+    readonly property string healthText: !root.titleBackend ? "自动化未就绪"
+        : root.titleBackend.agent.reasonCode === "AGENT_ALREADY_RUNNING" ? "其他实例占用"
+        : root.titleBackend.agent.gateRecoveryActive && root.titleBackend.agent.recoveryStatus
+            ? root.titleBackend.agent.recoveryStatus
+        : root.titleBackend.agent.connected === false ? "Agent 离线"
+        : root.titleBackend.agent.processDetected && root.titleBackend.agent.versionSupported === false
+            ? "微信版本不受支持"
+        : root.titleBackend.task && root.titleBackend.task.automationStatus
+            ? root.titleBackend.task.automationStatus
+        : root.titleBackend.agent.automationReady ? "自动化已就绪"
+        : root.titleBackend.agent.processDetected && !root.titleBackend.agent.windowResponsive ? "微信窗口无响应"
+        : root.titleBackend.agent.processDetected && (!root.titleBackend.agent.windowEnabled || root.titleBackend.agent.blockingWindow) ? "微信窗口被阻挡"
+        : root.titleBackend.agent.canStartTask && !root.titleBackend.agent.sessionReady ? "会话待恢复" : "自动化未就绪"
+    readonly property bool healthBlocked: /(离线|无响应|被阻挡|不受支持|占用|失败)/.test(healthText)
+    readonly property bool healthRecovering: !healthBlocked && /(恢复|未就绪|登录)/.test(healthText)
 
     height: 40
     color: WxTheme.clTitleBarBg
@@ -77,86 +94,38 @@ Rectangle {
             elide: Text.ElideRight
         }
 
-        RowLayout {
-            visible: root.width >= 900 && root.titleBackend && root.titleBackend.agent
-            spacing: 10
-
-            RowLayout {
-                spacing: 6
+        WxButton {
+            id: healthTrigger
+            objectName: "healthSummaryButton"
+            quiet: true
+            Layout.preferredWidth: 130
+            Layout.maximumWidth: 130
+            Layout.preferredHeight: 30
+            tooltipText: root.healthText
+            onClicked: healthPopup.open()
+            contentItem: RowLayout {
+                spacing: 8
                 Rectangle {
-                    width: 8
-                    height: 8
-                    radius: 4
-                    color: root.titleBackend && root.titleBackend.agent.connected
-                        ? WxTheme.clInfo : WxTheme.clTextHint
-                }
-                Text {
-                    text: root.titleBackend && root.titleBackend.agent.reasonCode === "AGENT_ALREADY_RUNNING"
-                        ? "其他实例占用"
-                        : root.titleBackend && root.titleBackend.agent.connected
-                            ? "Agent 在线" : "Agent 离线"
-                    color: WxTheme.clTextSecondary
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeTiny
-                }
-            }
-
-            RowLayout {
-                spacing: 6
-                Rectangle {
-                    width: 8
-                    height: 8
-                    radius: 4
-                    color: root.titleBackend && root.titleBackend.agent.versionSupported
-                        ? WxTheme.clPrimary
-                        : (root.titleBackend && root.titleBackend.agent.processDetected
-                            ? WxTheme.clWarningText : WxTheme.clTextHint)
-                }
-                Text {
-                    text: !root.titleBackend || !root.titleBackend.agent.processDetected
-                        ? "未检测到微信"
-                        : root.titleBackend.agent.versionSupported
-                            ? "微信 " + root.titleBackend.agent.wechatVersion + " 版本受支持"
-                            : "微信 " + root.titleBackend.agent.wechatVersion + " 不受支持"
-                    color: WxTheme.clTextSecondary
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeTiny
-                }
-            }
-
-            RowLayout {
-                spacing: 6
-                Rectangle {
-                    width: 8
-                    height: 8
-                    radius: 4
-                    color: root.titleBackend && (root.titleBackend.agent.automationReady || (root.titleBackend.task && root.titleBackend.task.taskWindowReady))
-                        ? WxTheme.clPrimary
-                        : (root.titleBackend && root.titleBackend.agent.processDetected
-                            && !root.titleBackend.agent.windowResponsive
-                            ? WxTheme.clDangerNew : WxTheme.clTextHint)
+                    width: 7; height: 7; radius: 3.5
+                    color: root.healthBlocked ? WxTheme.clDangerNew : root.healthRecovering ? WxTheme.clWarningText
+                        : root.titleBackend && root.titleBackend.task && root.titleBackend.task.active
+                        ? WxTheme.clPrimary : root.titleBackend && root.titleBackend.agent.automationReady
+                            ? WxTheme.clSuccessText : WxTheme.clWarningText
                 }
                 Text {
                     objectName: "titleAutomationHealth"
                     Accessible.role: Accessible.StaticText
                     Accessible.name: text
-                    text: root.titleBackend && root.titleBackend.task && root.titleBackend.task.automationStatus
-                        ? root.titleBackend.task.automationStatus
-                        : root.titleBackend && root.titleBackend.agent.automationReady
-                        ? "自动化已就绪"
-                        : root.titleBackend && root.titleBackend.agent.processDetected
-                            && !root.titleBackend.agent.windowResponsive
-                            ? "微信窗口无响应"
-                            : root.titleBackend && root.titleBackend.agent.processDetected
-                                && (!root.titleBackend.agent.windowEnabled || root.titleBackend.agent.blockingWindow)
-                                ? "微信窗口被阻挡"
-                                : root.titleBackend && root.titleBackend.agent.canStartTask
-                                    && !root.titleBackend.agent.sessionReady
-                                    ? "会话待恢复" : "自动化未就绪"
-                    color: WxTheme.clTextSecondary
+                    text: root.healthText
+                    color: root.healthBlocked ? WxTheme.clDangerNew : root.healthRecovering ? WxTheme.clWarningText : WxTheme.clTextSecondary
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
                     font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeTiny
+                    font.pixelSize: 12
                 }
+                WxIcon { iconSource: "../icons/arrow_down.svg"; iconSize: 12; iconColor: WxTheme.clTextSecondary; hoverScale: false }
             }
         }
 
@@ -281,6 +250,44 @@ Rectangle {
                         if (root.window) root.window.close()
                     }
                 }
+            }
+        }
+    }
+
+
+    Popup {
+        id: healthPopup
+        objectName: "healthDetailsPopup"
+        popupType: Popup.Item
+        x: Math.max(8, root.width - width - 150)
+        y: root.height + 4
+        width: 310
+        padding: 16
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle { radius: 8; color: WxTheme.clBgPrimary; border.color: WxTheme.clBorderStrong }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Text { text: "连接状态"; font.family: WxTheme.fontFamily; font.pixelSize: 14; font.bold: true; color: WxTheme.clTextPrimary }
+            Repeater {
+                model: [
+                    ["Agent", root.titleBackend && root.titleBackend.agent.connected ? "在线" : root.healthText === "其他实例占用" ? root.healthText : "离线"],
+                    ["微信版本", !root.titleBackend || !root.titleBackend.agent.processDetected ? "未检测到微信" : root.titleBackend.agent.wechatVersion + (root.titleBackend.agent.versionSupported ? " · 受支持" : " · 不受支持")],
+                    ["自动化", root.healthText]
+                ]
+                RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Text { text: parent.modelData[0]; font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clTextSecondary; Layout.fillWidth: true }
+                    Text { text: parent.modelData[1]; font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clTextPrimary; Layout.maximumWidth: 220; wrapMode: Text.Wrap }
+                }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: WxTheme.clBorder }
+            Text {
+                Layout.fillWidth: true
+                text: root.titleBackend ? (root.titleBackend.agent.degradedReason || "") : ""
+                visible: text !== ""
+                wrapMode: Text.Wrap
+                font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clWarningText
             }
         }
     }

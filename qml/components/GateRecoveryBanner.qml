@@ -29,7 +29,7 @@ Rectangle {
             font.family: WxTheme.fontFamily
             font.pixelSize: WxTheme.fontSizeTiny
         }
-        Button {
+        WxButton {
             objectName: "gateInspectButton"
             text: "检测恢复"
             enabled: !root.busy && !root.contactsBusy
@@ -38,13 +38,13 @@ Rectangle {
                 else root.agent.restart()
             }
         }
-        Button {
+        WxButton {
             objectName: "gateCancelButton"
             text: "取消恢复"
             visible: root.busy
             onClicked: root.agent.cancelGateRecovery()
         }
-        Button {
+        WxButton {
             objectName: "gateDiagnosticsButton"
             text: "导出诊断包"
             onClicked: diagnostics.open()

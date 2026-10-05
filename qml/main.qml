@@ -279,10 +279,7 @@ ApplicationWindow {
             z: 100
             window: root
             titleBackend: typeof backend !== "undefined" ? backend : null
-            settingsEnabled: !(
-                typeof backend !== "undefined" && backend
-                && backend.task && backend.task.active
-            )
+            settingsEnabled: true
             openSettings: function() {
                 if (customTitleBar.settingsEnabled) appRoot.openSettings(3)
             }
@@ -410,6 +407,7 @@ ApplicationWindow {
     // 启动加载动画遮罩
     Rectangle {
         id: startupLoader
+        objectName: "startupLoader"
         anchors.fill: parent
         color: WxTheme.clBgWindow
         z: 10000

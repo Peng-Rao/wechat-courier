@@ -4,10 +4,15 @@ import "../theme"
 
 Menu {
     id: root
+    padding: 5
+    margins: 8
+    popupType: Popup.Item
+    font.family: WxTheme.fontFamily
+    font.pixelSize: WxTheme.fontSizeNormal
 
     // Custom background with rounded corners and a premium shadow
     background: Rectangle {
-        implicitWidth: 160
+        implicitWidth: 220
         color: WxTheme.clBgPrimary
         radius: WxTheme.radiusMedium
         border.color: WxTheme.clBorder

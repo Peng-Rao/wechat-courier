@@ -150,10 +150,11 @@ Window {
     assert all(row.result == "stopped" for row in backend.task.items._items[1:])
     capture("friend-risk-960.png")
     sidebar = find("taskStatusSidebar")
-    assert sidebar is not None and sidebar.width() >= 280
+    assert sidebar is not None and sidebar.width() == 220
     sidebar_scroll = find("taskStatusScroll")
     assert sidebar_scroll.property("contentWidth") <= sidebar_scroll.width()
-    assert find("taskStepList").width() >= 240
+    assert 180 <= find("taskStepList").width() <= sidebar.width() - 24
+    assert find("taskQueueScroll").width() > sidebar.width()
     click(find("taskReturnToEditorButton"))
     assert window.findChild(QObject, "friendWorkspace").property("currentRow") == 104
     assert find("friendImportTable").property("contentY") > 0
