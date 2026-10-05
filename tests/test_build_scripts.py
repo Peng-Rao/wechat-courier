@@ -234,6 +234,53 @@ def test_build_outputs_gui_and_isolated_agent_in_one_directory():
     assert '*collect_submodules("openpyxl")' in spec_text
 
 
+def test_build_spec_includes_dynamic_pywin32_timezone_in_every_executable(tmp_path, monkeypatch):
+    analyses = []
+
+    def analysis(scripts, **kwargs):
+        result = SimpleNamespace(
+            scripts=scripts, hiddenimports=kwargs["hiddenimports"],
+            binaries=kwargs["binaries"], datas=kwargs["datas"],
+            pure=[], zipped_data=[], zipfiles=[],
+        )
+        analyses.append(result)
+        return result
+
+    hooks = ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_submodules = lambda name: []
+    hooks.copy_metadata = lambda name: []
+    hooks.get_pywin32_dll_dir = lambda: None
+    monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", hooks)
+    monkeypatch.setitem(sys.modules, "pywintypes", SimpleNamespace(__file__=str(tmp_path / "stub.py")))
+    runpy.run_path(str(ROOT / "build" / "build.spec"), init_globals={
+        "SPECPATH": str(ROOT / "build"), "workpath": str(tmp_path),
+        "Analysis": analysis, "PYZ": lambda *args, **kwargs: None,
+        "EXE": lambda *args, **kwargs: None, "COLLECT": lambda *args, **kwargs: None,
+    })
+
+    assert len(analyses) == 3
+    for result in analyses:
+        assert "win32timezone" in result.hiddenimports, result.scripts
+
+
+def test_build_checks_executable_dependencies_before_creating_installer(monkeypatch):
+    build = load_build_module()
+    calls = []
+    monkeypatch.setattr(build, "_ensure_pyinstaller_available", lambda: None)
+    monkeypatch.setattr(build.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd))
+    monkeypatch.setattr(build, "_refresh_windows_shell_icons", lambda: None)
+    build.main()
+
+    pyinstaller_index = next(i for i, cmd in enumerate(calls) if "PyInstaller" in cmd)
+    check_index = next(
+        (i for i, cmd in enumerate(calls) if str(ROOT / "build" / "verify_package.py") in cmd),
+        None,
+    )
+    assert check_index is not None, "Built executables need dependency verification"
+    installer_index = next(i for i, cmd in enumerate(calls) if str(build.NSIS_SCRIPT) in cmd)
+    assert pyinstaller_index < check_index < installer_index
+
+
 def test_build_spec_packages_one_generated_manifest_for_all_processes(tmp_path, monkeypatch):
     analyses = []
 

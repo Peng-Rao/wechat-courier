@@ -56,6 +56,11 @@ def main():
         str(BUILD_SPEC),
     ], cwd=ROOT, check=True)
 
+    subprocess.run([
+        sys.executable, str(ROOT / "build" / "verify_package.py"),
+        str(ROOT / "dist" / "福格微信助手"),
+    ], cwd=ROOT, check=True)
+
     # 3. NSIS 安装器（可选）
     print("步骤 3/3: 构建 NSIS 安装器...")
     import os

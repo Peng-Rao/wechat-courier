@@ -93,6 +93,8 @@ hiddenimports = [
     "win32gui", "win32con", "win32api", "win32process", "win32clipboard",
     "win32file", "win32event", "win32security", "winerror",
     "pythoncom", "pywintypes", "win32com", "win32com.client",
+    # Native pywin32 time conversions import this dynamically.
+    "win32timezone",
     # comtypes and generated interfaces
     "comtypes", "comtypes.client", "comtypes.gen", "comtypes.server",
     # Compatibility library and spreadsheet import stack
@@ -149,6 +151,7 @@ contact_analysis = Analysis(
     datas=build_datas + license_datas + copy_metadata("sqlcipher3"),
     hiddenimports=["PySide6.QtCore", "PySide6.QtNetwork", "win32api", "win32con",
                    "win32security", "win32file", "win32process", "pywintypes",
+                   "win32timezone",
                    "sqlcipher3", "sqlcipher3.dbapi2", "sqlcipher3._sqlite3"],
     hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=["tkinter", "streamlit", "app.agent.native_driver", "app.agent.gate",
