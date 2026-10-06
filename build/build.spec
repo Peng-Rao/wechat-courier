@@ -105,10 +105,19 @@ hiddenimports = [
     "PIL", "PIL.Image", "PIL.ImageGrab", "markdown", "pyperclip",
 ]
 
+# Qt's dynamic OpenGL loader resolves these at runtime, outside import analysis.
+import PySide6
+gui_binaries = list(binaries)
+for dll in ("opengl32sw.dll", "Qt6OpenGL.dll"):
+    dll_path = os.path.join(os.path.dirname(PySide6.__file__), dll)
+    if not os.path.isfile(dll_path):
+        raise RuntimeError(f"Required Qt OpenGL runtime not found: {dll}")
+    gui_binaries.append((dll_path, "PySide6"))
+
 a = Analysis(
     [os.path.join(ROOT, "main.py")],
     pathex=[ROOT],
-    binaries=binaries,
+    binaries=gui_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

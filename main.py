@@ -9,7 +9,7 @@ from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonInstance
 
 from app.backend import BackendController
 from app.demo import is_demo_mode
-from app.window_shell import WindowShellController, configure_native_renderer
+from app.window_shell import WindowShellController, configure_native_renderer, configure_window_diagnostics
 
 try:
     from app._version import __version__
@@ -32,10 +32,11 @@ def get_assets_dir() -> str:
 def main(settings=None):
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     os.environ["QT_QUICK_CONTROLS_STYLE"] = "Basic"
-    os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
+    os.environ.setdefault("QT_QPA_PLATFORM", "windows:darkmode=0")
 
-    configure_native_renderer()
+    configure_window_diagnostics()
     app = QGuiApplication(sys.argv)
+    configure_native_renderer()
     app.setApplicationName("福格微信助手")
     app.setApplicationVersion(__version__)
 

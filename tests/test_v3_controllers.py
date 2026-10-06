@@ -809,6 +809,7 @@ def test_diagnostics_export_bundles_rotating_logs_and_safe_summary(
         '{"stage":"inspect","outcome":"success"}\n', encoding="utf-8"
     )
     (log_dir / "agent-stderr.log").write_text("agent error\n", encoding="utf-8")
+    (log_dir / "window-rendering.log").write_text("renderer=OpenGL hwnd=123\n", encoding="utf-8")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
     backend, _client = make_backend(tmp_path)
 
@@ -821,6 +822,7 @@ def test_diagnostics_export_bundles_rotating_logs_and_safe_summary(
         assert "logs/uia-diagnostics.jsonl" in names
         assert "logs/uia-diagnostics.jsonl.1" in names
         assert "logs/agent-stderr.log" in names
+        assert "logs/window-rendering.log" in names
         summary = json.loads(archive.read("diagnostic-summary.json"))
     assert summary["schemaVersion"] == 1
     assert summary["wechatVersion"] == "4.1.13.65"

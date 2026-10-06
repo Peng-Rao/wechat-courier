@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,10 @@ from build import verify_package as checker
 
 def make_package(tmp_path, monkeypatch, missing=(), broken=()):
     calls = []
+    qt_dir = tmp_path / "_internal" / "PySide6"
+    qt_dir.mkdir(parents=True)
+    (qt_dir / "opengl32sw.dll").write_bytes(b"test software OpenGL")
+    (qt_dir / "Qt6OpenGL.dll").write_bytes(b"test Qt OpenGL")
 
     def archive_reader(filename):
         name = Path(filename).name
@@ -58,3 +63,24 @@ def test_cli_success_is_zero(tmp_path, monkeypatch, capsys):
     make_package(tmp_path, monkeypatch)
     assert checker.main([str(tmp_path)]) == 0
     assert "all three executables" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("dll", ["opengl32sw.dll", "Qt6OpenGL.dll"])
+def test_rejects_missing_opengl_runtime(tmp_path, monkeypatch, dll):
+    make_package(tmp_path, monkeypatch)
+    (tmp_path / "_internal" / "PySide6" / dll).unlink()
+    with pytest.raises(RuntimeError, match=dll):
+        checker.verify_package(tmp_path)
+
+
+def test_opengl_runtime_belongs_to_gui_analysis_only():
+    spec = Path(__file__).resolve().parents[1] / "build/build.spec"
+    assignments = {
+        node.targets[0].id: node.value for node in ast.parse(spec.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "Analysis"
+    }
+    for target, expected in (("a", "gui_binaries"), ("agent_analysis", "binaries"), ("contact_analysis", "binaries")):
+        keyword = next(item for item in assignments[target].keywords if item.arg == "binaries")
+        assert isinstance(keyword.value, ast.Name) and keyword.value.id == expected

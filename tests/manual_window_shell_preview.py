@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
 
-from PySide6.QtCore import QObject, QPointF, Qt, QUrl
+from PySide6.QtCore import QObject, QPointF, Qt, QUrl, qVersion
 from PySide6.QtGui import QColor, QCursor, QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, QQmlComponent
 from PySide6.QtQuick import QQuickWindow
@@ -27,8 +27,8 @@ from app.window_shell import WindowShellController, configure_native_renderer
 
 def run(output: Path, prototype: bool):
     faulthandler.dump_traceback_later(90)
-    configure_native_renderer()
     app = QGuiApplication([])
+    configure_native_renderer()
     original_cursor = QCursor.pos()
     output.mkdir(parents=True, exist_ok=True)
     temporary = tempfile.TemporaryDirectory()
@@ -83,6 +83,7 @@ ApplicationWindow {
             assert not exstyle & wh.WS_EX_LAYERED, hex(exstyle)
         assert window.opacity() == 1
         report = {"nativeFrameEnabled": shell.nativeFrameEnabled, "hwnd": hwnd,
+                  "qtVersion": qVersion(), "renderer": window.rendererInterface().graphicsApi().name,
                   "style": hex(wh._GetWindowLongPtr(ctypes.c_void_p(hwnd), wh.GWL_STYLE)),
                   "extendedStyle": hex(exstyle), "dpi": screen.devicePixelRatio(),
                   "prototype": prototype, "scenarios": []}
@@ -110,7 +111,6 @@ ApplicationWindow {
             bounds = wh.wintypes.RECT()
             assert wh.dwmapi.DwmGetWindowAttribute(ctypes.c_void_p(hwnd), 9,
                                                   ctypes.byref(bounds), ctypes.sizeof(bounds)) == 0
-            window.grabWindow().save(str(output / f"{name}-client.png"))
             activate()
             QTest.qWait(150)
             assert window.isActive(), "Visual capture requires the preview in foreground"
@@ -119,6 +119,8 @@ ApplicationWindow {
                                bounds.bottom - bounds.top)
             assert not image.isNull()
             assert image.save(str(output / f"{name}.png"))
+            # Client grabs render a frame: only use them after desktop evidence.
+            window.grabWindow().save(str(output / f"{name}-client.png"))
             client_rect = wh.wintypes.RECT()
             wh.user32.GetClientRect(ctypes.c_void_p(hwnd), ctypes.byref(client_rect))
             client_origin = wh.wintypes.POINT()
@@ -159,7 +161,7 @@ ApplicationWindow {
                        if item["name"].endswith("glass-45")]
             report["translucencyGatePassed"] = all(red - green > 12 for red, green, blue in samples)
             report["integrationEnabled"] = True
-            report["renderer"] = "D3D11 legacy swapchain"
+            report["renderer"] = window.rendererInterface().graphicsApi().name
             pattern_component = QQmlComponent(engine)
             pattern_component.setData(b'''import QtQuick
 Item { Repeater { model: 250; Rectangle { x: index * 8; width: 8; height: 2000;

@@ -1,4 +1,4 @@
-"""Check dynamic pywin32 dependencies inside every executable before release."""
+"""Check dynamic pywin32 and GUI OpenGL dependencies before release."""
 from __future__ import annotations
 
 import argparse
@@ -10,10 +10,14 @@ from PyInstaller.archive.readers import CArchiveReader
 
 EXECUTABLES = ("福格微信助手.exe", "wechat-agent.exe", "wechat-contact-reader.exe")
 REQUIRED_MODULES = frozenset({"win32timezone"})
+REQUIRED_GUI_DLLS = ("opengl32sw.dll", "Qt6OpenGL.dll")
 
 
 def verify_package(package_dir: Path) -> None:
     failures = []
+    for name in REQUIRED_GUI_DLLS:
+        if not (package_dir / "_internal" / "PySide6" / name).is_file():
+            failures.append(f"GUI: missing {name}")
     for name in EXECUTABLES:
         executable = package_dir / name
         try:
@@ -38,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    print("Verified dynamic pywin32 dependencies in all three executables.")
+    print("Verified dynamic pywin32 dependencies in all three executables and GUI OpenGL runtime.")
     return 0
 
 

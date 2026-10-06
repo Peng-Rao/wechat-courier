@@ -2248,6 +2248,7 @@ class TaskController(QObject):
                         if not (
                             candidate.name.startswith("uia-diagnostics.jsonl")
                             or candidate.name.startswith("agent-stderr.log")
+                            or candidate.name.startswith("window-rendering.log")
                         ):
                             continue
                         archive.write(candidate, f"logs/{candidate.name}")

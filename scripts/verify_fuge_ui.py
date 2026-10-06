@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--expected-dpr", type=float)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    configure_native_renderer()
     app = QGuiApplication([])
+    configure_native_renderer()
     if app.platformName() != "windows":
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")
     app.setFont(QFont("Microsoft YaHei UI", 10))
