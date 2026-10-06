@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -28,8 +29,8 @@ def main():
     parser.add_argument("--expected-dpr", type=float)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    app = QGuiApplication([])
     configure_native_renderer()
+    app = QGuiApplication([])
     if app.platformName() != "windows":
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")
     app.setFont(QFont("Microsoft YaHei UI", 10))
@@ -119,6 +120,8 @@ def main():
                 actual = corner_preference()
                 assert actual == expected, (state, actual)
                 native_states.append({"state": state, "cornerPreference": actual})
+                if state == "maximized":
+                    capture("native-maximized")
             backend.settings.glassEnabled = True
             QTest.qWait(180)
             assert shell.backdropAvailable
@@ -139,7 +142,7 @@ def main():
         for dark in [False, True]:
             backend.settings.isDark = dark
             theme = "dark" if dark else "light"
-            for width, height in [(1320, 880), (960, 680)]:
+            for width, height in [(1320, 880), (960, 680), (1920, 1080)]:
                 window.setWidth(width); window.setHeight(height)
                 for collapsed in [False, True]:
                     backend.settings.sidebarCollapsed = collapsed
@@ -151,6 +154,20 @@ def main():
                             assert workspace is not None
                             QMetaObject.invokeMethod(workspace, "dismissMonitor")
                         capture(f"{label}-{theme}-{width}-{'collapsed' if collapsed else 'expanded'}")
+                        if index in (1, 2):
+                            table = find("friendImportTable" if index == 1 else "contactTable")
+                            assert table is not None
+                            minimum = 1158 if index == 1 else 1048
+                            assert table.property("contentWidth") == max(table.width(), minimum)
+                        if index == 2 and not collapsed and width != 1920:
+                            source = find("contactSourceToggleButton")
+                            QMetaObject.invokeMethod(source, "clicked")
+                            capture(f"contacts-source-{theme}-{width}")
+                            QMetaObject.invokeMethod(source, "clicked")
+                            confirm = window.findChild(QObject, "contactExportConfirmDialog")
+                            QMetaObject.invokeMethod(confirm, "open")
+                            capture(f"contacts-export-{theme}-{width}")
+                            QMetaObject.invokeMethod(confirm, "close")
                 backend.settings.sidebarCollapsed = False
                 popup = window.findChild(QObject, "settingsDialog")
                 popup.setProperty("sectionIndex", 1)
@@ -173,6 +190,26 @@ def main():
                 QMetaObject.invokeMethod(popup, "close")
                 QTest.qWait(180)
             window.setWidth(1320); window.setHeight(880)
+            root.setProperty("workspaceIndex", 1)
+            QTest.qWait(40)
+            QMetaObject.invokeMethod(find("friendWorkspace"), "dismissMonitor")
+            records = deepcopy([backend.friends.model.record_at(row) for row in range(backend.friends.model.count)])
+            backend.friends.model.replace_records([])
+            capture(f"friends-empty-{theme}")
+            backend.friends.model.appendEmptyRecord()
+            capture(f"friends-invalid-{theme}")
+            backend.friends.model.replace_records(deepcopy(records))
+            backend.friends.model.setCell(0, "greeting", "用于检查长文本列边界的模拟打招呼语。" * 24)
+            capture(f"friends-long-text-{theme}")
+            backend.friends.model.replace_records(records)
+            root.setProperty("workspaceIndex", 2)
+            contacts = backend.contacts.model.snapshot()
+            backend.contacts.model.clear()
+            capture(f"contacts-empty-{theme}")
+            backend.contacts.model.replace_records(contacts)
+            backend.contacts.keyword = "no-matching-fixture"
+            capture(f"contacts-no-results-{theme}")
+            backend.contacts.keyword = ""
             for kind, start in [("message", backend.task.startMessage), ("friend", backend.task.startFriends)]:
                 if kind == "friend":
                     client.helloReceived.emit({"capabilities": {"friendSubmitEnabled": True}})

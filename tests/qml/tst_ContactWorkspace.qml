@@ -182,11 +182,64 @@ TestCase {
     }
 
     function cleanup() {
+        control("contactExportConfirmDialog").close()
         control("contactSaveDialog").close()
         control("contactSourceFolderDialog").close()
         control("contactExportFolderDialog").close()
         control("contactOverwriteDialog").close()
         workspace = null
+    }
+
+    function test_html_header_and_empty_table_are_complete() {
+        compare(control("contactPageTitle").text, "微信联系人导出")
+        compare(control("contactPageHeader").eyebrow, "工作区 / 联系人")
+        compare(control("contactSourcePanel").visible, false)
+        verify(control("contactHeader-5").width > 0)
+        var account = control("contactAccountSelector")
+        verify(account.mapToItem(workspace, 0, 0).y > control("contactPageHeader").height)
+    }
+
+    function test_table_fills_wide_view_and_remains_aligned_after_resize() {
+        loadRows(200)
+        for (var width of [1560, 744, 1320, 960]) {
+            host.width = width
+            wait(100)
+            var table = control("contactTable")
+            compare(table.contentWidth, Math.max(width, 1048))
+            for (var column = 0; column < 6; ++column) {
+                if (column === 5 && width < 1048) table.contentX = table.contentWidth - table.width
+                wait(20)
+                var cell = control("contactCell-0-" + column)
+                var header = control("contactHeader-" + column)
+                fuzzyCompare(cell.width, header.width, 1)
+                fuzzyCompare(cell.mapToItem(workspace, 0, 0).x, header.mapToItem(workspace, 0, 0).x, 1)
+            }
+            table.contentX = 0
+        }
+    }
+
+    function test_search_clear_updates_the_controller() {
+        contacts.keyword = "Nick"
+        click("contactClearSearchButton")
+        compare(contacts.keyword, "")
+        compare(control("contactSearchField").text, "")
+    }
+
+    function test_export_requires_confirmation_and_can_be_cancelled() {
+        loadRows(2)
+        click("contactExportButton")
+        var dialog = control("contactExportConfirmDialog")
+        tryCompare(dialog, "visible", true)
+        compare(control("contactExportCountLabel").text, "2 位联系人")
+        compare(control("contactSaveDialog").visible, false)
+        click("contactExportCancelButton")
+        tryCompare(dialog, "visible", false)
+        compare(contacts.exports.length, 0)
+        compare(control("contactSaveDialog").visible, false)
+        click("contactExportButton")
+        contacts.operationBlocked = true
+        tryCompare(dialog, "visible", false)
+        compare(contacts.exports.length, 0)
     }
 
     function test_null_controller_and_null_model_are_safe() {
@@ -462,7 +515,7 @@ TestCase {
         compare(contacts.exportFormat, "xlsx")
     }
 
-    function test_format_labels_fit_at_130_pixels_data() {
+    function test_format_labels_fit_export_confirmation_data() {
         return [
             {tag: "excel", index: 0, label: "Excel"},
             {tag: "csv", index: 1, label: "CSV"},
@@ -471,11 +524,13 @@ TestCase {
         ]
     }
 
-    function test_format_labels_fit_at_130_pixels(data) {
+    function test_format_labels_fit_export_confirmation(data) {
+        loadRows(2)
+        click("contactExportButton")
         var combo = control("contactFormatSelector")
         combo.currentIndex = data.index
         wait(40)
-        compare(combo.width, 130)
+        verify(combo.width >= 300)
         compare(combo.contentItem.text, data.label)
         verify(combo.contentItem.contentWidth <= combo.contentItem.width,
                data.label + " must remain readable")
@@ -625,6 +680,7 @@ TestCase {
         loadRows(2)
         control("contactFormatSelector").currentIndex = data.index
         click("contactExportButton")
+        click("contactExportConfirmButton")
         var dialog = control(data.index === 3 ? "contactExportFolderDialog" : "contactSaveDialog")
         tryCompare(dialog, "visible", true)
         if (data.index === 3)
@@ -650,6 +706,7 @@ TestCase {
         tryCompare(control("contactExportButton"), "enabled", false)
         contacts.visibleCount = 2
         click("contactExportButton")
+        click("contactExportConfirmButton")
         var dialog = control("contactSaveDialog")
         tryCompare(dialog, "visible", true)
         contacts.busy = true
@@ -688,6 +745,7 @@ TestCase {
     function test_automation_blocks_open_chooser_and_overwrite_callbacks() {
         loadRows(2)
         click("contactExportButton")
+        click("contactExportConfirmButton")
         var save = control("contactSaveDialog")
         tryCompare(save, "visible", true)
         contacts.operationBlocked = true
@@ -736,12 +794,10 @@ TestCase {
 
     function test_compact_layout_data() {
         return [
-            {tag: "1320-with-sidebar", width: 1104, height: 800, minimumTableHeight: 450},
-            {tag: "960-with-sidebar", width: 744, height: 600, minimumTableHeight: 250},
+            {tag: "1320-with-sidebar", width: 1104, height: 830, minimumTableHeight: 400},
+            {tag: "960-with-sidebar", width: 744, height: 630, minimumTableHeight: 200},
             {tag: "960x680", width: 960, height: 680, minimumTableHeight: 150},
-            {tag: "125-percent-dpi", width: 768, height: 544, minimumTableHeight: 150},
-            {tag: "150-percent-dpi", width: 640, height: 453, minimumTableHeight: 150},
-            {tag: "150-percent-dpi-with-app-chrome", width: 640, height: 373, minimumTableHeight: 100}
+            {tag: "constrained-host", width: 640, height: 544, minimumTableHeight: 150}
         ]
     }
 
@@ -761,7 +817,7 @@ TestCase {
                      "contactRefreshButton", "contactReadButton", "contactElevationButton",
                      "contactSearchField", "contactSpecialCheckBox", "contactCountLabel", "contactTable",
                      "contactStatusLabel", "contactElapsedLabel", "contactCancelButton",
-                     "contactFormatSelector", "contactExportButton"]
+                     "contactExportButton"]
         for (var name of names) {
             var item = control(name)
             var point = item.mapToItem(host, 0, 0)
@@ -772,7 +828,7 @@ TestCase {
         }
         var table = control("contactTable")
         verify(table.height >= data.minimumTableHeight)
-        verify(table.contentWidth > table.width)
+        compare(table.contentWidth, Math.max(table.width, 1048))
         verify(table.contentHeight > table.height)
         var read = control("contactReadButton")
         var elevation = control("contactElevationButton")

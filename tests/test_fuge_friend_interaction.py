@@ -12,10 +12,12 @@ import pytest
 from PySide6.QtCore import QObject, QPoint, Property, QSettings, QUrl, qInstallMessageHandler
 from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 from PySide6.QtQuick import QQuickItem, QQuickView
+from PySide6.QtQml import QQmlProperty
 from PySide6.QtTest import QTest
 from PySide6.QtCore import Qt
 
 from app.controllers import FriendController
+from app.friend_import import load_friend_records
 from tests.test_friend_context_menu_interaction import (
     AppBackend, TaskBackend, _click, _find_item, _type, _view_point,
 )
@@ -65,7 +67,8 @@ def exercise(scenario):
 
         def field(name):
             item = _find_item(table.property("contentItem"), name)
-            assert item is not None, name
+            assert item is not None, (name, table.width(), table.height(), table.property("rows"),
+                                      table.property("contentWidth"), root.height())
             return item
 
         def click(item):
@@ -191,11 +194,13 @@ def exercise(scenario):
             assert root.findChild(QObject, "friendContextMenu").property("visible") is True, (
                 account.property("activeFocus"), account.property("editing"), menu.property("visible"))
         elif scenario == "widths":
-            widths = [field(n).width() for n in ("friendNameField", "friendAccountField", "friendGreetingField")]
             font = account.property("font").pixelSize()
+            assert abs(float(table.property("contentWidth")) - table.width()) <= 1, "wide rows must fill the viewport"
             view.resize(680, 700)
             QTest.qWait(100)
-            assert [field(n).width() for n in ("friendNameField", "friendAccountField", "friendGreetingField")] == widths
+            narrow_widths = [field(n).width() for n in ("friendNameField", "friendAccountField", "friendGreetingField")]
+            assert all(actual >= minimum for actual, minimum in zip(narrow_widths, (112, 186, 240)))
+            assert abs(float(table.property("contentWidth")) - 1158) <= 1
             assert account.property("font").pixelSize() == font == 14
             assert float(table.property("contentWidth")) > table.width()
             table.setProperty("contentX", 280)
@@ -204,6 +209,17 @@ def exercise(scenario):
             assert header is not None and header.x() == -280
             assert name.height() == 36
             assert root.property("tableRowHeight") == 40
+            for width in (1560, 960, 1320):
+                view.resize(width, 700)
+                QTest.qWait(100)
+                assert abs(float(table.property("contentWidth")) - max(width, 1158)) <= 1
+                header = root.findChild(QQuickItem, "friendTableHeaderContent")
+                assert abs(header.width() - float(table.property("contentWidth"))) <= 1
+                for editor_name, header_index in (("friendNameField", 2), ("friendAccountField", 3), ("friendGreetingField", 5)):
+                    editor = field(editor_name)
+                    headers = [item for item in header.childItems() if item.property("text") is not None]
+                    assert abs(editor.width() - headers[header_index].width()) <= 1
+            assert root.findChild(QQuickItem, "friendPageTitle").property("text") == "自动发送好友申请"
             for width in (744, 1104):
                 view.resize(width, 680)
                 table.setProperty("contentX", 0)
@@ -221,32 +237,33 @@ def exercise(scenario):
                     assert view.grabWindow().save(str(path.with_stem(f"{path.stem}-{width}")))
         elif scenario == "relationship":
             click(relationship)
-            assert not relationship.property("editing"), "single click only locates suffix"
-            edit(relationship)
+            assert relationship.property("editing"), "single click must edit a custom suffix"
             replace("Guardian")
             assert friends.model.record_at(0).relationship is None
             QTest.keyClick(view, Qt.Key_Escape)
             QTest.qWait(50)
             assert friends.model.record_at(0).relationship is None
-            edit(relationship)
+            click(relationship)
             replace("Guardian")
             QTest.keyClick(view, Qt.Key_Return)
             QTest.qWait(50)
             assert friends.model.record_at(0).relationship == "guardian", (
                 friends.model.record_at(0).relationship, relationship.property("editText"), relationship.property("editing"))
-            edit(relationship)
+            click(relationship)
             click(relationship)  # focus editable input again
             QTest.keyClick(view, Qt.Key_A, Qt.ControlModifier)
             QTest.keyClick(view, Qt.Key_Backspace)
             click(root.findChild(QQuickItem, "globalFriendGreetingField"))
             assert friends.model.record_at(0).relationship == "", "empty custom suffix means explicit none"
-            edit(relationship)
             _click(view, relationship, QPoint(int(relationship.width()) - 12, 15), Qt.LeftButton)
+            assert QQmlProperty(relationship, "popup.visible").read(), "single arrow click must open choices"
             QTest.keyClick(view, Qt.Key_Home)
             QTest.keyClick(view, Qt.Key_Return)
             QTest.qWait(100)
-            assert friends.model.record_at(0).relationship is None, "follow-global choice must remain distinct from none"
-            edit(relationship)
+            assert friends.model.record_at(0).relationship is None, ("follow-global choice must remain distinct from none",
+                relationship.property("currentIndex"), relationship.property("highlightedIndex"),
+                relationship.property("editText"), relationship.property("editing"),
+                QQmlProperty(relationship, "popup.visible").read())
             _click(view, relationship, QPoint(int(relationship.width()) - 12, 15), Qt.LeftButton)
             QTest.keyClick(view, Qt.Key_Home)
             QTest.keyClick(view, Qt.Key_Down)
@@ -256,12 +273,55 @@ def exercise(scenario):
             assert friends.model.record_at(0).relationship == "爸爸", (
                 "preset suffix must still commit", friends.model.record_at(0).relationship,
                 relationship.property("currentIndex"), relationship.property("editing"), relationship.property("editText"))
+            _click(view, relationship, QPoint(int(relationship.width()) - 12, 15), Qt.LeftButton)
+            QTest.keyClick(view, Qt.Key_Escape)
+            QTest.qWait(100)
+            assert friends.model.record_at(0).relationship == "爸爸"
+            click(relationship)
+            replace("unsaved")
+            task.set_active(True)
+            QTest.qWait(50)
+            assert friends.model.record_at(0).relationship == "爸爸"
+            assert not relationship.property("editing")
+        elif scenario == "relationship_reuse":
+            friends.model.replace_records(load_friend_records([
+                ["姓名", "账号"], *[[f"Student{i}", f"offline_{i}"] for i in range(200)]
+            ]))
+            QTest.qWait(100)
+            relationship = field("friendRelationshipSelector")
+            click(relationship)
+            replace("discardonscroll")
+            table.setProperty("contentY", 4800)
+            QTest.qWait(180)
+            assert friends.model.record_at(0).relationship is None, "pooling must discard the old draft"
+
+            def suffix_at(row):
+                pending = [table.property("contentItem")]
+                while pending:
+                    item = pending.pop()
+                    if item.objectName() == "friendRelationshipSelector" and item.property("modelRow") == row:
+                        return item
+                    pending.extend(item.childItems())
+                raise AssertionError(f"suffix editor for row {row} was not instantiated")
+
+            reused = suffix_at(120)
+            assert not reused.property("editing")
+            assert reused.property("choice") == "使用全局"
+            click(reused)
+            replace("Guardian")
+            QTest.keyClick(view, Qt.Key_Return)
+            QTest.qWait(80)
+            assert friends.model.record_at(120).relationship == "guardian"
+            assert friends.model.record_at(0).relationship is None
+            table.setProperty("contentY", 0)
+            QTest.qWait(150)
+            assert suffix_at(0).property("choice") == "使用全局"
         view.hide()
         view.setSource(QUrl())
         app.processEvents()
 
 
-@pytest.mark.parametrize("scenario", ["drafts", "navigation", "lock", "menus", "widths", "relationship", "clear"])
+@pytest.mark.parametrize("scenario", ["drafts", "navigation", "lock", "menus", "widths", "relationship", "relationship_reuse", "clear"])
 def test_friend_page_interaction(scenario):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), scenario], cwd=ROOT,

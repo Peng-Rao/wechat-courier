@@ -56,32 +56,12 @@ Item {
 
         ColumnLayout {
             spacing: 0
-            RowLayout {
+            WorkspaceHeader {
                 Layout.fillWidth: true
-                Layout.leftMargin: 24
-                Layout.rightMargin: 24
-                Layout.topMargin: 22
-                Layout.bottomMargin: 18
-                spacing: 16
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-                    Text {
-                        text: "工作区 / 消息"
-                        color: WxTheme.clTextSecondary
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeSmall
-                    }
-                    Text {
-                        objectName: "messagePageTitle"
-                        text: "消息群发"
-                        color: WxTheme.clTextPrimary
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeTitle
-                        font.weight: Font.DemiBold
-                    }
-                }
-                Item { Layout.fillWidth: true }
+                Layout.preferredHeight: implicitHeight
+                eyebrow: "工作区 / 消息"
+                title: "消息群发"
+                titleObjectName: "messagePageTitle"
                 Text {
                     objectName: "messageSearchMode"
                     text: root.messageBackend && root.messageBackend.fuzzySearchEnabled

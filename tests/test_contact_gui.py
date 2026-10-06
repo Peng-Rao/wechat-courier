@@ -205,6 +205,7 @@ Window {
             assert find("contactVerticalScrollBar").property("size") < 1, (
                 table.property("rows"), table.property("contentHeight"), table.height(),
                 table.property("model"), warnings)
+            assert table.property("contentWidth") == max(table.width(), 1048)
             assert find("contactHorizontalScrollBar").property("size") < 1
             click("contactHeader-0")
             click("contactCell-0-0", double=True)
@@ -224,12 +225,19 @@ Window {
                     Qt.ShiftModifier if char.isupper() else Qt.NoModifier)
             QTest.qWait(100)
             assert contacts.visibleCount == 10
-            QTest.keyClick(window, Qt.Key_A, Qt.ControlModifier)
-            QTest.keyClick(window, Qt.Key_Backspace)
+            click("contactExportButton")
+            assert find("contactExportCountLabel").property("text") == "10 位联系人"
+            click("contactExportCancelButton")
+            assert not contacts.busy
+            click("contactClearSearchButton")
+            assert contacts.keyword == "" and contacts.visibleCount == 80
             click("contactSpecialCheckBox")
             assert contacts.visibleCount == 90
             assert window.grabWindow().save(str(output / "contacts-loaded-960.png"))
+        contacts.keyword = "Nick05"
+        QTest.qWait(100)
         snapshot = contacts.model.snapshot()
+        assert len(snapshot) == 10 and contacts.totalCount == 90, "exports must use the current filter"
         assert snapshot, "empty selected contact view"
         # Exercise the actual export control and accepted file dialog path.
         formats = ["xlsx", "csv", "json"]
@@ -237,9 +245,10 @@ Window {
         # Non-native dialog keeps offscreen input in this Qt event loop.
         dialog.setProperty("options", 4 | 8)
         for index, fmt in enumerate(formats):
+            click("contactExportButton")
             selector = window.findChild(QObject, "contactFormatSelector")
             selector.setProperty("currentIndex", index)
-            click("contactExportButton")
+            click("contactExportConfirmButton")
             destination = output / ("contacts." + fmt)
             dialog.setProperty("selectedFile", QUrl.fromLocalFile(str(destination)))
             assert QMetaObject.invokeMethod(dialog, "accepted")
@@ -249,6 +258,19 @@ Window {
                 click("contactOverwriteConfirmButton")
             wait_done()
             assert destination.exists(), contacts.errorMessage
+        click("contactExportButton")
+        window.findChild(QObject, "contactFormatSelector").setProperty("currentIndex", 3)
+        click("contactExportConfirmButton")
+        folder = window.findChild(QObject, "contactExportFolderDialog")
+        folder.setProperty("options", 8)
+        folder.setProperty("selectedFolder", QUrl.fromLocalFile(str(output)))
+        assert QMetaObject.invokeMethod(folder, "accepted")
+        assert QMetaObject.invokeMethod(folder, "close")
+        QTest.qWait(40)
+        if window.findChild(QObject, "contactOverwriteDialog").property("visible"):
+            click("contactOverwriteConfirmButton")
+        wait_done()
+        assert len(contacts.lastExportPaths) == 3
         json_rows = json.loads((output / "contacts.json").read_text(encoding="utf-8"))
         with (output / "contacts.csv").open(encoding="utf-8-sig", newline="") as stream:
             csv_rows = list(csv.reader(stream))
@@ -258,6 +280,7 @@ Window {
         workbook.close()
         assert len(json_rows) == len(csv_rows) - 1 == len(xlsx_rows) - 1 == len(snapshot)
         assert json_rows[0] == {field: snapshot[0][field] for field in CONTACT_FIELDS}
+        assert all("Nick05" in row["nick_name"] for row in json_rows)
         assert not backend.operationBusy
         click("contactReadButton")
         click("contactCancelButton")

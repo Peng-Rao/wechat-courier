@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 _QML_ROOT = "pyside6/qml/"
 
 _QML_KEEP_PREFIXES = (
+    "pyside6/qml/qt/labs/qmlmodels",
     "pyside6/qml/qt5compat",
     "pyside6/qml/qtcore",
     "pyside6/qml/qtqml",

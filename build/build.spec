@@ -39,7 +39,7 @@ datas = list(comtypes_datas) + build_datas + license_datas
 qml_dir = os.path.join(ROOT, "qml")
 for dirpath, dirnames, filenames in os.walk(qml_dir):
     for f in filenames:
-        if f == "qmldir" or f.endswith((".qml", ".svg")):
+        if f == "qmldir" or f.endswith((".qml", ".js", ".svg")):
             src_path = os.path.join(dirpath, f)
             rel = os.path.relpath(dirpath, ROOT)
             datas.append((src_path, rel))

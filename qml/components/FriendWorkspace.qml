@@ -3,6 +3,7 @@ import QtQuick.Controls.Basic
 import QtQuick.Dialogs
 import QtQuick.Layouts
 import "../theme"
+import "TableWidths.js" as TableWidths
 
 Item {
     id: root
@@ -26,11 +27,20 @@ Item {
     property int currentRow: -1
     property int previewRevision: 0
     readonly property int tableRowHeight: 40
-    readonly property var columnWidths: [44, 60, 112, 186, 126, 240, 180, 110]
+    readonly property var columnWidths: TableWidths.expand(
+        [44, 60, 112, 186, 126, 240, 180, 110], friendTable.width, 1158, [2, 3, 5, 6])
     readonly property int tableContentWidth: columnWidths.reduce(function(sum, value) { return sum + value }, 0)
     property var activeCellEditor: null
     property var activeTextMenu: null
     property int currentFieldIndex: 0
+    function refreshTableLayout() {
+        if (root.visible) {
+            friendTable.forceLayout()
+            friendTable.contentX = Math.min(friendTable.contentX, Math.max(0, root.tableContentWidth - friendTable.width))
+        }
+    }
+    onColumnWidthsChanged: Qt.callLater(root.refreshTableLayout)
+    onVisibleChanged: if (visible) Qt.callLater(root.refreshTableLayout)
     readonly property var currentPreview: {
         var revision = previewRevision
         return friendBackend && currentRow >= 0 ? friendBackend.model.preview(currentRow) : ({})
@@ -303,54 +313,29 @@ Item {
                 anchors.fill: parent
                 spacing: 0
 
-                Rectangle {
+                WorkspaceHeader {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 64
-                    color: WxTheme.clBgPrimary
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 16
-                        anchors.rightMargin: 16
-                        spacing: 10
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-                            Text {
-                                text: "自动发送好友申请"
-                                color: WxTheme.clTextPrimary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTitle
-                                font.bold: true
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: "待添加账号"
-                                color: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTiny
-                                elide: Text.ElideRight
-                            }
+                    Layout.preferredHeight: implicitHeight
+                    eyebrow: "工作区 / 好友"
+                    title: "自动发送好友申请"
+                    titleObjectName: "friendPageTitle"
+                    WxButton {
+                        text: "下载模板"
+                        iconName: "export"
+                        enabled: !root.interactionLocked
+                        onClicked: {
+                            if (!root.interactionLocked) templateDialog.open()
                         }
-                        Item { Layout.fillWidth: true }
-                        WxButton {
-                            text: "下载模板"
-                            iconName: "export"
-                            enabled: !root.interactionLocked
-                            onClicked: {
-                                if (!root.interactionLocked) templateDialog.open()
-                            }
-                        }
-                        WxButton {
-                            objectName: "importFriendsButton"
-                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                ? "importFriendsButton" : text
-                            text: "导入 Excel / CSV"
-                            iconName: "excel"
-                            enabled: !root.interactionLocked
-                            onClicked: {
-                                if (!root.interactionLocked) importDialog.open()
-                            }
+                    }
+                    WxButton {
+                        objectName: "importFriendsButton"
+                        Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                            ? "importFriendsButton" : text
+                        text: "导入 Excel / CSV"
+                        iconName: "excel"
+                        enabled: !root.interactionLocked
+                        onClicked: {
+                            if (!root.interactionLocked) importDialog.open()
                         }
                     }
                 }
@@ -484,6 +469,7 @@ Item {
                     Row {
                         objectName: "friendTableHeaderContent"
                         x: -friendTable.contentX
+                        width: root.tableContentWidth
                         height: parent.height
                         spacing: 0
                         Repeater {
@@ -514,10 +500,11 @@ Item {
                         anchors.fill: parent
                         clip: true
                         model: root.friendBackend ? root.friendBackend.model : null
+                        contentWidth: root.tableContentWidth
                         columnWidthProvider: function(column) { return root.tableContentWidth }
                         rowHeightProvider: function(row) { return root.tableRowHeight }
-                        ScrollBar.horizontal: WxScrollBar { objectName: "friendTableHorizontalScrollBar" }
-                        ScrollBar.vertical: WxScrollBar { objectName: "friendTableVerticalScrollBar" }
+                        ScrollBar.horizontal: WxScrollBar { objectName: "friendTableHorizontalScrollBar"; policy: ScrollBar.AsNeeded }
+                        ScrollBar.vertical: WxScrollBar { objectName: "friendTableVerticalScrollBar"; policy: ScrollBar.AsNeeded }
                         delegate: Rectangle {
                             id: friendRow
                             required property int row

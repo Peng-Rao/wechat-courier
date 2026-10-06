@@ -1,10 +1,30 @@
 import ast
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from build import verify_package as checker
+from build.pyinstaller_filters import filter_qt_artifacts
+
+
+def test_qml_resource_collection_includes_imported_layout_helpers():
+    root = Path(__file__).resolve().parents[1]
+    tree = ast.parse((root / "build/build.spec").read_text(encoding="utf-8"))
+    collect = next(node for node in tree.body if isinstance(node, ast.For)
+                   and isinstance(node.iter, ast.Call)
+                   and isinstance(node.iter.func, ast.Attribute)
+                   and node.iter.func.attr == "walk")
+    scope = {"os": os, "ROOT": str(root), "qml_dir": str(root / "qml"), "datas": []}
+    exec(compile(ast.Module(body=[collect], type_ignores=[]), "qml resource collection", "exec"), scope)
+    packaged = {Path(source).relative_to(root).as_posix() for source, _ in scope["datas"]}
+    for filename in ("qml/components/WorkspaceHeader.qml", "qml/components/TableWidths.js",
+                     "qml/icons/search.svg", "qml/icons/refresh.svg", "qml/icons/database.svg"):
+        assert filename in packaged, f"QML runtime dependency is missing: {filename}"
+    header_runtime = [("PySide6/qml/Qt/labs/qmlmodels/qmldir", "source", "DATA"),
+                      ("PySide6/qml/Qt/labs/qmlmodels/labsmodelsplugin.dll", "source", "BINARY")]
+    assert filter_qt_artifacts(header_runtime) == header_runtime, "header TableModel runtime was pruned"
 
 
 def make_package(tmp_path, monkeypatch, missing=(), broken=()):

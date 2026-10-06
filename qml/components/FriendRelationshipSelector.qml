@@ -27,6 +27,7 @@ WxComboBox {
     function resumeFocus() { contentItem.forceActiveFocus() }
     function beginEdit() {
         if (!enabled) return
+        if (editing) return
         editStarted()
         editing = true
         editText = choice || "无"
@@ -65,7 +66,14 @@ WxComboBox {
             event.accepted = true
         }
     }
-    onActivated: { if (enabled) commitEdit(currentText) }
+    onActivated: {
+        if (!enabled) return
+        if (cellMode && !editing) {
+            editStarted()
+            editing = true
+        }
+        commitEdit(currentText)
+    }
     onAccepted: { if (enabled) commitEdit() }
     onChoiceChanged: { if (!editing) editText = choice || "无" }
     onEnabledChanged: { if (!enabled) cancelEdit() }
@@ -82,6 +90,7 @@ WxComboBox {
     contentItem: WxTextField {
         text: control.editable ? control.editText : control.displayText
         readOnly: control.cellMode && !control.editing
+        enabled: control.editable
         selectByMouse: !readOnly
         leftPadding: 8
         rightPadding: 0
@@ -92,12 +101,15 @@ WxComboBox {
         Keys.onPressed: function(event) { control.handleKey(event) }
     }
     MouseArea {
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.right: parent.right
+        anchors.rightMargin: 32
         z: 2
         visible: control.cellMode && !control.editing
         acceptedButtons: Qt.LeftButton
-        onClicked: control.forceActiveFocus()
-        onDoubleClicked: control.beginEdit()
+        onClicked: control.beginEdit()
     }
     implicitHeight: 36
     background: Rectangle {
