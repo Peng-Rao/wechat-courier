@@ -79,8 +79,11 @@ Rectangle {
                         Text { visible: !root.sidebarCollapsed; text: "工作区"; font.family: WxTheme.fontFamily; font.pixelSize: 12; color: WxTheme.clTextSecondary; Layout.fillWidth: true; leftPadding: 12 }
                         WxButton {
                             objectName: "sidebarCollapseButton"
+                            Layout.preferredWidth: root.sidebarCollapsed ? 44 : 36
+                            Layout.preferredHeight: 42
                             Accessible.name: root.sidebarCollapsed ? "展开侧栏" : "折叠侧栏"
                             quiet: true; iconName: "panel_left"
+                            iconSize: 18
                             tooltipText: Accessible.name
                             onClicked: { if (root.appBackend) root.appBackend.settings.sidebarCollapsed = !root.sidebarCollapsed }
                         }
@@ -95,6 +98,8 @@ Rectangle {
                             Accessible.name: root.appBackend && root.appBackend.task.acceptanceEnabled ? objectName : modelData
                             Layout.fillWidth: true
                             Layout.preferredHeight: 42
+                            leftPadding: root.sidebarCollapsed ? 0 : 12
+                            rightPadding: leftPadding
                             quiet: true
                             tooltipText: root.sidebarCollapsed ? modelData : ""
                             onClicked: root.workspaceIndex = index
@@ -106,14 +111,20 @@ Rectangle {
                             background: Rectangle {
                                 radius: 6
                                 color: root.workspaceIndex === navButton.index ? WxTheme.clBgSelected : navButton.hovered ? WxTheme.clBgHover : "transparent"
-                                border.width: navButton.activeFocus ? 1 : 0; border.color: WxTheme.clBorderFocus
+                                border.width: navButton.visualFocus ? 1 : 0; border.color: WxTheme.clBorderFocus
                                 Rectangle { visible: root.workspaceIndex === navButton.index; width: 3; height: 16; radius: 1; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; color: WxTheme.clPrimary }
                             }
                         }
                     }
                     Item { Layout.fillHeight: true }
                     WxButton {
+                        objectName: "sidebarThemeButton"
                         Layout.fillWidth: true; quiet: true
+                        Layout.preferredHeight: 42
+                        iconSize: 18
+                        textAlignment: Text.AlignLeft
+                        leftPadding: root.sidebarCollapsed ? 0 : 12
+                        rightPadding: leftPadding
                         iconName: WxTheme.isDark ? "sun" : "moon"
                         text: root.sidebarCollapsed ? "" : WxTheme.isDark ? "浅色主题" : "深色主题"
                         tooltipText: root.sidebarCollapsed ? (WxTheme.isDark ? "浅色主题" : "深色主题") : ""
@@ -123,6 +134,11 @@ Rectangle {
                         objectName: "sidebarSettingsButton"
                         Accessible.name: "参数设置"
                         Layout.fillWidth: true; quiet: true; iconName: "settings"
+                        Layout.preferredHeight: 42
+                        iconSize: 18
+                        textAlignment: Text.AlignLeft
+                        leftPadding: root.sidebarCollapsed ? 0 : 12
+                        rightPadding: leftPadding
                         text: root.sidebarCollapsed ? "" : "参数设置"
                         tooltipText: root.sidebarCollapsed ? "参数设置" : ""
                         onClicked: root.openSettings(root.interactionLocked ? 3 : root.workspaceIndex === 1 ? 1 : 0)

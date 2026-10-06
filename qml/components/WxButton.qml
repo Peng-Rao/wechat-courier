@@ -10,6 +10,8 @@ Button {
     property bool quiet: false
     property string iconName: ""
     property string tooltipText: ""
+    property int iconSize: 16
+    property int textAlignment: Text.AlignHCenter
     implicitHeight: WxTheme.controlHeight
     implicitWidth: Math.max(text === "" ? 36 : 64, contentItem.implicitWidth + leftPadding + rightPadding)
     leftPadding: text === "" ? 8 : 12
@@ -24,17 +26,17 @@ Button {
         WxIcon {
             visible: root.iconName !== ""
             iconSource: root.iconName === "" ? "" : root.iconName.indexOf("/") >= 0 ? root.iconName : "../icons/" + root.iconName + ".svg"
-            iconSize: 16
+            iconSize: root.iconSize
             iconColor: root.foreground
             hoverScale: false
-            Layout.alignment: Qt.AlignVCenter
+            Layout.alignment: root.text === "" ? Qt.AlignCenter : Qt.AlignVCenter
         }
         Text {
             visible: root.text !== ""
             text: root.text
             font: root.font
             color: root.foreground
-            horizontalAlignment: Text.AlignHCenter
+            horizontalAlignment: root.textAlignment
             verticalAlignment: Text.AlignVCenter
             Layout.fillWidth: true
         }
@@ -44,8 +46,8 @@ Button {
         color: root.primary ? (root.down ? WxTheme.clPrimaryPress : root.hovered ? WxTheme.clPrimaryHover : WxTheme.clPrimary)
             : root.down ? WxTheme.clBgSelected : root.hovered ? WxTheme.clBgHover
             : root.quiet ? "transparent" : WxTheme.clBgPrimary
-        border.width: root.quiet && !root.activeFocus ? 0 : 1
-        border.color: root.activeFocus ? WxTheme.clBorderFocus : root.primary ? WxTheme.clPrimaryPress : WxTheme.clBorderStrong
+        border.width: root.quiet && !root.visualFocus ? 0 : 1
+        border.color: root.visualFocus ? WxTheme.clBorderFocus : root.primary ? WxTheme.clPrimaryPress : WxTheme.clBorderStrong
         Behavior on color { ColorAnimation { duration: WxTheme.animFast } }
     }
     WxToolTip { text: root.tooltipText; visible: root.hovered && text !== ""; parent: root; y: root.height + 6 }

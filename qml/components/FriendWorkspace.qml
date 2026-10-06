@@ -812,96 +812,100 @@ Item {
                 }
 
                 Rectangle {
+                    id: friendActionBar
+                    objectName: "friendActionBar"
+                    readonly property bool compact: width < 900
                     Layout.fillWidth: true
-                    Layout.preferredHeight: width < 900 ? 100 : 68
+                    Layout.preferredHeight: friendActionLayout.implicitHeight + 24
                     color: WxTheme.clBgPrimary
                     border.color: WxTheme.clSurfaceBorder
                     GridLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 16
-                        anchors.rightMargin: 16
-                        columns: root.width < 900 ? 2 : 4
-                        columnSpacing: 14
-                        rowSpacing: 4
+                        id: friendActionLayout
+                        width: parent.width - 32
+                        anchors.centerIn: parent
+                        columns: friendActionBar.compact ? 1 : 2
+                        columnSpacing: 24
+                        rowSpacing: 12
                         ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: 2
+                            Layout.minimumWidth: 0
+                            Layout.preferredWidth: 1
+                            spacing: 4
                             Text {
-                                text: "执行前请核对预览"
-                                color: WxTheme.clTextPrimary
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                font.bold: true
-                            }
-                            Text {
-                                text: "异常行不可执行；任务开始后内容锁定"
-                                color: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTiny
-                            }
-                        }
-                        ColumnLayout {
-                            spacing: 1
-                            Text {
+                                Layout.fillWidth: true
                                 text: root.taskBackend && root.taskBackend.error ? root.taskBackend.error : "等待开始"
                                 color: root.taskBackend && root.taskBackend.error ? WxTheme.clDangerNew : WxTheme.clTextPrimary
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeSmall
                                 font.bold: true
-                                Layout.alignment: Qt.AlignRight
+                                wrapMode: Text.Wrap
                             }
                             Text {
+                                Layout.fillWidth: true
                                 text: root.friendBackend
-                                    ? "随机间隔 " + root.friendBackend.intervalMin + "–" + root.friendBackend.intervalMax + " 秒"
+                                    ? "已选择 " + root.friendBackend.model.selectedCount + " / " + root.friendBackend.batchLimit
+                                        + " · 随机间隔 " + root.friendBackend.intervalMin + "–" + root.friendBackend.intervalMax + " 秒"
                                     : "随机间隔 15–30 秒"
                                 color: WxTheme.clTextHint
                                 font.family: WxTheme.fontFamily
                                 font.pixelSize: WxTheme.fontSizeTiny
+                                elide: Text.ElideRight
+                                WxToolTip { text: parent.text; visible: intervalHover.containsMouse }
+                                MouseArea { id: intervalHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
                             }
                         }
-                        ColumnLayout {
-                            Layout.fillWidth: root.width < 900
-                            spacing: 1
-                            Text {
-                                text: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                    ? "仅填写并核对表单" : "将实际提交好友申请"
-                                color: WxTheme.clWarningText
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeSmall
-                                font.bold: true
-                                Layout.alignment: Qt.AlignRight
-                            }
-                            Text {
-                                text: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                    ? "验收模式不会点击最终确定"
-                                    : !root.friendSubmitAvailable
-                                        ? "Agent 提交能力不可用"
-                                        : root.appBackend && root.appBackend.agent.canStartTask
-                                            && !root.appBackend.agent.automationReady
-                                            ? "会话待恢复 · 确认后将逐条提交"
-                                            : "确认后将逐条提交，提交后无法撤回"
-                                color: WxTheme.clTextHint
-                                font.family: WxTheme.fontFamily
-                                font.pixelSize: WxTheme.fontSizeTiny
-                                Layout.alignment: Qt.AlignRight
-                            }
-                        }
-                        WxButton {
-                            objectName: "startFriendsButton"
+                        RowLayout {
+                            Layout.fillWidth: friendActionBar.compact
                             Layout.alignment: Qt.AlignRight
-                            Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
-                                ? "startFriendsButton" : text
-                            text: (root.taskBackend && root.taskBackend.acceptanceEnabled
-                                ? "开始表单预检 " : "开始添加好友 ")
-                                + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
-                            enabled: root.appBackend && root.appBackend.agent.canStartTask
-                                && !root.interactionLocked
-                                && !root.contactsBusy
-                                && root.friendSubmitAvailable
-                                && root.friendBackend && root.friendBackend.model.selectedCount > 0
-                            onClicked: root.requestFriendStart()
-                            primary: true
-                            iconName: "user_plus"
+                            spacing: 16
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                Layout.preferredWidth: 240
+                                spacing: 4
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                        ? "仅填写并核对表单" : "将实际提交好友申请"
+                                    color: WxTheme.clWarningText
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeSmall
+                                    font.bold: true
+                                    wrapMode: Text.Wrap
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                        ? "验收模式不会点击最终确定"
+                                        : !root.friendSubmitAvailable
+                                            ? "Agent 提交能力不可用"
+                                            : root.appBackend && root.appBackend.agent.canStartTask
+                                                && !root.appBackend.agent.automationReady
+                                                ? "会话待恢复 · 确认后将逐条提交"
+                                                : "确认后将逐条提交，提交后无法撤回"
+                                    color: WxTheme.clTextHint
+                                    font.family: WxTheme.fontFamily
+                                    font.pixelSize: WxTheme.fontSizeTiny
+                                    wrapMode: Text.Wrap
+                                }
+                            }
+                            WxButton {
+                                objectName: "startFriendsButton"
+                                Layout.alignment: Qt.AlignRight
+                                Accessible.name: root.taskBackend && root.taskBackend.acceptanceEnabled
+                                    ? "startFriendsButton" : text
+                                text: (root.taskBackend && root.taskBackend.acceptanceEnabled
+                                    ? "开始表单预检 " : "开始添加好友 ")
+                                    + (root.friendBackend ? root.friendBackend.model.selectedCount : 0) + " 人"
+                                enabled: root.appBackend && root.appBackend.agent.canStartTask
+                                    && !root.interactionLocked
+                                    && !root.contactsBusy
+                                    && root.friendSubmitAvailable
+                                    && root.friendBackend && root.friendBackend.model.selectedCount > 0
+                                onClicked: root.requestFriendStart()
+                                primary: true
+                                iconName: "user_plus"
+                            }
                         }
                     }
                 }

@@ -136,5 +136,96 @@ def test_actual_sidebar_and_active_appearance_settings():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def exercise_layout(case):
+    import tempfile
+    from PySide6.QtCore import QUrl, QPointF
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQuick import QQuickItem
+    from PySide6.QtTest import QTest
+
+    app = QGuiApplication([])
+    with tempfile.TemporaryDirectory() as directory:
+        backend, _ = make_backend(Path(directory))
+        engine = QQmlApplicationEngine()
+        engine.rootContext().setContextProperty("testBackend", backend)
+        engine.loadData(b'''import QtQuick
+import QtQuick.Controls.Basic
+import "qml"
+ApplicationWindow {
+    width: 1320; height: 880; visible: true
+    App { anchors.fill: parent; appBackend: testBackend; workspaceIndex: 1 }
+}''', QUrl.fromLocalFile(str(ROOT / "layout-test.qml")))
+        assert engine.rootObjects()
+        window = engine.rootObjects()[0]
+
+        def items(parent=None):
+            pending = [parent or window.contentItem()]
+            while pending:
+                item = pending.pop()
+                yield item
+                pending.extend(item.childItems())
+
+        def find(name):
+            return next(item for item in items() if item.objectName() == name)
+
+        def text_item(value):
+            return next(item for item in items() if item.isVisible() and item.property("text") == value)
+
+        def center(item):
+            return item.mapToScene(QPointF(item.width() / 2, item.height() / 2))
+
+        for width, height in [(1320, 880), (960, 680)]:
+            window.resize(width, height)
+            for collapsed in [True, False]:
+                backend.settings.sidebarCollapsed = collapsed
+                for dark in [False, True]:
+                    backend.settings.isDark = dark
+                    QTest.qWait(80)
+                    if case == "sidebar":
+                        sidebar = find("workspaceSidebar")
+                        buttons = [find(name) for name in ["sidebarCollapseButton", "messageWorkspaceTab",
+                                   "friendWorkspaceTab", "contactWorkspaceTab", "sidebarSettingsButton"]]
+                        buttons.append(next(item for item in items(sidebar) if item.property("iconName") in ("moon", "sun")))
+                        icons = [next(item for item in items(button) if item.property("iconSource")) for button in buttons]
+                        assert all(round(button.height()) == 42 for button in buttons)
+                        assert all(icon.property("iconSize") == 18 for icon in icons)
+                        if collapsed:
+                            assert all(abs(center(icon).x() - center(sidebar).x()) < 1 for icon in icons), [center(icon).x() for icon in icons]
+                        else:
+                            assert max(center(icon).x() for icon in icons[1:]) - min(center(icon).x() for icon in icons[1:]) < 1
+                    else:
+                        status = text_item("等待开始")
+                        interval = next(item for item in items() if item.isVisible() and isinstance(item.property("text"), str)
+                                        and "随机间隔 15–30 秒" in item.property("text"))
+                        status_x = status.mapToScene(QPointF()).x()
+                        interval_x = interval.mapToScene(QPointF()).x()
+                        assert abs(status_x - interval_x) < 1, (status_x, interval_x)
+                        button = find("startFriendsButton")
+                        warning = text_item("将实际提交好友申请")
+                        assert warning.mapToScene(QPointF()).x() >= status_x
+                        assert warning.mapToScene(QPointF(warning.width(), 0)).x() + 12 <= button.mapToScene(QPointF()).x()
+                        for item in (status, interval, warning, button):
+                            top_left = item.mapToScene(QPointF())
+                            bottom_right = item.mapToScene(QPointF(item.width(), item.height()))
+                            assert 0 <= top_left.x() < bottom_right.x() <= width
+                            assert 0 <= top_left.y() < bottom_right.y() <= height
+        backend.shutdown()
+        window.close()
+        engine.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("case", ["sidebar", "footer"])
+def test_actual_sidebar_and_friend_footer_alignment(case):
+    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "QSG_RHI_BACKEND": "software", "PYTHONPATH": str(ROOT)}
+    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--layout", case], cwd=ROOT,
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 if __name__ == "__main__":
-    exercise()
+    if "--layout" in sys.argv:
+        exercise_layout(sys.argv[-1])
+    else:
+        exercise()

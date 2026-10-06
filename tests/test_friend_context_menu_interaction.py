@@ -272,8 +272,12 @@ def _exercise_context_menu() -> None:
     QTest.qWait(100)
     assert all(model.record_at(row).account != target_account for row in range(model.count))
     assert QMetaObject.invokeMethod(root, "appendManualRecord")
-    QTest.qWait(100)
     last_row = model.count - 1
+    # The viewport changed; wait for Qt's row-positioning animation, not a fixed frame delay.
+    for _ in range(50):
+        if float(table.property("contentY")) + table.height() >= (last_row + 1) * 40:
+            break
+        QTest.qWait(20)
     content_y = float(table.property("contentY"))
     assert content_y <= last_row * 40
     assert content_y + table.height() >= (last_row + 1) * 40, (content_y, table.height(), last_row)
