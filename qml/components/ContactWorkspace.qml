@@ -26,6 +26,18 @@ Item {
     property string pendingExportFormat: "xlsx"
     property var overwritePaths: []
     property bool sourceExpanded: false
+    property var hoveredCell: null
+    readonly property int hoveredRow: hoveredCell ? hoveredCell.row : -1
+    readonly property bool wideToolbar: width >= 1152
+    readonly property string emptyState: {
+        if (contactsBackend && contactsBackend.visibleCount > 0) return ""
+        if (contactsBackend && contactsBackend.totalCount > 0) return "filtered"
+        if (busy) return "loading"
+        if (accounts.length === 0) return "no_account"
+        if (contactsBackend && contactsBackend.errorMessage) return "error"
+        if (contactsBackend && contactsBackend.phase === "ready") return "empty"
+        return "idle"
+    }
     onColumnWidthsChanged: Qt.callLater(root.forceTableLayout)
 
     function accountIndex() {
@@ -69,6 +81,7 @@ Item {
     onTableModelChanged: Qt.callLater(root.forceTableLayout)
     onVisibleChanged: {
         if (visible) Qt.callLater(root.forceTableLayout)
+        else root.hoveredCell = null
     }
 
     function requestExport() {
@@ -147,6 +160,7 @@ Item {
         target: root.tableModel || null
         ignoreUnknownSignals: true
         function onModelReset() {
+            root.hoveredCell = null
             Qt.callLater(root.forceTableLayout)
         }
     }
@@ -169,31 +183,53 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        WorkspaceHeader {
+        Item {
             objectName: "contactPageHeader"
             Layout.fillWidth: true
-            Layout.preferredHeight: implicitHeight
-            eyebrow: "工作区 / 联系人"
-            title: "微信联系人导出"
-            titleObjectName: "contactPageTitle"
-            Text {
-                text: "本次会话数据"
-                textFormat: Text.PlainText
-                color: WxTheme.clTextSecondary
-                font.family: WxTheme.fontFamily
-                font.pixelSize: WxTheme.fontSizeSmall
-            }
-            WxButton {
-                objectName: "contactSourceToggleButton"
-                text: "数据来源"
-                iconName: "database"
-                tooltipText: "微信数据目录"
-                Accessible.name: "微信数据目录"
-                checkable: true
-                checked: root.sourceExpanded
-                onClicked: {
-                    sourceField.focus = false
-                    root.sourceExpanded = !root.sourceExpanded
+            Layout.preferredHeight: 80
+            readonly property string eyebrow: "工作区 / 联系人"
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 16
+                anchors.leftMargin: 24
+                anchors.rightMargin: 24
+                spacing: 16
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 4
+                    Text {
+                        text: "工作区 / 联系人"
+                        textFormat: Text.PlainText
+                        color: WxTheme.clTextSecondary
+                        font.family: WxTheme.fontFamily
+                        font.pixelSize: WxTheme.fontSizeSmall
+                    }
+                    Text {
+                        objectName: "contactPageTitle"
+                        Layout.fillWidth: true
+                        text: "微信联系人导出"
+                        textFormat: Text.PlainText
+                        color: WxTheme.clTextPrimary
+                        font.family: WxTheme.fontFamily
+                        font.pixelSize: WxTheme.fontSizeTitle
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideRight
+                    }
+                }
+                WxButton {
+                    objectName: "contactSourceToggleButton"
+                    text: "数据来源"
+                    iconName: "database"
+                    tooltipText: "微信数据目录"
+                    Accessible.name: "微信数据目录"
+                    quiet: true
+                    checkable: true
+                    checked: root.sourceExpanded
+                    onClicked: {
+                        sourceField.focus = false
+                        root.sourceExpanded = !root.sourceExpanded
+                    }
                 }
             }
         }
@@ -257,160 +293,181 @@ Item {
             }
         }
 
-        Rectangle {
-            objectName: "contactAccountBar"
+        Item {
+            objectName: "contactToolbar"
             Layout.fillWidth: true
-            Layout.preferredHeight: 54
-            color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
-            RowLayout {
+            Layout.preferredHeight: root.wideToolbar ? 60 : 108
+            GridLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 24
                 anchors.rightMargin: 24
+                anchors.topMargin: 12
                 anchors.bottomMargin: 12
-                spacing: 8
-                WxIcon {
-                    iconSource: "../icons/user.svg"
-                    iconColor: WxTheme.clTextSecondary
-                    iconSize: 16
-                    hoverScale: false
-                }
-                WxComboBox {
-                    id: accountSelector
-                    objectName: "contactAccountSelector"
-                    Accessible.name: "微信账号"
-                    Layout.preferredWidth: 320
+                columns: root.wideToolbar ? 3 : 2
+                columnSpacing: 16
+                rowSpacing: 12
+                RowLayout {
+                    objectName: "contactAccountBar"
+                    Layout.row: 0
+                    Layout.column: 0
+                    Layout.minimumWidth: 164
+                    Layout.maximumWidth: 324
+                    Layout.preferredWidth: 324
                     Layout.fillWidth: true
-                    Layout.maximumWidth: 320
-                    Layout.minimumWidth: 0
-                    implicitWidth: 180
-                    model: root.accounts
-                    textRole: "label"
-                    valueRole: "accountId"
-                    currentIndex: root.accountIndex()
-                    enabled: !!root.contactsBackend && !root.busy
-                    onActivated: function(index) {
-                        if (root.contactsBackend && !root.busy && index >= 0 && index < root.accounts.length)
-                            root.contactsBackend.selectedAccountId = root.accounts[index].accountId
-                    }
-                }
-                WxButton {
-                    objectName: "contactRefreshButton"
-                    Accessible.name: "刷新账号"
-                    iconName: "refresh"
-                    tooltipText: "刷新账号"
-                    quiet: true
-                    Layout.preferredWidth: 36
-                    enabled: !!root.contactsBackend && !root.busy
-                    onClicked: {
-                        if (root.contactsBackend && !root.busy) root.contactsBackend.refreshAccounts()
-                    }
-                }
-                Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
-                WxButton {
-                    objectName: "contactReadButton"
-                    Accessible.name: text
-                    text: "读取联系人"
-                    iconName: "database"
-                    enabled: root.canRead
-                    onClicked: {
-                        if (root.canRead) root.contactsBackend.readContacts()
-                    }
-                }
-                WxButton {
-                    objectName: "contactElevationButton"
-                    text: "管理员读取"
-                    tooltipText: "以管理员权限读取"
-                    Accessible.name: "以管理员权限读取"
-                    visible: !!(root.contactsBackend && root.contactsBackend.requiresElevation)
-                    enabled: root.canRead && visible
-                    onClicked: {
-                        if (root.canRead && root.contactsBackend.requiresElevation)
-                            root.contactsBackend.readAsAdministrator()
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 60
-            color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: 24
-                anchors.rightMargin: 24
-                spacing: 12
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: 0
-                    Layout.preferredHeight: 36
-                    radius: 6
-                    color: WxTheme.clFieldFill
-                    border.color: searchField.activeFocus ? WxTheme.clBorderFocus : WxTheme.clBorderStrong
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 4
-                        spacing: 8
-                        WxIcon {
-                            iconSource: "../icons/search.svg"
-                            iconColor: WxTheme.clTextSecondary
-                            iconSize: 16
-                            hoverScale: false
+                    spacing: 8
+                    WxComboBox {
+                        id: accountSelector
+                        objectName: "contactAccountSelector"
+                        Accessible.name: "微信账号"
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 280
+                        Layout.maximumWidth: 280
+                        Layout.minimumWidth: 120
+                        model: root.accounts
+                        textRole: "label"
+                        valueRole: "accountId"
+                        currentIndex: root.accountIndex()
+                        enabled: !!root.contactsBackend && !root.busy
+                        contentItem: Text {
+                            text: accountSelector.displayText
+                            textFormat: Text.PlainText
+                            font: accountSelector.font
+                            color: WxTheme.clTextPrimary
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
                         }
-                        WxTextField {
-                            id: searchField
-                            objectName: "contactSearchField"
-                            Accessible.name: "搜索联系人"
-                            Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            placeholderText: "搜索昵称、备注、微信号"
-                            text: root.contactsBackend ? root.contactsBackend.keyword : ""
-                            enabled: !!root.contactsBackend
-                            leftPadding: 0
-                            rightPadding: 0
-                            background: null
-                            onTextEdited: {
-                                if (root.contactsBackend) root.contactsBackend.keyword = text
+                        PlainToolTip {
+                            objectName: "contactAccountToolTip"
+                            text: accountSelector.displayText
+                            visible: accountSelector.hovered && text.length > 0
+                        }
+                        onActivated: function(index) {
+                            if (root.contactsBackend && !root.busy && index >= 0 && index < root.accounts.length)
+                                root.contactsBackend.selectedAccountId = root.accounts[index].accountId
+                        }
+                    }
+                    WxButton {
+                        objectName: "contactRefreshButton"
+                        Accessible.name: "刷新账号"
+                        iconName: "refresh"
+                        tooltipText: "刷新账号"
+                        quiet: true
+                        Layout.preferredWidth: 36
+                        enabled: !!root.contactsBackend && !root.busy
+                        onClicked: {
+                            if (root.contactsBackend && !root.busy) root.contactsBackend.refreshAccounts()
+                        }
+                    }
+                }
+                RowLayout {
+                    Layout.row: 0
+                    Layout.column: root.wideToolbar ? 2 : 1
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 8
+                    WxButton {
+                        objectName: "contactReadButton"
+                        Accessible.name: text
+                        text: "读取联系人"
+                        iconName: "database"
+                        primary: root.canRead && !(root.contactsBackend && root.contactsBackend.totalCount > 0)
+                        enabled: root.canRead
+                        onClicked: {
+                            if (root.canRead) root.contactsBackend.readContacts()
+                        }
+                    }
+                    WxButton {
+                        objectName: "contactElevationButton"
+                        text: "管理员读取"
+                        tooltipText: "以管理员权限读取"
+                        Accessible.name: "以管理员权限读取"
+                        visible: !!(root.contactsBackend && root.contactsBackend.requiresElevation)
+                        enabled: root.canRead && visible
+                        onClicked: {
+                            if (root.canRead && root.contactsBackend.requiresElevation)
+                                root.contactsBackend.readAsAdministrator()
+                        }
+                    }
+                }
+                RowLayout {
+                    Layout.row: root.wideToolbar ? 0 : 1
+                    Layout.column: root.wideToolbar ? 1 : 0
+                    Layout.columnSpan: root.wideToolbar ? 1 : 2
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    spacing: 12
+                    Rectangle {
+                        objectName: "contactSearchContainer"
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 480
+                        Layout.minimumWidth: 120
+                        Layout.preferredHeight: 36
+                        radius: 6
+                        color: WxTheme.clFieldFill
+                        border.color: searchField.activeFocus ? WxTheme.clBorderFocus : WxTheme.clBorderStrong
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 4
+                            spacing: 8
+                            WxIcon {
+                                iconSource: "../icons/search.svg"
+                                iconColor: WxTheme.clTextSecondary
+                                iconSize: 16
+                                hoverScale: false
+                            }
+                            WxTextField {
+                                id: searchField
+                                objectName: "contactSearchField"
+                                Accessible.name: "搜索联系人"
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                placeholderText: "搜索昵称、备注、微信号"
+                                text: root.contactsBackend ? root.contactsBackend.keyword : ""
+                                enabled: !!root.contactsBackend
+                                leftPadding: 0
+                                rightPadding: 0
+                                background: null
+                                onTextEdited: {
+                                    if (root.contactsBackend) root.contactsBackend.keyword = text
+                                }
+                            }
+                            WxButton {
+                                objectName: "contactClearSearchButton"
+                                iconName: "close"
+                                tooltipText: "清除搜索"
+                                Accessible.name: tooltipText
+                                quiet: true
+                                Layout.preferredWidth: 28
+                                Layout.preferredHeight: 28
+                                enabled: !!root.contactsBackend && searchField.text.length > 0
+                                onClicked: {
+                                    if (root.contactsBackend) root.contactsBackend.keyword = ""
+                                    searchField.forceActiveFocus()
+                                }
                             }
                         }
-                        WxButton {
-                            objectName: "contactClearSearchButton"
-                            iconName: "close"
-                            tooltipText: "清除搜索"
-                            Accessible.name: tooltipText
-                            quiet: true
-                            Layout.preferredWidth: 28
-                            Layout.preferredHeight: 28
-                            enabled: !!root.contactsBackend && searchField.text.length > 0
-                            onClicked: {
-                                if (root.contactsBackend) root.contactsBackend.keyword = ""
-                                searchField.forceActiveFocus()
-                            }
+                    }
+                    WxCheckBox {
+                        objectName: "contactSpecialCheckBox"
+                        text: "包含特殊账号"
+                        Accessible.name: text
+                        checked: !!(root.contactsBackend && root.contactsBackend.includeSpecial)
+                        enabled: !!root.contactsBackend
+                        onToggled: {
+                            if (root.contactsBackend) root.contactsBackend.includeSpecial = checked
                         }
                     }
-                }
-                WxCheckBox {
-                    objectName: "contactSpecialCheckBox"
-                    text: "包含特殊账号"
-                    Accessible.name: text
-                    checked: !!(root.contactsBackend && root.contactsBackend.includeSpecial)
-                    enabled: !!root.contactsBackend
-                    onToggled: {
-                        if (root.contactsBackend) root.contactsBackend.includeSpecial = checked
+                    Text {
+                        objectName: "contactCountLabel"
+                        text: root.contactsBackend
+                            ? root.contactsBackend.visibleCount + " / " + root.contactsBackend.totalCount : "0 / 0"
+                        textFormat: Text.PlainText
+                        color: WxTheme.clTextSecondary
+                        font.family: WxTheme.fontFamily
+                        font.pixelSize: WxTheme.fontSizeSmall
+                        Accessible.name: "显示 / 总数"
                     }
-                }
-                Text {
-                    objectName: "contactCountLabel"
-                    text: root.contactsBackend
-                        ? root.contactsBackend.visibleCount + " / " + root.contactsBackend.totalCount : "0 / 0"
-                    textFormat: Text.PlainText
-                    color: WxTheme.clTextSecondary
-                    font.family: WxTheme.fontFamily
-                    font.pixelSize: WxTheme.fontSizeSmall
-                    Accessible.name: "显示 / 总数"
+                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
                 }
             }
         }
@@ -452,7 +509,7 @@ Item {
                             textFormat: Text.PlainText
                             font.family: WxTheme.fontFamily
                             font.pixelSize: WxTheme.fontSizeSmall
-                            font.bold: true
+                            font.weight: Font.Medium
                             color: WxTheme.clTextSecondary
                             elide: Text.ElideRight
                         }
@@ -467,7 +524,13 @@ Item {
                     }
                     background: Rectangle {
                         color: headerCell.hovered ? WxTheme.clBgHover : WxTheme.clBgSecondary
-                        border.color: WxTheme.clSurfaceBorder
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 1
+                            color: WxTheme.clDivider
+                        }
                     }
                 }
             }
@@ -489,26 +552,36 @@ Item {
                 ScrollBar.vertical: WxScrollBar {
                     objectName: "contactVerticalScrollBar"
                     policy: ScrollBar.AsNeeded
+                    visible: contactTable.contentHeight > contactTable.height + 1
                 }
                 ScrollBar.horizontal: WxScrollBar {
                     objectName: "contactHorizontalScrollBar"
                     policy: ScrollBar.AsNeeded
+                    visible: contactTable.contentWidth > contactTable.width + 1
                 }
                 delegate: Rectangle {
                     id: cell
                     required property int row
                     required property int column
                     required property var model
+                    TableView.onPooled: if (root.hoveredCell === cell) root.hoveredCell = null
+                    Component.onDestruction: if (root && root.hoveredCell === cell) root.hoveredCell = null
                     readonly property string cellValue: model && model.cellText !== undefined
                         ? String(model.cellText) : model && model.display !== undefined ? String(model.display) : ""
                     objectName: "contactCell-" + row + "-" + column
                     implicitWidth: root.columnWidths[column]
                     implicitHeight: 40
-                    color: cellMouse.containsMouse ? WxTheme.clBgSelected
+                    color: root.hoveredRow === row ? WxTheme.clBgHover
                         : row % 2 ? WxTheme.clRowAlternate : WxTheme.clBgPrimary
                     Accessible.role: Accessible.StaticText
                     Accessible.name: cellValue
-                    border.color: WxTheme.clSurfaceBorder
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 1
+                        color: WxTheme.clDivider
+                    }
                     Text {
                         objectName: "contactCellText-" + cell.row + "-" + cell.column
                         anchors.fill: parent
@@ -532,6 +605,8 @@ Item {
                         id: cellMouse
                         anchors.fill: parent
                         hoverEnabled: true
+                        onEntered: root.hoveredCell = cell
+                        onExited: if (root.hoveredCell === cell) root.hoveredCell = null
                         onDoubleClicked: {
                             if (root.contactsBackend && root.tableModel && !root.operationBlocked)
                                 root.contactsBackend.copyCell(cell.row, cell.column)
@@ -539,13 +614,87 @@ Item {
                     }
                 }
             }
+            ColumnLayout {
+                objectName: "contactEmptyState"
+                anchors.centerIn: contactTable
+                width: Math.min(440, contactTable.width - 48)
+                spacing: 12
+                visible: root.emptyState !== ""
+                BusyIndicator {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: 32
+                    Layout.preferredHeight: 32
+                    visible: root.emptyState === "loading"
+                    running: visible
+                }
+                WxIcon {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.emptyState !== "loading"
+                    iconSource: root.emptyState === "filtered" ? "../icons/search.svg"
+                        : root.emptyState === "no_account" ? "../icons/users.svg" : "../icons/database.svg"
+                    iconColor: WxTheme.clTextHint
+                    iconSize: 32
+                    hoverScale: false
+                }
+                Text {
+                    objectName: "contactEmptyTitle"
+                    Layout.fillWidth: true
+                    text: root.emptyState === "filtered" ? "没有匹配的联系人"
+                        : root.emptyState === "loading" ? "正在读取联系人"
+                        : root.emptyState === "no_account" ? "未发现账号"
+                        : root.emptyState === "error" ? "读取失败"
+                        : root.emptyState === "empty" ? "暂无联系人" : "尚未读取联系人"
+                    textFormat: Text.PlainText
+                    horizontalAlignment: Text.AlignHCenter
+                    color: WxTheme.clTextSecondary
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeNormal
+                }
+                Text {
+                    id: emptyDetail
+                    objectName: "contactEmptyDetail"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    text: root.contactsBackend && root.emptyState === "loading" ? root.contactsBackend.statusText
+                        : root.contactsBackend && (root.emptyState === "error" || root.emptyState === "no_account")
+                            ? root.contactsBackend.errorMessage : ""
+                    textFormat: Text.PlainText
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                    color: WxTheme.clTextHint
+                    font.family: WxTheme.fontFamily
+                    font.pixelSize: WxTheme.fontSizeSmall
+                    PlainToolTip { text: emptyDetail.text; visible: emptyDetailHover.containsMouse && text.length > 0 }
+                    MouseArea { id: emptyDetailHover; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton }
+                }
+                WxButton {
+                    objectName: "contactEmptyActionButton"
+                    Layout.alignment: Qt.AlignHCenter
+                    text: root.emptyState === "no_account" ? "数据来源" : "清除搜索"
+                    visible: root.emptyState === "no_account"
+                        || (root.emptyState === "filtered" && !!root.contactsBackend && root.contactsBackend.keyword.length > 0)
+                    onClicked: {
+                        if (root.emptyState === "no_account") root.sourceExpanded = true
+                        else if (root.contactsBackend) root.contactsBackend.keyword = ""
+                    }
+                }
+            }
         }
 
         Rectangle {
+            objectName: "contactFooter"
             Layout.fillWidth: true
-            Layout.preferredHeight: 70
+            Layout.preferredHeight: 56
             color: WxTheme.clToolbarFill
-            border.color: WxTheme.clSurfaceBorder
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 1
+                color: WxTheme.clDivider
+            }
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 24
@@ -592,22 +741,13 @@ Item {
                             acceptedButtons: Qt.NoButton
                         }
                     }
-                    Text {
-                        Layout.fillWidth: true
-                        text: root.contactsBackend ? "显示 " + root.contactsBackend.visibleCount
-                            + " / " + root.contactsBackend.totalCount + " 位联系人" : "当前会话数据"
-                        textFormat: Text.PlainText
-                        color: WxTheme.clTextSecondary
-                        font.family: WxTheme.fontFamily
-                        font.pixelSize: WxTheme.fontSizeSmall
-                        elide: Text.ElideRight
-                    }
                 }
                 Text {
                     objectName: "contactElapsedLabel"
                     Accessible.role: Accessible.StaticText
                     Accessible.name: text
                     text: root.contactsBackend ? root.contactsBackend.elapsedText : ""
+                    visible: !!root.contactsBackend && (root.busy || root.contactsBackend.phase !== "idle")
                     textFormat: Text.PlainText
                     color: WxTheme.clTextHint
                     font.family: WxTheme.fontFamily
@@ -654,7 +794,7 @@ Item {
                     Accessible.name: "导出"
                     text: "导出联系人"
                     iconName: "export"
-                    primary: true
+                    primary: root.canExport
                     enabled: root.canExport
                     onClicked: { if (root.canExport) exportConfirmDialog.open() }
                 }

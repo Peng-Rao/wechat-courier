@@ -199,6 +199,125 @@ TestCase {
         verify(account.mapToItem(workspace, 0, 0).y > control("contactPageHeader").height)
     }
 
+    function test_refined_toolbar_reflows_without_recreating_controls() {
+        var account = control("contactAccountSelector")
+        var search = control("contactSearchField")
+        contacts.keyword = "kept draft"
+        for (var width of [1320, 1152, 1104, 744, 1320]) {
+            host.width = width
+            wait(80)
+            compare(control("contactAccountSelector"), account)
+            compare(control("contactSearchField"), search)
+            compare(search.text, "kept draft")
+            verify(control("contactPageHeader").height <= 84)
+            var toolbar = control("contactToolbar")
+            var accountY = account.mapToItem(workspace, 0, 0).y
+            var searchY = search.mapToItem(workspace, 0, 0).y
+            if (width >= 1152) {
+                fuzzyCompare(accountY, searchY, 1)
+                verify(toolbar.height <= 64)
+            } else {
+                verify(searchY >= accountY + account.height + 8)
+                verify(toolbar.height <= 112)
+            }
+            verify(account.width <= 280)
+            verify(control("contactSearchContainer").width <= 480)
+        }
+    }
+
+    function test_initial_state_prioritizes_read_and_hides_unused_elapsed() {
+        compare(control("contactEmptyState").visible, true)
+        compare(control("contactEmptyTitle").text, "尚未读取联系人")
+        compare(control("contactReadButton").primary, true)
+        compare(control("contactExportButton").primary, false)
+        compare(control("contactElapsedLabel").visible, false)
+        verify(control("contactFooter").height <= 60)
+        loadRows(2)
+        contacts.phase = "ready"
+        contacts.elapsedText = "00:00:03"
+        compare(control("contactEmptyState").visible, false)
+        compare(control("contactReadButton").primary, false)
+        compare(control("contactExportButton").primary, true)
+        compare(control("contactElapsedLabel").visible, true)
+        contacts.operationBlocked = true
+        compare(control("contactExportButton").primary, false)
+    }
+
+    function test_empty_states_use_real_stage_and_explicit_actions() {
+        contacts.accounts = []
+        contacts.selectedAccountId = ""
+        contacts.canRead = false
+        compare(control("contactEmptyTitle").text, "未发现账号")
+        click("contactEmptyActionButton")
+        compare(control("contactSourcePanel").visible, true)
+        contacts.accounts = [{accountId: "first", label: "First"}]
+        contacts.selectedAccountId = "first"
+        contacts.busy = true
+        contacts.phase = "keys"
+        contacts.statusText = "正在查找联系人库密钥"
+        compare(control("contactEmptyTitle").text, "正在读取联系人")
+        compare(control("contactEmptyDetail").text, contacts.statusText)
+        compare(control("contactEmptyActionButton").visible, false)
+        contacts.busy = false
+        contacts.phase = "error"
+        contacts.errorMessage = "读取权限不足，可单独授权联系人读取进程。"
+        contacts.requiresElevation = true
+        compare(control("contactEmptyTitle").text, "读取失败")
+        compare(control("contactEmptyDetail").text, contacts.errorMessage)
+        compare(control("contactElevationButton").visible, true)
+        loadRows(2)
+        contacts.busy = true
+        compare(control("contactEmptyState").visible, false)
+        contacts.busy = false
+        compare(control("contactEmptyState").visible, false)
+        contacts.visibleCount = 0
+        contacts.keyword = "missing"
+        compare(control("contactEmptyTitle").text, "没有匹配的联系人")
+        click("contactEmptyActionButton")
+        compare(contacts.keyword, "")
+    }
+
+    function test_whole_row_hover_and_scrollbars_follow_content() {
+        loadRows(2)
+        host.width = 1320
+        wait(100)
+        mouseMove(control("contactCell-0-0"), 20, 20)
+        tryCompare(workspace, "hoveredRow", 0)
+        compare(control("contactCell-0-0").color, control("contactCell-0-5").color)
+        verify(control("contactCell-0-0").color !== control("contactCell-1-0").color)
+        compare(control("contactHorizontalScrollBar").visible, false)
+        compare(control("contactVerticalScrollBar").visible, false)
+        loadRows(200)
+        wait(100)
+        compare(control("contactVerticalScrollBar").visible, true)
+    }
+
+    function test_row_hover_survives_cross_column_exit_order_and_recycling() {
+        loadRows(200)
+        host.width = 1320
+        wait(100)
+        for (var column of [0, 1, 2, 5, 3]) {
+            mouseMove(control("contactCell-0-" + column), 20, 20)
+            tryCompare(workspace, "hoveredRow", 0)
+        }
+        function area(cell) {
+            for (var child of cell.children)
+                if (typeof child.entered === "function" && typeof child.exited === "function") return child
+            fail("cell hover area is missing")
+        }
+        // A destination enter can precede the previous delegate's exit.
+        area(control("contactCell-0-1")).entered()
+        area(control("contactCell-0-0")).exited()
+        compare(workspace.hoveredRow, 0)
+        control("contactTable").contentY = 4800
+        wait(100)
+        verify(workspace.hoveredRow === -1 || workspace.hoveredRow >= 100, "pooled delegates cannot retain row 0 hover")
+        mouseMove(control("contactCell-120-0"), 20, 20)
+        tryCompare(workspace, "hoveredRow", 120)
+        mouseMove(control("contactHeader"), 20, 20)
+        tryCompare(workspace, "hoveredRow", -1)
+    }
+
     function test_table_fills_wide_view_and_remains_aligned_after_resize() {
         loadRows(200)
         for (var width of [1560, 744, 1320, 960]) {

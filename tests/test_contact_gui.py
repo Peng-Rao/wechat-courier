@@ -91,6 +91,9 @@ Window {
         click("contactRefreshButton")
         assert contacts.accounts, "no local accounts discovered"
         assert contacts.sourceDirectory
+        assert find("contactEmptyTitle").property("text") == "尚未读取联系人"
+        assert find("contactElapsedLabel") is None
+        assert find("contactReadButton").property("primary")
         assert find("contactSourceField") is None
         click("contactSourceToggleButton")
         assert find("contactSourceField").property("text") == contacts.sourceDirectory
@@ -108,6 +111,10 @@ Window {
         wait_done()
         assert contacts.phase == "ready", contacts.errorMessage
         QTest.qWait(180)
+        assert find("contactEmptyState") is None
+        assert not find("contactReadButton").property("primary")
+        assert find("contactExportButton").property("primary")
+        assert find("contactElapsedLabel") is not None
         if live:
             import hashlib
             import threading
@@ -286,6 +293,7 @@ Window {
         click("contactCancelButton")
         wait_done(10)
         assert contacts.phase == "cancelled"
+        assert contacts.totalCount == 90 and find("contactEmptyState") is None
         click("contactReadButton")
         wait_done()
         assert contacts.phase == "ready"
