@@ -1,5 +1,7 @@
 # 福格微信助手
 
+**macOS 版本**：在 `codex/macos-version` 分支独立开发。原生 SwiftUI 基础版已提供三个工作区、文件导入导出和本地演练；真实微信自动化及数据库读取仍待适配。详见 [macOS 构建与功能说明](macos/README.md)，运行 `./script/build_and_run.sh` 启动。
+
 面向 Windows 个人微信客户端的消息群发、自动发送好友申请与联系人导出助手。1.0.0 使用 PySide6/QML 提供桌面界面，微信 UI Automation 操作隔离到 `wechat-agent.exe`，联系人只读获取隔离到 `wechat-contact-reader.exe`。
 
 > 当前代码是 1.0.0 修复检查点，不是已通过完整实机验收的正式包。40 次独立 GUI 任务、普通附件、60 分钟混合运行及安装升级门禁尚未全部通过。单元测试和构建成功不代表软件实机稳定性已获确认。

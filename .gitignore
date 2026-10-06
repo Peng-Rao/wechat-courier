@@ -25,3 +25,5 @@ scratch/
 /artifacts/
 /.artifacts/
 /.tmp-test.xml
+/macos/.build/
+/macos/.swiftpm/
