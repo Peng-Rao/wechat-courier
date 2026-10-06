@@ -12,7 +12,7 @@ struct MonitorView: View {
                 metric("累计耗时", value: elapsed)
                 Spacer()
                 if store.running {
-                    Label(store.paused ? "已暂停" : "校验中", systemImage: store.paused ? "pause.circle.fill" : "play.circle.fill")
+                    Label(store.paused ? "等待暂停" : "执行中", systemImage: store.paused ? "pause.circle.fill" : "play.circle.fill")
                         .foregroundStyle(store.paused ? .orange : .green)
                 }
             }.padding(20).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))

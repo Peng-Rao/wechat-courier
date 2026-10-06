@@ -51,9 +51,12 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-# Ad-hoc signing is for local development; distribution needs Developer ID signing.
-codesign --force --sign - --identifier "$BUNDLE_ID.agent" "$APP_BUNDLE/Contents/MacOS/WeChatMacAgent"
-codesign --force --sign - "$APP_BUNDLE"
+# An existing Apple Development identity keeps privacy authorization stable
+# across local rebuilds. Distribution still needs Developer ID/notarization.
+SIGN_IDENTITY="${COURIER_SIGN_IDENTITY:-$(security find-identity -p codesigning -v | awk '/"Apple Development:/ {print $2; exit}')}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID.agent" "$APP_BUNDLE/Contents/MacOS/WeChatMacAgent"
+codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 
 case "$MODE" in
   --build|build) echo "Built: $APP_BUNDLE" ;;

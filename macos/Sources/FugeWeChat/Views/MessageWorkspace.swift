@@ -6,6 +6,8 @@ struct MessageWorkspace: View {
     @AppStorage("interval") private var interval = 1.0
     @State private var previewName = ""
     @State private var confirmRehearsal = false
+    @State private var confirmSend = false
+    @State private var confirmTest = false
 
     private var preview: String {
         let name = store.recipients.first(where: { $0.name == previewName })?.name ?? store.recipients.first?.name ?? "好友称呼"
@@ -50,7 +52,7 @@ struct MessageWorkspace: View {
                         Button { addAttachments() } label: { Label("添加附件", systemImage: "paperclip") }
                     }
                     if store.attachments.isEmpty {
-                        Text("可整理图片、文档等附件；基础版演练不会发送附件。")
+                        Text("文件传输助手可发送附件；本地演练仅检查文件是否可读。")
                             .font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
                     } else {
                         ScrollView {
@@ -91,9 +93,11 @@ struct MessageWorkspace: View {
             }.disabled(store.running || store.busy)
             Divider()
             HStack {
-                Label("发送适配完成后开放真实群发", systemImage: "lock").font(.caption).foregroundStyle(.secondary)
+                Label("实机适配仅开放文件传输助手", systemImage: "checkmark.shield").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("开始发送") {}.disabled(true)
+                Button("文件传输助手测试…") { confirmTest = true }.disabled(store.running || store.busy)
+                Button("开始发送…") { confirmSend = true }
+                    .disabled(store.running || store.busy || store.recipients.count != 1 || !FileTransferGuard.isTarget(store.recipients.first?.name ?? ""))
                 Button("本地演练…") {
                     do { _ = try store.messageItems(); confirmRehearsal = true }
                     catch { store.error = error.localizedDescription }
@@ -107,6 +111,12 @@ struct MessageWorkspace: View {
                 catch { store.error = error.localizedDescription }
             }
         } message: { Text("冻结当前名单与消息，检查模板和附件。不会操作微信或发送任何内容。") }
+        .confirmationDialog("向文件传输助手发送当前内容？", isPresented: $confirmSend, titleVisibility: .visible) {
+            Button("发送文字和 \(store.attachments.count) 个附件") { store.sendFileTransfer() }
+        } message: { Text("将操作前台微信。发送期间请不要切换、移动窗口或操作鼠标键盘；暂停在两条内容之间生效。核验失败会停止，不会自动重发。") }
+        .confirmationDialog("测试文件传输助手？", isPresented: $confirmTest, titleVisibility: .visible) {
+            Button("发送新建测试文字和测试文件") { store.testFileTransfer() }
+        } message: { Text("只向文件传输助手发送带唯一编号的测试文字和临时文本文件。请先将该会话放在微信左侧可见位置，并清空输入框。") }
     }
 
     private func importRoster() {

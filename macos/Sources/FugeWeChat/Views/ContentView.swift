@@ -21,7 +21,7 @@ struct ContentView: View {
                     Label(workspace.title, systemImage: workspace.icon).tag(workspace)
                 }.listStyle(.sidebar)
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(store.running ? "本地演练进行中" : "自动化适配中", systemImage: store.running ? "play.circle" : "wrench.and.screwdriver")
+                    Label(store.running ? "任务进行中" : "文件传输助手适配", systemImage: store.running ? "play.circle" : "wrench.and.screwdriver")
                         .font(.caption).foregroundStyle(.secondary)
                     SettingsLink { Label("参数设置", systemImage: "gearshape") }
                         .buttonStyle(.plain)
@@ -41,7 +41,7 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 HStack {
-                    Text(store.notice.isEmpty ? "内容在本机处理 · 当前版本不执行真实发送或申请" : store.notice)
+                    Text(store.notice.isEmpty ? "实机发送仅限文件传输助手 · 好友申请为本地演练" : store.notice)
                         .lineLimit(1)
                     Spacer()
                     if store.busy { ProgressView().controlSize(.small) }
@@ -69,7 +69,7 @@ private struct EnvironmentBanner: View {
             HStack(spacing: 12) {
                 Image(systemName: "info.circle").foregroundStyle(.orange)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("微信自动化尚未放行").font(.callout.weight(.medium))
+                    Text("文件传输助手 · 实机适配中").font(.callout.weight(.medium))
                     Text(store.checking ? "正在检测微信环境…" : store.environment.detail)
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }

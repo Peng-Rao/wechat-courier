@@ -41,8 +41,14 @@ struct SettingsView: View {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
                     }
                     Button("重新检测") { Task { await store.checkEnvironment() } }.disabled(store.checking)
+                    Button("检测屏幕识别") {
+                        Task {
+                            do { try await AgentClient.visualCheck(); store.notice = "已核验文件传输助手窗口" }
+                            catch { store.error = error.localizedDescription }
+                        }
+                    }.disabled(store.running)
                 }
-                Text("由你在系统设置中决定是否授权本应用。当前基础版不会执行真实发送、好友提交或读取微信数据库。")
+                Text("实机发送需辅助功能与屏幕录制权限，目前仅开放文件传输助手。好友申请仍为本地演练。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).padding(12).frame(width: 530, height: 650)

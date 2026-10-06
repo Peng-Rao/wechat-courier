@@ -42,8 +42,8 @@ struct AccessibilityInspector {
         for window in windows { walk(window, depth: 0) }
         report.controlsAvailable = editable > 0 && buttons > 3
         report.detail = report.controlsAvailable
-            ? "可读取微信控件；搜索、身份核验和发送适配仍待实机验收，当前仅支持本地演练"
-            : "微信未暴露聊天和输入控件，当前仅支持编辑、导出和本地演练"
+            ? "可读取微信控件；当前真实发送仅开放文件传输助手测试"
+            : "微信未暴露聊天控件；文件传输助手采用屏幕识别测试，需屏幕录制授权"
         return report
     }
 }

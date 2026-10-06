@@ -198,6 +198,66 @@ final class CourierStore {
         }
     }
 
+    func testFileTransfer() {
+        guard !running else { return }
+        do {
+            let token = String(UUID().uuidString.prefix(8))
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("FugeTest-\(token).txt")
+            try Data("Fuge macOS File Transfer attachment test \(token)\n".utf8).write(to: file, options: .atomic)
+            startFileTransfer(message: "Fuge macOS test \(token)", files: [file], temporaryFile: file)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func sendFileTransfer() {
+        do {
+            let items = try messageItems()
+            guard items.count == 1, FileTransferGuard.isTarget(items[0].target) else { throw CourierError("当前仅开放文件传输助手，请填写 File Transfer 或文件传输助手") }
+            startFileTransfer(message: items[0].message, files: attachments)
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func startFileTransfer(message: String, files: [URL], temporaryFile: URL? = nil) {
+        guard !running else { return }
+        var steps: [(TaskItem, URL?)] = []
+        if !message.isEmpty { steps.append((TaskItem(target: "File Transfer", message: message), nil)) }
+        steps += files.map { (TaskItem(target: "File Transfer", message: $0.lastPathComponent), Optional($0)) }
+        guard !steps.isEmpty else { error = "请输入测试内容"; return }
+        running = true; paused = false; elapsed = 0; completed = 0; total = steps.count
+        runTitle = "文件传输助手 · 实机发送"
+        records = steps.map { RunRecord(id: $0.0.id, kind: .message, target: $0.0.target, detail: $0.1 == nil ? "文字待发送" : "附件待发送：\($0.0.message)") }
+        workspace = .monitor
+        guard persist() else { running = false; return }
+        runTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.running = false; self.paused = false; self.runTask = nil
+                if let temporaryFile { try? FileManager.default.removeItem(at: temporaryFile) }
+            }
+            for (index, step) in steps.enumerated() {
+                guard await self.waitActive(seconds: 0) else { break }
+                self.records[index].outcome = .working; self.records[index].detail = "核验文件传输助手并准备内容"
+                guard self.persist() else { break }
+                do {
+                    let started = ContinuousClock.now
+                    let record = try await AgentClient.send(SendRequest(item: step.0, attachment: step.1, journalURL: self.journalURL))
+                    let duration = started.duration(to: .now)
+                    self.elapsed += Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
+                    self.records = try Journal.load(from: self.journalURL)
+                    if record.outcome == .success { self.completed += 1 }
+                    else { break }
+                } catch {
+                    do {
+                        self.records = Journal.recover(try Journal.load(from: self.journalURL))
+                        if !Task.isCancelled { self.error = error.localizedDescription }
+                        _ = self.persist()
+                    } catch { self.error = "无法恢复发送日志：\(error.localizedDescription)" }
+                    break
+                }
+                if index < steps.count - 1, !(await self.waitActive(seconds: 1)) { break }
+            }
+        }
+    }
+
     private func waitActive(seconds: TimeInterval) async -> Bool {
         var remaining = seconds
         repeat {
